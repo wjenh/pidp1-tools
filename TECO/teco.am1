@@ -1,0 +1,285 @@
+TECO
+// TECO for the PDP-1, Dan Murphy's editor rewritten in am1 with PDP-6 TECO's
+// command set of July 1965.
+// It can be used via telnetport 2030 or on the typewriter while sense switch 6 is on.
+//
+// It requires the PDP-1D's lai and lia, mul and div (muldiv=on), the BBN clock,
+// the Type 550 Microtape and the Type 23 drum for the E commands, and 16 banks of memory:
+//   bank 0:  the interpreter, startup, the idle loop, the clock code
+//   bank 1:  the console and the command-string reader,the paper tape, the line printer,
+//     the Type 62 unless built with  -DLPT_TYPE64=1, output to Microtape and EI EF EN /W /V (tapeout.ac);
+//     the Type 340's list builder, and the reader's buffer in its last 512 words
+//   banks 2-7: the text buffer; 8-9 q-register text with the second set's
+//     data in bank 9's top 1,024 wordsx
+//   bank 10: the typing areas, the push-down list, and above it the second set's video terminal
+//   bank 11: the display list
+//   bank 12: the file system library with the Microtape's layer, and the E commands
+//   baml 13: their handles, descriptors and buffers and the display's tables
+//   bank 14: the second command set, PDP-11 TECOs, which sense switch 4
+//     on at the greeting selects, its reader, skip, errors and commands
+//   bank 15: the Microtape's messages and EL's type-out, the greeting, the drum's layer of the
+//     library, the PDP-1 additions which are the drum as unit 9, /X, n/X, n/P and the
+//     check character, the second set's q-registers, files, and devices, its local
+//     registers and push-down list
+//
+// Sense switch 6 on puts the console on the typewriter.
+// Switch 5 on turns the Type 340 off.
+// Switch 4 on at the greeting selects the second PDP-11 command set.
+// Switch 3 turned on is a break, mostly useful with the typewriter.
+// Switch 2 on is VT100 mode in split scree mode, which is DCS2 only
+// The 340 is off as is the typewriter, regardless of switch4, 5 and 6 settings.
+//
+// Extended memory mode is always enabled.
+//
+// 14-Nov-2026 Claude/wje initial version, 1.0
+
+#include <AIDS/skipmacros.ah>
+#include <DCS/dcs2defs.ah>
+#include <CLOCK/clockdefs.ah>
+#include <MICROTAPE/microtape.ah>
+#include <DRUM/drum.ah>
+#include "teco.ah"
+#if LPT_TYPE64
+#include <LPT/type64defs.ah>
+#else
+#include <LPT/type62defs.ah>
+#endif
+
+100/
+// The starting address, which resets the console and DCS2 then goes on into restart.
+go, lem
+    eem
+    jsp i [tmInit:1]
+
+// restart -- the rest of the start, and what /G runs on DCS2 once the caller
+// is dropped and the channel listens again.
+// It leaves the buffer empty and every q-register undefined, input from paper
+// tape and output to the punch, the clock enabled and its total cleared, no
+// break armed, no command string, no tape known, and the display at size 1
+// with 20 lines a side, then goes on into idle.
+// Has no arguments and does not return.
+// Does not preserve AC or IO.
+// Entered from go, or by jmp from termio.ac's /G with the extend window open.
+restart, jsp tecoInit
+    jsp i [pgInit:1]
+    jsp i [pckInit:EX_BANK]
+    jsp i [fiInit:EX_BANK]
+    jsp i [mtInit:MT_BANK]
+    jsp i [dpyInit:1]
+    law clsena
+    cls
+    rck
+    dio ckLast
+    dzm ckHi
+    dzm ckLo
+    dzm i [brkOn:1]
+    lac [errIdle]
+    dac i [tmErr:1]
+    jsp i [cmdInit:1]
+
+// idle -- the command loop.
+// It shows the display the last string left, unless the second set's 0W,
+// split screen or VT100 mode turned it off (dpyNo, dpy11.ac, vt11.ac), chooses
+// the device, reads a command string, runs it with a break armed, and
+// begins again.
+// Has no arguments and does not return.
+// Does not preserve AC or IO.
+// Entered from restart, or by jmp from any bank with the extend window open.
+idle, lac i [dpyNo:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp i [dpyShow:1]
+    jsp i [tmReady:1]
+    lac i [tSet:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp idRd11
+    jsp i [cmdRead:1]
+idRun, law 1
+    dac i [brkOn:1]
+#ifdef TERMSHELL
+    jsp i [runStr:P11_BANK] // termshell.ac's, in place of the interpreter's
+#else
+    jsp runStr
+#endif
+    dzm i [brkOn:1]
+    jmp idle
+idRd11, jsp i [cmdRd11:P11_BANK]     // the second set's reader
+    jmp idRun
+
+// errIdle -- where tmErr leads, which ends a command string at an error.
+// AC is what tmErr was entered with, ERR_LOST, ERR_BREAK or ERR_CMD (teco.ah).
+// ERR_LOST types nothing.
+// A break is an error at the command being run, which types ? and CR LF,
+// keeps the string for ? and drops the rest.
+// A Microtape failure types its message in place of the ? (tapefile.ac's
+// errTxt).
+// In the second set an error or a break is err11's (interp11.ac), which names
+// it.
+// Does not return; it ends at idle.
+// Does not preserve AC or IO.
+// Entered by jmp from any bank with the extend window open.
+local eiErr, eiNl, eiA, eiP11
+errIdle, dzm i [brkOn:1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp eiErr
+    dzm i [errTxt:MT_BANK]
+    jmp idle
+eiErr, dac eiA
+    lac i [tSet:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp eiP11
+    lac i [errTxt:MT_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp eiMsg
+    lio [CH_QMARK]
+    jsp i [putc:1]
+eiNl, jsp i [newline:1]
+    lio i [csPos:1]
+    jsp i [cmdErr:1]
+    jmp idle
+eiMsg, jsp i [mtMsg:EX_BANK]
+    jmp eiNl
+eiP11, lac eiA
+    jmp i [err11:P11_BANK]
+eiA, 0                      // what tmErr was entered with
+endloc
+
+// clkTick -- read the BBN clock, which counts milliseconds and wraps at
+// 60,000, and add the time since the last call to TECO's running total, ckHi
+// and ckLo, 36 bits with the low 18 unsigned.
+// Has no arguments.
+// IO is the milliseconds since the last call, AC is not preserved.
+// Called via jsp, from any bank with the extend window open.
+local ckX, ckNow, ckD, ckT
+clkTick, dac ckX
+    rck
+    dio ckNow
+    // one wrap at most since the last call, as every wait calls this, never a
+    // minute apart
+    lac ckNow
+    sub ckLast
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    add [CLK_WRAP]
+    dac ckD
+    lac ckNow
+    dac ckLast
+    // ckLo's low 17 bits plus ckD cannot carry out of 18 bits, so the sum's
+    // bits are exact, and its bit 0 is the carry into ckLo's bit 0
+    lac ckLo
+    and [0377777]
+    add ckD
+    dac ckT
+    and ckLo
+    and [0400000]
+    SKIP_NEXT_IF_AC_ZERO
+    idx ckHi
+    lac ckLo
+    and [0400000]
+    xor ckT
+    dac ckLo
+    lio ckD
+    jmp i ckX
+ckX, 0
+ckNow, 0
+ckD, 0
+ckT, 0
+endloc
+
+ckLast, 0                   // the clock's last reading, 0 to 59,999
+ckHi, 0                     // TECO's running time in milliseconds, high half
+ckLo, 0                     //   and low half, unsigned
+
+// The interpreter.
+#include "interp.ac"
+#include "expr.ac"
+#include "buffer.ac"
+#include "qreg.ac"
+#include "edit.ac"
+#include "search.ac"
+#include "control.ac"
+
+constants
+
+// The file system library's calls and the Microtape's layer, then the E commands;
+// their data is in bank 13.
+bank MT_BANK
+assert MT_BANK*010000 == MT_BASE, "teco.ah's MT_BANK is MT_BASE's bank"
+#include <FILESYSTEM/fsio.ac>
+#include <MICROTAPE/mtmount.ac>
+#include <MICROTAPE/mtformat.ac>
+#include <FILESYSTEM/fsdelete.ac>
+#include <FILESYSTEM/fscreate.ac>
+#include <FILESYSTEM/fsrename.ac>
+#include <FILESYSTEM/fstrim.ac>
+#include <FILESYSTEM/fsinfo.ac>
+#include "tapefile.ac"
+constants
+mtTop,
+assert mtTop:. <= MT_DATA, "bank 12 runs into bank 13"
+
+// Bank 15 holds the Microtape's messages and EL's type-out, the greeting,
+// the PDP-1 additions with the drum's layer of the file system library,
+// and the second set's q-registers and files.
+bank EX_BANK
+#include "tapemsg.ac"
+#include "greeting.ac"
+#include <DRUM/drmount.ac>
+#include <DRUM/drformat.ac>
+#include "additions.ac"
+#include "qreg11.ac"
+#include "files11.ac"
+constants
+assert . <= LQ_BASE - EX_BANK*010000, "bank 15's code runs into the local q-registers"
+assert LQ_BASE + LQ_RECS*QR_WORDS <= (EX_BANK+1)*010000, "the local q-registers run past bank 15"
+
+// The second command set.
+bank P11_BANK
+#include "interp11.ac"
+#include "cmdread11.ac"
+#include "edit11.ac"
+#include "control11.ac"
+#include "search11.ac"
+#include "dpy11.ac"
+#ifdef TERMSHELL
+#include "termshell.ac"
+#endif
+constants
+
+// The second set's data, in bank 9's top above q-register text (teco.ah's D11_DATA),
+// read through full addresses.
+bank D11_BANK
+assert D11_BANK*010000+06000 == D11_DATA, "teco.ah's D11_DATA is 06000 in bank D11_BANK"
+6000/
+#include "data11.ac"
+
+// The second set's video terminal, in bank 10's top above the push-down list.
+bank VT_BANK
+assert VT_BANK*010000+06000 == VT_BASE, "teco.ah's VT_BASE is 06000 in bank VT_BANK"
+assert PDL_END == VT_BASE, "the push-down list runs into vt11.ac"
+6000/
+#include "vt11.ac"
+constants
+
+// Bank 1 comes last, because the Type 340's names (up, left, end, ...) are for
+// the display alone, and would change the library's labels of the same names.
+bank 1
+#include "termio.ac"
+#include "cmdread.ac"
+#include "pageio.ac"
+#include "ptape.ac"
+#include "lpt.ac"
+#include "tapeout.ac"
+#include "ttytab.ac"
+#include "termdata.ac"
+#include <TYPE340/type340defs.ah>
+#include "display.ac"
+constants
+assert . <= RDB_BASE - 010000, "bank 1's code runs into the reader's buffer"
+
+// The display's tables, in bank 13's free end above the Microtape's data (teco.ah's
+// DPY_TABS), read through full addresses.
+bank DT_BANK
+assert DT_BANK*010000 == MT_DATA, "teco.ah's DT_BANK is bank 13"
+7440/
+#include "dpytab.ac"
+
+start go

@@ -1,0 +1,692 @@
+// tapeout.ac -- output to Type 550 Microtape.
+// It holds EI, EF, EN, /W and /V, the tape as a third output beside the punch and the
+// printer (outCh, pageio.ac), and the pending renames EC and EF write.
+// The rest of the tape's commands are tapefile.ac's, in bank 12.
+// This file is in bank 1, where there is room.
+//
+// Output goes to a scratch file, named so that no name typed to TECO can find it (two
+// blanks inside, and nmRead takes a run of blanks as one).
+// The scratch file is made on the unit of the last EI at the first character out,
+// allocated the largest gap, at most FS_MAXBLKS blocks.
+// EF writes the unit's pending changes, trims the scratch file to its length
+// (fsTrim), and renames it nm, replacing a file of that name (fsRename).
+// The next character out makes a new one.
+// EI forgets the output since the last EF by deleting the scratch file.
+// One a run before left on the tape is deleted when the next is made.
+//
+// Text is written in the tape's text form.
+// That is two characters a word, the first in the high half, a line ending in CR alone,
+// so an LF just after a CR is not written.
+// The output's block is written when it is full, and at EF.
+//
+// EN's renames are pending in a table in bank 13 (teco.ah's MT_REN, of MT_NREN entries)
+// until EC or EF writes them (rnApply), as ED's deletions are.
+// A new name may not be one TECO shows on the unit, nor one the tape still holds for
+// another file, so a rename's new name is never on the tape when EC writes it.
+//
+// An error is jmp i [err:0], and a library failure jmp i [mtFail:MT_BANK] with its
+// status in AC.
+// The data words follow the code.
+// A library call that may move the tape is made through mtcall (teco.ah), so WAIT shows
+// meanwhile.
+// Needs teco.ah, <AIDS/skipmacros.ah>, <MICROTAPE/microtape.ah>, the library's calls and
+// tapefile.ac in bank 12, pageio.ac's outPt and display.ac's mtCall.
+// Needs the argument state, argOr and toInt in bank 0.
+
+// cEN fills a pending rename's words in order.
+assert RN_HND == 0
+assert RN_SLOT == 1
+assert RN_MODE == 2
+assert RN_SIX == 3
+assert RN_STR == 6
+assert MT_RENW == RN_STR + 6
+
+local toX, tiX, cEIu, tdX, teX, teFree, teCap, teMk, teOk, teFull, teOld, teN, \
+    tpX, tpC, tpP, tpNotLf, tpPut, tpLo, tfX, tfErr, tfK, efX, efCp, efHas, efGo, efRo, \
+    enOne, enGo, enOnT, enRn, enSet, enHave, enCp, enEx, enM, enU, enS, enK, enP, enE, \
+    enQ, enN, enOwn, tvX, tvL, tvHit, tvP, tvN, raX, raL, raNx, raDone, raP, raN, raH, \
+    raQ, raS, raM
+
+// outInit -- set no output to the tape, none selected and nothing in its block, as TECO
+// is loaded.
+// For mtInit (tapefile.ac), at the restart.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+outInit, dac tiX
+    dzm outMt
+    dzm outOpen
+    dzm outUnit
+    dzm outHnd
+    dzm wrIdx
+    dzm wrHalf
+    dzm wrCR
+    jmp i tiX
+
+// cEI -- oEI sends output to unit o's tape and turns the punch off, forgetting
+// the output since the last EF, if any.
+// The unit's directory is read at EI, so a tape with none is known at once.
+// The scratch file is made at the first character out.
+// Reads the argument state (unitO).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE (tapefile.ac), ends by jmp rsLoop.
+cEI, jsp i [unitO:MT_BANK]
+    dac cEIu
+    jsp toDrop
+    lio cEIu
+    jsp i [hGet:MT_BANK]
+    lac cEIu
+    dac outUnit
+    law 1
+    dac outMt
+    dzm outPt
+    jmp i [rsLoop:0]
+
+// cSelW -- /W turns output to the tape on.
+// Before any EI, it is an error.
+// Reads the argument state (argOr).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSelW, cli
+    jsp i [argOr:0]
+    lac outUnit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    law 1
+    dac outMt
+    jmp i [rsLoop:0]
+
+// cSelV -- /V turns output to the tape off.
+// What is in the scratch file stays for EF.
+// Reads the argument state (argOr).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSelV, cli
+    jsp i [argOr:0]
+    dzm outMt
+    jmp i [rsLoop:0]
+
+// toDrop -- forget the output since the last EF, emptying its block and deleting its
+// scratch file, if one is open.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// A library failure leaves by mtFail.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+toDrop, dac tdX
+    dzm wrIdx
+    dzm wrHalf
+    dzm wrCR
+    lac outOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i tdX
+    dzm outOpen
+    lac [FD_OUT]
+    mtcall(fsDelete:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    jmp i tdX
+
+// toEns -- make sure the output's scratch file is open, making it on the output's unit
+// when it is not.
+// Before any EI, it is an error.
+// A scratch file a run before left is deleted first.
+// The handle is the output's (outHnd), and is selected when the file is made.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// A library failure leaves by mtFail.
+// Called via jsp.
+toEns, dac teX
+    lac outOpen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i teX
+    lac outUnit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    lio outUnit
+    jsp i [hGet:MT_BANK]
+    lac i [hIdx:MT_BANK]
+    dac outHnd
+teFree, lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    dzm mtoPb+FS_PNEED
+    lac [mtoPb:.]
+    farjda(fsFree:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac mtoPb+FS_PLARGEST
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp teFull
+    dac teN
+    sub [FS_MAXBLKS]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp teCap
+teMk, lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac [mtoNm:.]
+    dac mtoPb+FS_PNAME
+    lac teN
+    dac mtoPb+FS_PBLOCKS
+    dzm mtoPb+FS_PINFO      // mode 0, TECO's
+    lac [FD_OUT]
+    dac mtoPb+FS_PCFD
+    lac [mtoPb:.]
+    mtcall(fsCreate:*)
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp teOk
+    SKIP_NEXT_IF_SAME [FS_EEXISTS]
+    jmp i [mtFail:MT_BANK]
+    // a run before left its scratch file, so delete it and look at the gaps again
+teOld, lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac [mtoNm:.]
+    dac mtoPb+FS_PNAME
+    lac [FD_OUT]
+    dac mtoPb+FS_PFD
+    lac [mtoPb:.]
+    farjda(fsOpenName:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac [FD_OUT]
+    mtcall(fsDelete:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    jmp teFree
+teCap, law FS_MAXBLKS
+    dac teN
+    jmp teMk
+teOk, law 1
+    dac outOpen
+    jmp i teX
+teFull, law FS_ENOSPACE
+    jmp i [mtFail:MT_BANK]
+
+// mtPut -- put the ASCII character in IO to the output's file.
+// An LF just after a CR is not written.
+// Two characters go in a word, the first in the high half, and the block is written
+// when it is full.
+// From outCh (pageio.ac) while the tape is selected.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// A library failure leaves by mtFail.
+// Called via jsp.
+mtPut, dac tpX
+    dio tpC
+    lac tpC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp tpNotLf
+    lac wrCR
+    dzm wrCR
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i tpX
+    jmp tpPut
+tpNotLf, dzm wrCR
+    lac tpC
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    idx wrCR
+tpPut, jsp toEns
+    lac wrIdx
+    SKIP_NEXT_IF_DIFFERENT [MTWDS]
+    jsp toFlush
+    lac wrIdx
+    add [WRBUF]
+    dac tpP
+    lac wrHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tpLo
+    lac tpC
+    ral 9s
+    dac i tpP
+    law 1
+    dac wrHalf
+    jmp i tpX
+tpLo, lac i tpP
+    ior tpC
+    dac i tpP
+    dzm wrHalf
+    idx wrIdx
+    jmp i tpX
+
+// toFlush -- write the output's block, its words and a last half word, to the scratch
+// file, and empty it.
+// A write past the allocation is TAPE FULL, and the block is then kept.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// A library failure leaves by mtFail.
+// Called via jsp.
+toFlush, dac tfX
+    lac wrIdx
+    add wrHalf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i tfX
+    dac mtoPb+FS_PCOUNT
+    lac [FD_OUT]
+    dac mtoPb+FS_PFDESC
+    lac [WRBUF]
+    dac mtoPb+FS_PBUF
+    lac [mtoPb:.]
+    mtcall(fsWrite:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tfErr
+    dzm wrIdx
+    dzm wrHalf
+    jmp i tfX
+tfErr, SKIP_NEXT_IF_DIFFERENT [FS_ERANGE]
+    law FS_ENOSPACE
+    jmp i [mtFail:MT_BANK]
+
+// cEF -- oEFnm$ files the output since the last EI or EF as nm on the tape of
+// the last EI.
+// The o is ignored.
+// The tape's pending deletions and renames are written first.
+// A file nm then on the tape is replaced, unless it is read-only, and if it is the input
+// file, the input file is closed first.
+// Output to the tape goes on, into another scratch file.
+// Before any EI, it is an error.
+// Reads the argument state (comma, argOr) and the name (nmRead).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE (tapefile.ac), ends by jmp rsLoop.
+cEF, lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [err:0]
+    cli
+    jsp i [argOr:0]
+    jsp i [nmRead:MT_BANK]
+    jsp efNm
+    jmp i [rsLoop:0]
+
+// efNm -- do cEF's work, filing the output as mtNmStr.
+// For the second set's output too (files11.ac).
+// Reads mtNmStr (bank 12).
+// No return value.
+// Does not preserve AC or IO.
+// A library failure leaves by mtFail.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+efNm, dac efX
+    // nm is kept, since writing the renames uses mtNmStr
+    lac [mtNmStr:MT_BANK]
+    dac tfK
+    lac [mtoNmF:.]
+    dac enP
+    law MT_NSTRW
+    dac enN
+efCp, lac i tfK
+    dac i enP
+    idx tfK
+    idx enP
+    lac enN
+    sub [1]
+    dac enN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp efCp
+    jsp toEns
+    lio outHnd
+    jsp i [hSel:MT_BANK]
+    jsp toFlush
+    jsp i [mtPendW:MT_BANK]
+    lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac [mtoNmF:.]
+    dac mtoPb+FS_PNAME
+    lac [mtoSix:.]
+    dac mtoPb+FS_PNAMED
+    lac [mtoPb:.]
+    farjda(fsLookup:*)
+    dio tfK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp efHas
+    SKIP_NEXT_IF_SAME [FS_ENOTFOUND]
+    jmp i [mtFail:MT_BANK]
+    jmp efGo
+    // nm is on the tape, so refuse it if read-only and close the input file if it is nm
+efHas, lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac tfK
+    dac mtoPb+FS_PINDEX
+    lac [mtoEnt:.]
+    dac mtoPb+FS_PDEST
+    lac [mtoPb:.]
+    farjda(fsEntry:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac mtoEnt+FS_DEINFO
+    and [FS_IRO]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp efRo
+    lac i [inOpen:MT_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp efGo
+    lac i [inHnd:MT_BANK]
+    SKIP_NEXT_IF_SAME outHnd
+    jmp efGo
+    lac i [FD_IN+FS_FSLOT]
+    SKIP_NEXT_IF_SAME tfK
+    jmp efGo
+    jsp i [inClose:MT_BANK]
+efGo, lac [FD_OUT]
+    dac mtoPb+FS_PFDESC
+    lac [mtoPb:.]
+    mtcall(fsTrim:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    dzm outOpen
+    lac [FD_OUT]
+    mtcall(fsClose:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac [mtoNm:.]
+    dac mtoPb+FS_PNAME
+    lac [mtoNmF:.]
+    dac mtoPb+FS_PNEWNAME
+    law 1
+    dac mtoPb+FS_PREPLACE
+    lac [mtoPb:.]
+    mtcall(fsRename:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac outUnit
+    dac i [mtUnit:MT_BANK]      // the unit filed upon is the unit last named
+    jmp i efX
+efRo, law FS_EREADONLY
+    jmp i [mtFail:MT_BANK]
+
+// cEN -- oENnm$qp$ renames file nm on unit o qp, and i,uENnm$qp$ renames it qp and
+// sets it to mode i, 0 to 07777.
+// The rename is pending until EC or EF writes it, and EL shows it.
+// qp may not be a name TECO shows on the unit for another file (FILE EXISTS), nor one
+// the tape still holds for another file whose deletion is not pending.
+// nm renamed to its own name with no mode drops its pending rename.
+// Reads the argument state (comma, mval, have, argOr) and the names (nmRead).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE (tapefile.ac), ends by jmp rsLoop.
+cEN, dzm enOwn
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp enOne
+    // i from the first argument, as u,vEC reads u; u from the second
+    lac i [mval:0]
+    dac i [ra:0]
+    lac i [mval:0+1]
+    dac i [ra:0+1]
+    lac i [mval:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac enM
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    cli
+    jsp i [argOr:0]
+    lia
+    jsp i [unitChk:MT_BANK]
+    lac enM
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [err:0]
+    sub [FS_ITYPE+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i [err:0]
+    lac enM
+    add [1]
+    dac enM
+    jmp enGo
+enOne, jsp i [unitO:MT_BANK]
+    dzm enM
+enGo, lac i [mtUnit:MT_BANK]
+    dac enU
+    jsp i [nmRead:MT_BANK]
+    lio enU
+    jsp i [hGet:MT_BANK]
+    jsp i [mtFindN:MT_BANK]
+    dac enS
+    jsp i [nmRead:MT_BANK]
+    lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac [mtNmStr:MT_BANK]
+    dac mtoPb+FS_PNAME
+    lac [mtSix:MT_BANK]
+    dac mtoPb+FS_PNAMED
+    lac [mtoPb:.]
+    farjda(fsLookup:*)
+    dio enK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp enOnT
+    SKIP_NEXT_IF_SAME [FS_ENOTFOUND]
+    jmp i [mtFail:MT_BANK]
+    jmp enRn
+    // qp is on the tape, as nm's own name or a file whose deletion is pending
+enOnT, lac enK
+    SKIP_NEXT_IF_SAME enS
+    jmp .+4
+    law 1
+    dac enOwn
+    jmp enRn
+    add i [hPend:MT_BANK]
+    dac enP
+    lac i enP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp enEx
+    // qp may be another file's pending new name
+enRn, jsp i [trSix:MT_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp enSet
+    add [RN_SLOT]
+    dac enP
+    lac i enP
+    SKIP_NEXT_IF_SAME enS
+    jmp enEx
+enSet, lio enS
+    jsp i [trFind:MT_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp enHave
+    jsp toFree
+enHave, dac enE
+    dac enP
+    lac i [hIdx:MT_BANK]
+    add [1]
+    dac i enP
+    idx enP
+    lac enS
+    dac i enP
+    idx enP
+    lac enM
+    dac i enP
+    idx enP
+    lac i [mtSix:MT_BANK]
+    dac i enP
+    idx enP
+    lac i [mtSix:MT_BANK+1]
+    dac i enP
+    idx enP
+    lac i [mtSix:MT_BANK+2]
+    dac i enP
+    idx enP
+    lac [mtNmStr:MT_BANK]
+    dac enQ
+    law MT_NSTRW
+    dac enN
+enCp, lac i enQ
+    dac i enP
+    idx enQ
+    idx enP
+    lac enN
+    sub [1]
+    dac enN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp enCp
+    // back to its own name with no mode, nothing is pending
+    lac enOwn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    lac enM
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dzm i enE
+    jmp i [rsLoop:0]
+enEx, law FS_EEXISTS
+    jmp i [mtFail:MT_BANK]
+
+// toFree -- find a free entry of the pending renames.
+// With none, it is an error.
+// Has no arguments.
+// AC is the entry's address, IO is preserved.
+// Called via jsp.
+toFree, dac tvX
+    lac [MT_REN]
+    dac tvP
+    law MT_NREN
+    dac tvN
+tvL, lac i tvP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tvHit
+    lac tvP
+    add [MT_RENW]
+    dac tvP
+    lac tvN
+    sub [1]
+    dac tvN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tvL
+    jmp i [err:0]
+tvHit, lac tvP
+    jmp i tvX
+
+// rnApply -- write the selected handle's pending renames to the tape, each in its own
+// directory write, and set a mode given (fsSetType, written at the close).
+// For mtPendW (tapefile.ac).
+// A failure leaves by mtFail with the library's message, and the renames not yet
+// written stay pending.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+rnApply, dac raX
+    lac [MT_REN]
+    dac raP
+    law MT_NREN
+    dac raN
+    lac i [hIdx:MT_BANK]
+    add [1]
+    dac raH
+raL, lac i raP
+    SKIP_NEXT_IF_SAME raH
+    jmp raNx
+    lac raP
+    add [RN_SLOT]
+    dac raQ
+    lac i raQ
+    dac raS
+    lia
+    jsp i [mtEntNm:MT_BANK]
+    lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac [mtNmStr:MT_BANK]
+    dac mtoPb+FS_PNAME
+    lac raP
+    add [RN_STR]
+    dac mtoPb+FS_PNEWNAME
+    dzm mtoPb+FS_PREPLACE
+    lac [mtoPb:.]
+    mtcall(fsRename:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac raP
+    add [RN_MODE]
+    dac raQ
+    lac i raQ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp raDone
+    sub [1]
+    dac raM
+    lac i [hAdr:MT_BANK]
+    dac mtoPb+FS_PHANDLE
+    lac raS
+    dac mtoPb+FS_PINDEX
+    lac [FD_X]
+    dac mtoPb+FS_PFD
+    lac [mtoPb:.]
+    farjda(fsOpenIndex:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac [FD_X]
+    dac mtoPb+FS_PFDESC
+    lac raM
+    dac mtoPb+FS_PVALUE
+    lac [mtoPb:.]
+    farjda(fsSetType:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+    lac [FD_X]
+    mtcall(fsClose:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [mtFail:MT_BANK]
+raDone, dzm i raP
+raNx, lac raP
+    add [MT_RENW]
+    dac raP
+    lac raN
+    sub [1]
+    dac raN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp raL
+    jmp i raX
+
+tiX, 0                      // the return addresses
+efX, 0
+tdX, 0
+teX, 0
+tpX, 0
+tfX, 0
+tvX, 0
+raX, 0
+toX, 0
+cEIu, 0                     // EI's unit
+teN, 0                      // the scratch file's blocks
+tpC, 0                      // mtPut's character and word's address
+tpP, 0
+tfK, 0                      // nm's slot on the tape, for EF
+enM, 0                      // for EN, the mode plus 1, 0 for none; the unit; nm's slot;
+enU, 0                      //   qp's slot on the tape; pointers; the entry; a count;
+enS, 0                      //   1 when qp is nm's own name
+enK, 0
+enP, 0
+enE, 0
+enQ, 0
+enN, 0
+enOwn, 0
+tvP, 0                      // toFree's
+tvN, 0
+raP, 0                      // for rnApply, the entry, the count, the handle plus 1,
+raN, 0                      //   a pointer, the slot, the mode
+raH, 0
+raQ, 0
+raS, 0
+raM, 0
+mtoPb,  // the library's parameter block
+    table MT_PBW, 0
+mtoNm,  // the scratch file's name, with two blanks, which no name typed to TECO has
+    ascii "TECO  OUT"
+    0
+mtoNmF,  // EF's name, an am1 ascii string
+    table MT_NSTRW, 0
+mtoSix,  // a name in sixbit, from fsLookup
+    table FS_DENAMEW, 0
+mtoEnt,  // a directory entry, from fsEntry
+    table FS_ENTW, 0
+endloc
+
+outMt, 0                    // not 0 while output to the tape is selected (EI, /W, /V)
+outOpen, 0                  // not 0 while the scratch file is open in FD_OUT
+outUnit, 0                  // the unit of the last EI, 0 for none
+outHnd, 0                   // the scratch file's handle, while it is open
+wrIdx, 0                    // the output's block, the next word's index in WRBUF,
+wrHalf, 0                   //   1 when its low half is next,
+wrCR, 0                     //   1 when the last character out was a CR

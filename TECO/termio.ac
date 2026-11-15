@@ -1,0 +1,613 @@
+// termio.ac -- TECO's console, from PDP-1 FOCAL's terminal (FOCAL's termio.ac).
+// It serves one user on DCS2 channel 0, or on the typewriter while sense switch 6 is
+// on, unless switch 2, VT100 mode, keeps it on DCS2.
+// It provides the device's choice (tmReady), a character out (putc, newline,
+// ringBell), a character in (pollc, getc), the break check (brkChk), and /G (tmQuit).
+// The break check moves the characters waiting into the type-ahead ring, as many as
+// it has room for, and acts on a break.
+//
+// DCS2 runs in ASCII with telnet on and its echo off, since cmdread.ac echoes.
+// In telnet mode RETURN reads as LF, LF goes out as CR LF and CR as CR NUL.
+// A NUL that is not a RETURN's is data, Ctrl-@.
+// The typewriter prints what is typed, so nothing is echoed there.
+// Its tables are ttytab.ac, with the typewriter's keys, in which ` | ~ # read as
+// ALT MODE ; : % and the center dot @ is a prefix that ttyGet resolves, so every
+// routine above it sees TECO's characters.
+//
+// A break is Ctrl-C, or the break's sense switch (SW_BREAK, 3) turned
+// on, while brkOn is set, that is while a command string runs.
+// Ctrl-C typed while a string is being typed is text, and the switch turned on then
+// is no break.
+// The switch left on breaks once.
+// A break, and a lost DCS2 caller, leave by jmp i tmErr with ERR_BREAK or ERR_LOST
+// in AC, the ring emptied first; tmErr does not return.
+//
+// Every routine is called via jsp, from any bank, with the extend window open, and
+// returns by jmp i with it open.
+// The file goes in bank 1; its data words follow its code, so include it where it is
+// not executed.
+// Needs teco.ah, <AIDS/skipmacros.ah>, <DCS/dcs2defs.ah>, ttytab.ac, termdata.ac and
+// display.ac (bank 1), clkTick and restart in bank 0 (teco.am1), tmHello in bank 15
+// (greeting.ac), and vtQuit in bank 10 (vt11.ac).
+
+local tiX, trX, trDcs, trWait, trConn, trLost, trTty, trNew, pcX, pcC, pcDcs, nlX, \
+    blX, plX, plP, plNone, gcX, gcLoop, bkX, bkLoop, bkSwOn, bkDcs, bkChar, bkC, \
+    bkPut, bkP, bkCtlC, bkBreak, tcX, tqX, tqDcs, tqWait, tqMs, tqT, \
+    tpX, tpC, tpE, tpK, tpCr, tpLf, tpOne, ttX, ttLower, ttType, \
+    tgX, tgC, tgP, tgUp, tgLook, tgOut, tgSetPf, tgLower, tgUpper, tgNone, \
+    tgPfx, tgNotL, tgMapL, tgNext
+
+// tmInit -- set the console as at the start, with DCS2 reset, no device, nothing
+// typed ahead and no break armed.
+// The break's switch already on is no break.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+tmInit, dac tiX
+    cli
+    lio [scbrst]
+    scb
+    dzm tmDev
+    dzm useTty
+    dzm brkOn
+    dzm ttPfx
+    dzm tpCrL
+    jsp taClr
+    dzm swBkOn
+    szs SW_BREAK*010        // skip if the break's switch is off
+    idx swBkOn
+    jmp i tiX
+
+// tmReady -- choose the device, at the start and at every idle.
+// It is the typewriter while sense switch 6 is on, else DCS2, waiting for a caller for
+// as long as there is none, still reading switch 6.
+// While switch 2 is on, switch 6 has no effect (trTty).
+// A new device, or a new caller, gets CR LF, as the memo's Teletype line-feeds when
+// TECO starts, then the greeting (tmHello) and CR LF.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Sets tmDev and useTty.
+// Called via jsp.
+tmReady, dac trX
+    szs SW_TTY*010          // skip if the typewriter's switch is off
+    jmp trTty
+trDcs, lac tmDev
+    SKIP_NEXT_IF_DIFFERENT [DEV_DCS]
+    jmp trConn
+    dzm tmDev
+    dzm useTty
+    // listen, if the channel is not open yet, then wait for a caller
+    cli
+    rcs
+    lai
+    and [dsfopn]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trWait
+    lio [scbset tmCtl]      // scb reads the block in the bank it runs in
+    scb
+trWait, jsp dpyTick
+    jsp i [clkTick:0]       // so a long wait misses none of the clock's wraps
+    szs SW_TTY*010          // the typewriter's switch turned on while waiting
+    jmp trTty
+    cli
+    rcs
+    lai
+    and [dsfcon]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp trWait
+    cli
+    ssb
+    law DEV_DCS
+    dac tmDev
+    jmp trNew
+
+// the caller still there?
+trConn, cli
+    rcs
+    lai
+    and [dsfser dsfcls]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trLost
+    lai
+    and [dsfcon]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i trX
+trLost, lio [scbbnd]        // drop the caller, listen again
+    scb
+    dzm tmDev
+    jmp trWait
+
+// the typewriter, whose case another program may have left either way; a
+// caller on DCS2 is dropped.
+// With switch 2 on it is DCS2 after all.
+// From the wait loop the channel is already open, so trDcs only waits on.
+trTty, szs SW_VT*010        // skip while switch 2 is off
+    jmp trDcs
+    lac tmDev
+    SKIP_NEXT_IF_DIFFERENT [DEV_TTY]
+    jmp i trX               // already the typewriter
+    SKIP_NEXT_IF_SAME [DEV_DCS]
+    jmp .+4
+    jsp i [vtQuit:VT_BANK]  // the caller's terminal as it was found (vt11.ac)
+    lio [scbbnd]
+    scb
+    clf 1                   // a flag left from before the switch is no key
+    law DEV_TTY
+    dac tmDev
+    law 1
+    dac useTty
+    law TTUNKNOWN
+    dac ttShift
+
+// a new device, where nothing typed for the last one counts
+trNew, jsp taClr
+    dzm ttPfx
+    dzm tpCrL
+    jsp newline
+    jsp i [tmHello:EX_BANK]
+    jmp i trX
+
+// putc -- send the ASCII character in IO, or type it; with no device it goes nowhere.
+// It checks for a break first, so output can always be stopped.
+// A full DCS2 buffer is waited out, still checking.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+putc, dac pcX
+    idx pcCnt               // for vt11.ac, since output spoils a whole screen's window
+    dio pcC
+    jsp brkChk
+    lac tmDev
+    SKIP_NEXT_IF_DIFFERENT [DEV_DCS]
+    jmp pcDcs
+    SKIP_NEXT_IF_SAME [DEV_TTY]
+    jmp i pcX
+    lio pcC
+    jsp ttyPut
+    jmp i pcX
+pcDcs, lio pcC
+    tcb
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp i pcX               // sent
+    lai
+    and [dseflf]            // the buffer is full, so wait, still checking
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkLost
+    jsp brkChk
+    jmp pcDcs
+
+// newline -- end the line, with CR LF on DCS2 and the carriage return on the
+// typewriter.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+newline, dac nlX
+    lio [CH_LF]
+    jsp putc
+    jmp i nlX
+
+// ringBell -- ring the bell on DCS2; the typewriter has none, and stays silent.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+ringBell, dac blX
+    lac tmDev
+    SKIP_NEXT_IF_SAME [DEV_DCS]
+    jmp i blX
+    lio [CH_BELL]
+    jsp putc
+    jmp i blX
+
+// pollc -- take the oldest character typed ahead, if any, after a break check and the
+// display's refresh (display.ac); every wait for a key comes here.
+// Has no arguments.
+// AC is 1 with the character in IO, or 0 when none waits.
+// AC is the result, IO is the character or not preserved.
+// Called via jsp.
+pollc, dac plX
+    jsp dpyTick
+    jsp brkChk
+    lac taCnt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp plNone
+    sub [1]
+    dac taCnt
+    lac taHd
+    add [taBuf:1]
+    dac plP
+    lio i plP
+    lac taHd
+    add [1]
+    SKIP_NEXT_IF_DIFFERENT [TA_SIZE]
+    cla
+    dac taHd
+    law 1
+    jmp i plX
+plNone, cla
+    jmp i plX
+
+// getc -- read the next character typed, waiting for one.
+// Has no arguments.
+// Returns the character in IO.
+// AC is not preserved, IO is the result.
+// Called via jsp.
+getc, dac gcX
+gcLoop, jsp pollc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gcLoop
+    jmp i gcX
+
+// brkChk -- move every character waiting on the device into the type-ahead ring,
+// returning when nothing more waits.
+// While the ring is full DCS2 is not read, so the rest wait in the device, which
+// holds a burst whole; the typewriter holds one key, so there one past TA_SIZE
+// is dropped.
+// While brkOn is set, Ctrl-C, or the break's switch just turned on, is a break.
+// The ring is then emptied and it leaves by jmp i tmErr with ERR_BREAK.
+// A lost DCS2 caller is dropped, the channel listens again, and it leaves by
+// jmp i tmErr with ERR_LOST.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+brkChk, dac bkX
+    szs SW_BREAK*010        // skip if the break's switch is off
+    jmp bkSwOn
+    dzm swBkOn               // off, so the next turn-on counts
+bkLoop, lac tmDev
+    SKIP_NEXT_IF_DIFFERENT [DEV_DCS]
+    jmp bkDcs
+    SKIP_NEXT_IF_SAME [DEV_TTY]
+    jmp i bkX
+    szf i 1                 // skip if a key was struck
+    jmp i bkX
+    jsp ttyGet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkLoop              // a case shift, the prefix, or no character
+    dio bkC
+    jmp bkChar
+// the break's switch on counts once, when it has just been turned on, and is a
+// break only while a string runs
+bkSwOn, lac swBkOn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp bkLoop
+    law 1
+    dac swBkOn
+    lac brkOn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp bkBreak
+    jmp bkLoop
+bkDcs, cli
+    rcs
+    lai
+    and [dsfser dsfcls]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp bkLost
+    lai
+    and [dsfcon]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkLost
+    lai
+    and [dsfrdy]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i bkX
+    lac taCnt
+    SKIP_NEXT_IF_DIFFERENT [TA_SIZE]
+    jmp i bkX               // the ring full, so the rest wait in DCS2
+    rch rchclr
+    SKIP_NEXT_IF_IO_POSITIVE_OR_ZERO
+    jmp i bkX               // nothing after all; a loss shows in rcs next time
+    lai
+    and [0177]
+    dac bkC
+bkChar, lac bkC
+    SKIP_NEXT_IF_DIFFERENT [CH_BREAK]
+    jmp bkCtlC
+bkPut, lac taCnt
+    SKIP_NEXT_IF_DIFFERENT [TA_SIZE]
+    jmp bkLoop              // full, so dropped
+    add [1]
+    dac taCnt
+    lac taTl
+    add [taBuf:1]
+    dac bkP
+    lac bkC
+    dac i bkP
+    lac taTl
+    add [1]
+    SKIP_NEXT_IF_DIFFERENT [TA_SIZE]
+    cla
+    dac taTl
+    jmp bkLoop
+bkCtlC, lac brkOn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkPut               // typed into a string, so text
+bkBreak, jsp taClr
+    law ERR_BREAK
+    jmp i tmErr
+bkLost, lio [scbbnd]        // drop the caller, listen again
+    scb
+    dzm tmDev
+    dzm useTty
+    jsp taClr
+    law ERR_LOST
+    jmp i tmErr
+
+// taClr -- empty the type-ahead ring.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+taClr, dac tcX
+    dzm taCnt
+    dzm taHd
+    dzm taTl
+    jmp i tcX
+
+// tmQuit -- /G.
+// On DCS2 it waits BYE_MS for what was sent to leave, drops the caller, sets the
+// channel listening again and starts TECO again at restart, so the next caller finds
+// it empty; it does not return.
+// On the typewriter it halts at tmHalt, and CONTINUE returns with everything kept.
+// With no device it returns.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+tmQuit, dac tqX
+    lac tmDev
+    SKIP_NEXT_IF_DIFFERENT [DEV_DCS]
+    jmp tqDcs
+    SKIP_NEXT_IF_SAME [DEV_TTY]
+    jmp i tqX
+    hlt
+tmHalt, jmp i tqX           // the PC while halted
+tqDcs, jsp i [vtQuit:VT_BANK]  // the caller's terminal as it was found (vt11.ac)
+    dzm tqMs
+    jsp i [clkTick:0]       // the clock's interval starts now
+tqWait, jsp i [clkTick:0]
+    dio tqT
+    lac tqT
+    add tqMs
+    dac tqMs
+    sub [BYE_MS]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp tqWait
+    lio [scbbnd]
+    scb
+    dzm tmDev
+    jsp taClr
+    jmp i [restart:0]
+
+// ttyPut -- type the ASCII character in IO, with a case shift first when it
+// needs the case the typewriter is not in, and the center dot first for a
+// TTPFX entry.
+// CR is the carriage return, which feeds the line, and an LF after a CR is passed
+// over, so CR LF is one return; an LF alone is one too.
+// A character the typewriter has no form for is not typed.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+ttyPut, dac tpX
+    dio tpC
+    lac tpC
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp tpCr
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp tpLf
+    dzm tpCrL
+    and [0177]
+    add [ttyOut:1]
+    dac tpE
+    lac i tpE
+    dac tpE                 // the code, its case, and the flags
+    and [TTNONE]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i tpX
+    lac tpE
+    and [TTPFX]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tpOne
+    lac tpE
+    dac tpK
+    lac ttyAt
+    dac tpE
+    jsp ttKey
+    lac tpK
+    dac tpE
+tpOne, jsp ttKey
+    jmp i tpX
+tpCr, law 1
+    dac tpCrL
+    lio [TTCR]
+    tyo i
+    jmp i tpX
+tpLf, lac tpCrL
+    dzm tpCrL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i tpX               // the CR before it fed the line
+    lio [TTCR]
+    tyo i
+    jmp i tpX
+
+// ttKey -- type the key in tpE, its concise code with TTLOWER, TTUPPER or
+// neither, shifting case first when it must.
+// Its argument is tpE.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+ttKey, dac ttX
+    lac tpE
+    and [TTUPPER]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ttLower
+    lac ttShift
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp ttType
+    lio [TTUC]
+    tyo i
+    law 1
+    dac ttShift
+    jmp ttType
+ttLower, lac tpE
+    and [TTLOWER]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ttType              // no case, as the blank and the tab
+    lac ttShift
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ttType
+    lio [TTLC]
+    tyo i
+    dzm ttShift
+ttType, lac tpE
+    and [077]
+    lia
+    tyo i
+    jmp i ttX
+
+// ttyGet -- read the key struck.
+// Program flag 1 must be set.
+// A case shift sets ttShift and the case unknown reads as lower; the center dot sets
+// the prefix, and the key after it is resolved, a letter of either case being
+// its control character and tgMap's keys what they stand for; any other key after
+// the prefix is itself.
+// Has no arguments.
+// AC is 1 with TECO's character in IO, or 0 for no character (a shift, the prefix, a
+// key with none).
+// AC is the result, IO is the character or not preserved.
+// Called via jsp.
+ttyGet, dac tgX
+    cli
+    tyi
+    clf 1                   // tyi leaves the flag set
+    lai
+    and [077]
+    dac tgC
+    SKIP_NEXT_IF_DIFFERENT [TTLC]
+    jmp tgLower
+    SKIP_NEXT_IF_DIFFERENT [TTUC]
+    jmp tgUpper
+    lac ttShift
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp tgUp
+    lac tgC
+    jmp tgLook
+tgUp, lac tgC
+    add [0100]
+tgLook, add [ttyIn:1]
+    dac tgP
+    lac i tgP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgNone
+    dac tgC
+    lac ttPfx
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgPfx
+    lac tgC
+    SKIP_NEXT_IF_DIFFERENT [CH_AT]
+    jmp tgSetPf
+tgOut, lio tgC
+    law 1
+    jmp i tgX
+tgSetPf, law 1
+    dac ttPfx
+    jmp tgNone
+tgLower, dzm ttShift
+    jmp tgNone
+tgUpper, law 1
+    dac ttShift
+tgNone, cla
+    jmp i tgX
+
+// the key after the prefix, where a letter is its control character
+tgPfx, dzm ttPfx
+    lac tgC
+    ior [040]
+    sub [0141]
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    jmp tgNotL
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp tgNotL
+    lac tgC
+    and [037]
+    dac tgC
+    jmp tgOut
+// else a pair in tgMap, else the key itself
+tgNotL, lac [tgMap:1]
+    dac tgP
+tgMapL, lac i tgP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgOut
+    SKIP_NEXT_IF_SAME tgC
+    jmp tgNext
+    idx tgP
+    lac i tgP
+    dac tgC
+    jmp tgOut
+tgNext, idx tgP
+    idx tgP
+    jmp tgMapL
+
+// The prefixed keys in pairs, what the key reads as alone, then what it is after
+// the center dot.
+// The table ends at 0, since no pair starts with NUL.
+tgMap, CH_ZERO
+    CH_NUL
+    CH_ESC                  // the ` key
+    CH_GRAVE
+    CH_SEMI                 // the | key
+    CH_VBAR
+    CH_COLON                // the ~ key
+    CH_TILDE
+    CH_PCT                  // the # key
+    CH_HASH
+    CH_LPAR
+    CH_LBRACE
+    CH_RPAR
+    CH_RBRACE
+    CH_AMP
+    CH_DOLLAR
+    0
+
+tiX, 0                      // the return addresses
+trX, 0
+pcX, 0
+nlX, 0
+blX, 0
+plX, 0
+gcX, 0
+bkX, 0
+tcX, 0
+tqX, 0
+tpX, 0
+ttX, 0
+tgX, 0
+pcC, 0
+plP, 0
+bkC, 0
+bkP, 0
+tqMs, 0
+tqT, 0
+tpC, 0
+tpE, 0
+tpK, 0
+tgC, 0
+tgP, 0
+endloc
+
+// DCS2 channel 0's control block, for ASCII, telnet, server, no echo, on PORTNO.
+tmCtl, dcftel dcfsrv
+    PORTNO
+
+tmErr, 0                    // where a break and a lost caller go, a full address
+tmDev, 0                    // DEV_NONE, DEV_DCS or DEV_TTY
+useTty, 0                   // not 0 on the typewriter
+brkOn, 0                    // not 0 while a command string runs, when a break may come
+swBkOn, 0                   // 1 while the break's switch is on and its turn-on is taken
+ttShift, 0                  // the typewriter's case, 0 lower, 1 upper, or TTUNKNOWN
+ttPfx, 0                    // 1 when the center dot was the last key
+tpCrL, 0                    // 1 when the typewriter's last character was CR
+taCnt, 0                    // characters in the type-ahead ring
+taHd, 0                     // the oldest one's place in taBuf
+taTl, 0                     // the next one's place
+pcCnt, 0                    // characters through putc, counting on (vt11.ac's -1W)

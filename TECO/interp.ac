@@ -1,0 +1,450 @@
+// interp.ac -- the interpreter.
+// runStr reads the command string a character at a time and acts on each as
+// it comes, through a table of 128 handlers by ASCII code, a lower-case
+// letter taken as its upper case.
+// Space, TAB, CR, LF and FORM between commands are ignored.
+// Before each command the break is looked for and the clock read.
+// Every error meets in err, which types ?, drops the rest of the
+// string and goes idle, the string kept for ? typed back.
+// The push-down list, in bank 10, holds the frames; its overflow is one bell.
+//
+// A handler is entered by jmp with the command's character in curC and the
+// source's position past it, and ends by jmp rsLoop; it reads the argument
+// state (expr.ac) and clears what it takes.
+// The source is the command string, as cmdread.ac keeps it in bank 10, or a
+// running macro's q-register block (control.ac).
+// srcBlk is the block, 0 for the command string, srcArr the full address of
+// its first character's word, and srcPos and srcLen index it.
+// A macro's end returns to its caller.
+//
+// Every routine is reached from bank 0 with the extend window open.
+// The file goes in bank 0; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, termio.ac, cmdread.ac and display.ac
+// (bank 1), and expr.ac, buffer.ac, qreg.ac, edit.ac, search.ac and
+// control.ac.
+//
+// The second command set, PDP-11 TECO's, runs here too.
+// tSet (greeting.ac) chooses its dispatch, dTab11 in bank 9 (data11.ac),
+// whose shared commands are these handlers.
+// Its errors are named; a handler's ERR0 leaves the code in eCode
+// before err, and err11 (interp11.ac) names any other from the command.
+
+local tiX, ncX, prX, prN, puX, poX, pkX, rsP, rsFin, rsFold, rsDis, upX, \
+    pvX, pvC, pvOut, pvEnd, cuI, cuBad, rsEnd, rsCmd, sgX, ovP, erIdle, ovSet, \
+    rsBase, rsDg, rsHex, ovP11, ncEnd
+
+// tecoInit -- empty the buffer, make every q-register undefined and forget
+// a failed search, as at the start.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+tecoInit, dac tiX
+    jsp bufInit
+    jsp qInit
+    dzm srFail
+    jmp i tiX
+
+// runStr -- run the command string, csLen characters at csBase (bank 10),
+// the two ALT MODEs included.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// An error leaves through errIdle and does not return.
+// Called via jsp.
+runStr, dac rsX
+    lac i [csLen:1]
+    dac srcLen
+    dzm srcPos
+    dzm srcBlk
+    lac i [csBase:1]
+    dac srcArr
+    dzm itDepth
+    lac [PDL_BASE]
+    dac pdlP
+    jsp clrArgs
+    // a modifier left by a string an error ended is not this string's, nor
+    // are the holds of the macros it was running
+    dzm srCol
+    dzm srUp
+    jsp qRelAll
+    // the command set's dispatch, no error named yet, no trace
+    dzm eCode
+    dzm trOn
+    lac [dTab]
+    dac rsBase
+    lac i [tSet:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rsLoop
+    lac [dTab11:D11_BANK]
+    dac rsBase
+rsLoop, lac srcPos
+    sub srcLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rsEnd
+    // the command's place in the command string, for a break and for ?
+    // typed back; inside a macro it stays at the M that ran it
+    lac srcBlk
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rsCmd
+    lac srcPos
+    dac i [csPos:1]
+rsCmd, jsp i [brkChk:1]
+    jsp clkTick
+    jsp nextCh
+    dio curC
+    lac curC
+    and [0177]
+    dac curC
+    // a number being typed ends at the first character not a digit; in radix 16,
+    // only the second set's, A to F of either case are digits too
+    lac inNum
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rsFold
+    lac radix
+    SKIP_NEXT_IF_DIFFERENT [0d16]
+    jmp rsHex
+rsDg, lac curC
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rsFin
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+rsFin, jsp finNum
+rsFold, lac curC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rsDis
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rsDis
+    lac curC
+    sub [040]
+    dac curC
+rsDis, lac curC
+    add rsBase
+    dac rsP
+    lac i rsP
+    dac rsP
+    // a command ends a display V or /U holds for the idle (display.ac), which
+    // they set again; blanks and ALT MODE are no commands
+    SKIP_NEXT_IF_DIFFERENT [cIgn]
+    jmp i rsP
+    SKIP_NEXT_IF_DIFFERENT [cEsc]
+    jmp i rsP
+    dzm i [dpyHeld:1]
+    jmp i rsP
+    // the end of a macro goes back to its caller; of the command string,
+    // the string is done
+rsEnd, lac srcBlk
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i rsX
+    jsp mRet
+    jmp rsLoop
+rsHex, lac curC
+    and [0137]
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rsDg
+    sub [6]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rsDg
+    jmp cHex
+
+// srcGet -- get the character at an index of the source.
+// IO is the index.
+// IO is the result, AC is not preserved.
+// Called via jsp.
+srcGet, dac sgX
+    dio gPos
+    lac srcArr
+    dac gBase
+    jsp gch
+    jmp i sgX
+
+// nextCh -- get the source's next character.
+// Has no arguments.
+// IO is the result, AC is not preserved.
+// Running off the end is an error, the second set's UTC.
+// With the second set's trace on, what has been read is typed (trNx,
+// control11.ac).
+// Called via jsp.
+nextCh, dac ncX
+    lac srcPos
+    sub srcLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ncEnd
+    lio srcPos
+    jsp srcGet
+    idx srcPos
+    lac trOn
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [trNx:P11_BANK]
+    jmp i ncX
+ncEnd, ERR0(EC_UTC)
+
+// peekCh -- get the source's next character, a lower-case letter as its
+// upper case, and leave it in the source; 0 at the source's end.
+// It serves a command with an optional second letter, as PW.
+// Has no arguments.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+peekCh, dac pvX
+    lac srcPos
+    sub srcLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp pvEnd
+    lio srcPos
+    jsp srcGet
+    lai
+    and [0177]
+    dac pvC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp pvOut
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp pvOut
+    lac pvC
+    sub [040]
+    dac pvC
+pvOut, lac pvC
+    jmp i pvX
+pvEnd, cla
+    jmp i pvX
+
+// err -- the error, which types ? CR LF, keeps the command string
+// through the last character read (inside a macro, through the M that ran
+// it) and goes idle.
+// Has no arguments.
+// errIdle is entered with ERR_CMD, which the second set tells from a break.
+// Reached by jmp from any bank; does not return.
+err, lac srcBlk
+    SKIP_NEXT_IF_AC_ZERO
+    jmp erIdle
+    lac srcPos
+    sub [1]
+    dac i [csPos:1]
+erIdle, law ERR_CMD
+    jmp errIdle
+
+// pdlOv -- the push-down list's overflow, which rings one bell, keeps the
+// string for ? as err keeps it and goes idle; in the second set, it is
+// the error PDO.
+// Has no arguments.
+// Reached by jmp; does not return.
+pdlOv, lac i [tSet:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ovP11
+    jsp i [ringBell:1]
+    lac i [csPos:1]
+    dac ovP
+    lac srcBlk
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ovSet
+    lac srcPos
+    sub [1]
+    dac ovP
+ovSet, lio ovP
+    jsp i [cmdErr:1]
+    dzm i [brkOn:1]
+    jmp idle
+ovP11, ERR0(EC_PDO)
+
+// pdlRoom -- the overflow (pdlOv) unless IO more words fit on the list.
+// IO is the number of words.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+pdlRoom, dac prX
+    dio prN
+    lac [PDL_END]
+    sub pdlP
+    sub prN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp pdlOv
+    jmp i prX
+
+// push -- put IO onto the list; the caller has made room (pdlRoom).
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+push, dac puX
+    dio i pdlP
+    idx pdlP
+    jmp i puX
+
+// pop -- take the top word off the list.
+// Has no arguments.
+// IO is the result, AC is not preserved.
+// Called via jsp.
+pop, dac poX
+    lac pdlP
+    sub [1]
+    dac pdlP
+    lio i pdlP
+    jmp i poX
+
+// pdlKind -- get the top frame's kind, 0 when the list is empty.
+// Has no arguments.
+// AC is the result, IO is preserved.
+// Called via jsp.
+pdlKind, dac pkX
+    lac pdlP
+    sub [PDL_BASE]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i pkX
+    lac pdlP
+    sub [1]
+    dac rsP
+    lac i rsP
+    jmp i pkX
+
+// cIgn passes over its character; cBad makes its command an error.
+// Entered by jmp from the dispatch.
+cIgn, jmp rsLoop
+cBad, jmp err
+
+// cEsc -- an ALT MODE between commands ends any argument.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cEsc, jsp clrArgs
+    jmp rsLoop
+
+// cBell -- /G.
+// DCS2 drops the caller and starts again; the typewriter halts, and
+// CONTINUE goes on with the string.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cBell, jsp clrArgs
+    jsp i [tmQuit:1]
+    jmp rsLoop
+
+// cUp -- up arrow, which with I after it is ^I (edit.ac), and before a
+// search is its modifier (search.ac), dropping the value before it as : does.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cUp, jsp peekCh
+    SKIP_NEXT_IF_DIFFERENT [0111]
+    jmp cuI
+    jsp srAhead
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cuBad
+    law 1
+    dac srUp
+    jsp clrArgs
+    jmp rsLoop
+cuI, idx srcPos
+    jmp cUpI
+cuBad, jsp nextCh
+    jmp err
+
+ncX, 0                      // the return addresses
+tiX, 0
+sgX, 0
+ovP, 0
+pvX, 0
+pvC, 0
+prX, 0
+puX, 0
+poX, 0
+pkX, 0
+prN, 0
+rsP, 0
+rsBase, 0                   // the dispatch's full address, dTab or dTab11
+endloc
+
+rsX, 0                      // runStr's return
+curC, 0                     // the command's character
+srcPos, 0                   // the source's next character, an index
+srcLen, 0                   //   and its length
+srcBlk, 0                   //   its q-register block, 0 the command string
+srcArr, 0                   //   and the full address of its first word
+pdlP, 0                     // the push-down list's next free word
+eCode, 0                    // the second set's error, an EC_ code, 0 none named
+eArg, 0                     //   and the character its message names
+trOn, 0                     // the second set's trace is on (control11.ac)
+
+// The dispatch, a handler for each ASCII code.
+// A lower-case letter is looked up as its upper case, so 0141-0172 are
+// never read.
+dTab,
+    cAt                     // 000 /@
+    cBad                    // 001
+    cSelB:1                 // 002 /B, the printer off (pageio.ac)
+    cSelC:1                 // 003 /C, the reader's buffer emptied
+    cSlD:1                  // 004 /D, the display's size (display.ac)
+    cSelE:1                 // 005 /E, the printer on
+    cBad                    // 006 /F, not built
+    cBell                   // 007 /G
+    cBad                    // 010 BS
+    cIgn                    // 011 TAB
+    cIgn                    // 012 LF
+    cBad                    // 013 VT
+    cIgn                    // 014 FORM
+    cIgn                    // 015 CR
+    cSlN:1                  // 016 /N, the lines each side of the pointer
+    cBad                    // 017 /O, not built
+    cSlP:EX_BANK            // 020 /P, the check character (additions.ac)
+    cSelQ:MT_BANK               // 021 /Q, input from the tape (tapefile.ac)
+    cSelR:1                 // 022 /R, the punch on
+    cSelS:1                 // 023 /S, input from paper tape
+    cSelT:1                 // 024 /T, the punch off
+    cSlU:1                  // 025 /U, a tape's directory on the scope
+    cSelV:1                 // 026 /V, output to the tape off (tapeout.ac)
+    cSelW:1                 // 027 /W, output to the tape on
+    cSlX:EX_BANK            // 030 /X, the test word and the sense switches
+    table 2, cBad           // 031-032
+    cEsc                    // 033 ALT MODE
+    table 4, cBad           // 034-037
+    cIgn                    // 040 space
+    cExcl                   // 041 ! a tag (control.ac)
+    cQuote                  // 042 " a conditional
+    table 2, cBad           // 043-044 # $
+    cPct                    // 045 %
+    cOp                     // 046 &
+    cIgn                    // 047 ' the end of a conditional
+    cLp                     // 050 (
+    cRp                     // 051 )
+    cOp                     // 052 *
+    cOp                     // 053 +
+    cComma                  // 054 ,
+    cOp                     // 055 -
+    cDot                    // 056 .
+    cOp                     // 057 /
+    table 012, cDig         // 060-071 the digits
+    cCol                    // 072 : before a search (search.ac), or alone
+    cSemi                   // 073 ; the iteration test (control.ac)
+    cLt                     // 074 < an iteration
+    cEq                     // 075 =
+    cGt                     // 076 > its end
+    table 2, cBad           // 077-0100 ? @
+    cA                      // 0101 A
+    cB                      // 0102 B
+    cC                      // 0103 C
+    cD                      // 0104 D
+    cE:MT_BANK                  // 0105 E and its letter (tapefile.ac)
+    cF:1                    // 0106 F
+    cG                      // 0107 G
+    cH                      // 0110 H
+    cI                      // 0111 I
+    cJ                      // 0112 J
+    cK                      // 0113 K
+    cL                      // 0114 L
+    cM                      // 0115 M
+    cSrN                    // 0116 N
+    cO                      // 0117 O
+    cP:1                    // 0120 P
+    cQ                      // 0121 Q
+    cR                      // 0122 R
+    cSrS                    // 0123 S
+    cT                      // 0124 T
+    cU                      // 0125 U
+    cV:1                    // 0126 V and VW, the scope (display.ac)
+    cBad                    // 0127 W
+    cX                      // 0130 X
+    cY:1                    // 0131 Y
+    cZ                      // 0132 Z
+    table 3, cBad           // 0133-0135 [ backslash ]
+    cUp                     // 0136 up arrow
+    cSrL                    // 0137 left arrow
+    table 040, cBad         // 0140-0177
+    assert . - dTab == 0200, "the dispatch table is 128 words"

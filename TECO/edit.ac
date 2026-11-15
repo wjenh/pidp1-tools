@@ -1,0 +1,424 @@
+// edit.ac -- the basic editing commands, J C R L D K, the three insertions
+// I, up arrow I and nI, T, and X and G between the buffer and the q-registers.
+// Every position is checked before anything changes.
+// One outside 0 to Z is an error, and a failed command changes nothing.
+//
+// Handlers are entered by jmp from the dispatch (interp.ac) and end by jmp rsLoop.
+// The routines are called via jsp from any bank with the extend window open and
+// return by jmp i.
+// The file goes in bank 0; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, expr.ac, buffer.ac, qreg.ac, interp.ac
+// (srcGet, srcArr), and putc in bank 1.
+
+local cpX, cpP, a2X, rgX, rgT, rgFwd, rgTwo, ltX, ltN, ltI, ltC, ltK, ltF, \
+    ltFL, ltB, ltDec, ltEnd, ltNeg, trX, trL, trC, stX, stT, stC, stN, stL, \
+    cdN, cdR, ciN, ciText, ciIns, cgT, cgK, cgP, cgN, cgDig, cgLen, cgL, stUtc
+
+// chkPos -- an error (err) unless IO is a position in the text, 0 to Z.
+// IO is the position.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+chkPos, dac cpX
+    dio cpP
+    lac cpP
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp err
+    lac zz
+    sub cpP
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp err
+    lio cpP
+    jmp i cpX
+
+// arg2 -- check the arguments m,n and store them, a2M = m and a2N = n.
+// Each must be a position, m not above n, else it is an error (err).
+// Its arguments are the command's, have, mval and val.
+// Returns a2M and a2N.
+// Does not preserve AC or IO.
+// The argument state is cleared (clrArgs).
+// Called via jsp.
+arg2, dac a2X
+    lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp err
+    COPY3(mval, ra)
+    jsp toInt
+    dac a2M
+    COPY3(val, ra)
+    jsp toInt
+    dac a2N
+    jsp clrArgs
+    lio a2M
+    jsp chkPos
+    lio a2N
+    jsp chkPos
+    lac a2N
+    sub a2M
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp err
+    jmp i a2X
+
+// range -- find the text a T, K or X acts on, a2M up to a2N, which is m,n as given,
+// or from the pointer to where nL would leave it, n 1 when not given.
+// Its arguments are the command's, comma and the value.
+// Returns a2M and a2N.
+// Does not preserve AC or IO.
+// Called via jsp.
+range, dac rgX
+    lac comma
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rgTwo
+    law 1
+    lia
+    jsp argOr
+    lia
+    jsp lnTo
+    dac rgT
+    sub dot
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rgFwd
+    lac rgT
+    dac a2M
+    lac dot
+    dac a2N
+    jmp i rgX
+rgFwd, lac dot
+    dac a2M
+    lac rgT
+    dac a2N
+    jmp i rgX
+rgTwo, jsp arg2
+    jmp i rgX
+
+// lnTo -- find where nL leaves the pointer.
+// For n above 0 it is past the nth line feed after it, or the end; for n 0 or below,
+// just after the (1-n)th line feed before it, or the start.
+// IO is n.
+// AC is the position, IO is not preserved.
+// Called via jsp.
+lnTo, dac ltX
+    dio ltN
+    lac dot
+    dac ltI
+    lac ltN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ltF
+    // back, counting 1-n line feeds, n kept above -2^15 so 1-n fits
+    add [077777]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ltNeg
+    lac ltN
+    jmp .+2
+ltNeg, lac [-077777]
+    sub [1]
+    dac ltK
+ltB, lac ltI
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ltEnd               // the start
+    sub [1]
+    lia
+    jsp bGet
+    dio ltC
+    lac ltC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp ltDec
+    isp ltK
+    jmp ltDec
+    jmp ltEnd               // just after the line feed
+ltDec, lac ltI
+    sub [1]
+    dac ltI
+    jmp ltB
+    // forward, past n line feeds
+ltF, cma
+    dac ltK
+ltFL, lac ltI
+    sub zz
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ltEnd               // the end
+    lio ltI
+    jsp bGet
+    idx ltI
+    dio ltC
+    lac ltC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp ltFL
+    isp ltK
+    jmp ltFL
+ltEnd, lac ltI
+    jmp i ltX
+
+// tyRange -- type the text from index a2M up to a2N, ALT MODE as $.
+// Its arguments are a2M and a2N.
+// No return value.
+// Does not preserve AC or IO.
+// a2M is advanced to a2N.
+// Called via jsp.
+tyRange, dac trX
+trL, lac a2M
+    sub a2N
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i trX
+    lio a2M
+    jsp bGet
+    dio trC
+    lac trC
+    SKIP_NEXT_IF_SAME [CH_ESC]
+    jmp .+2
+    law CH_DOLLAR
+    lia
+    jsp i [putc:1]
+    idx a2M
+    jmp trL
+
+// scanTo -- count the characters of the source, from srcPos, that come before the
+// first that is IO.
+// With none it is an error, the second set's UTC.
+// IO is the character.
+// AC is the count, IO is not preserved.
+// Called via jsp.
+scanTo, dac stX
+    dio stT
+    lac srcPos
+    dac stN
+stL, lac stN
+    sub srcLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp stUtc
+    lio stN
+    jsp srcGet
+    dio stC
+    lac stC
+    sub stT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp .+3
+    idx stN
+    jmp stL
+    lac stN
+    sub srcPos
+    jmp i stX
+stUtc, ERR0(EC_UTC)
+
+// cJ -- nJ moves the pointer to n; J is 0J.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cJ, cli
+    jsp argOr
+    lia
+    jsp chkPos
+    dio dot
+    jmp rsLoop
+
+// cC, cR -- nC is .+nJ, nR is .-nJ; n is 1 when not given.
+// Entered by jmp from the dispatch, end by jmp rsLoop.
+cC, law 1
+    lia
+    jsp argOr
+    add dot
+    lia
+    jsp chkPos
+    dio dot
+    jmp rsLoop
+cR, law 1
+    lia
+    jsp argOr
+    dac cdN
+    lac dot
+    sub cdN
+    lia
+    jsp chkPos
+    dio dot
+    jmp rsLoop
+
+// cL -- nL; L is 1L.
+// It never moves past either end.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cL, law 1
+    lia
+    jsp argOr
+    lia
+    jsp lnTo
+    dac dot
+    jmp rsLoop
+
+// cD -- nD deletes n characters after the pointer, or -n before it; D is 1D.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cD, law 1
+    lia
+    jsp argOr
+    dac cdN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rsLoop
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cdR
+    cma
+    dac cdN
+    lac dot
+    sub cdN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp err
+    lio cdN
+    jsp bDelL
+    jmp rsLoop
+cdR, lac dot
+    add cdN
+    lia
+    jsp chkPos
+    lio cdN
+    jsp bDelR
+    jmp rsLoop
+
+// cK -- nK deletes what nL passes over, m,nK the text from m up to n; the
+// pointer ends where the text was.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cK, jsp range
+    lac a2M
+    dac dot
+    lac a2N
+    sub a2M
+    lia
+    jsp bDelR
+    jmp rsLoop
+
+// cT -- nT, T and m,nT type the text range gives.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cT, jsp range
+    jsp tyRange
+    jmp rsLoop
+
+// cX -- m,nXi and nXi set register i to a copy of the text range gives.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cX, jsp range
+    jsp qName
+    lac a2N
+    sub a2M
+    lia
+    jsp qAlloc
+    add [2]
+    dac outB
+    dzm outP
+    lac a2M
+    dac boM
+    lac a2N
+    dac boN
+    jsp bOut
+    jsp qSetText
+    jmp rsLoop
+
+// cG -- Gi inserts register i's text at the pointer.
+// A number inserts its decimal digits, an undefined register 0, as the surviving
+// PDP-6 TECO binary does.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cG, jsp clrArgs
+    jsp qName
+    lac i qRec
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp cgDig
+// cgTx -- insert register qRec's text.
+// The second set's G (qreg11.ac) enters here by jmp; it ends by jmp rsLoop.
+cgTx, lac qRec
+    add [QR_BLK]
+    dac cgP
+    lac i cgP
+    dac cgT                 // the block
+    add [1]
+    dac cgP
+    lio i cgP               // its length
+    jsp bRoom
+    dio insN
+    dio lsLen               // the second set's ^S
+    lac cgT
+    add [2]
+    dac insB
+    dzm insP
+    jsp bIns
+    jmp rsLoop
+cgDig, jsp qGetNum
+    jsp fmtNum
+    lio numLen
+    jsp bRoom
+    lac numLen
+    dac lsLen
+    lac numLen
+    cma
+    dac cgK
+    lac [numBuf]
+    dac cgP
+cgL, lio i cgP
+    jsp bIns1
+    idx cgP
+    isp cgK
+    jmp cgL
+    jmp rsLoop
+
+// cI -- nI inserts the character whose code is n, 0 to 127; Itext$
+// inserts the text up to the next ALT MODE, kept as typed.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cI, lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ciText
+    jsp argOr
+    dac ciN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp err
+    sub [0200]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp err
+    lio ciN
+    jsp bIns1
+    jmp rsLoop
+ciText, lio [CH_ESC]
+    jsp scanTo
+    jmp ciIns
+
+// cUpI -- up arrow I, which inserts the text after the next character up to that
+// character's next appearance, the delimiter.
+// Entered by jmp from cUp (interp.ac), ends by jmp rsLoop.
+cUpI, jsp clrArgs
+    jsp nextCh
+    jsp scanTo
+    // insert the scanned characters from the source, then pass
+    // them and their terminator
+ciIns, dac ciN
+    lia
+    jsp bRoom
+    lac ciN
+    dac insN
+    lac srcArr
+    dac insB
+    lac srcPos
+    dac insP
+    jsp bIns
+    lac srcPos
+    add ciN
+    add [1]
+    dac srcPos
+    jsp clrArgs
+    jmp rsLoop
+
+cpX, 0                      // the return addresses
+a2X, 0
+rgX, 0
+ltX, 0
+trX, 0
+stX, 0
+cpP, 0
+rgT, 0
+ltN, 0
+ltI, 0
+ltC, 0
+ltK, 0
+trC, 0
+stT, 0
+stC, 0
+stN, 0
+cdN, 0
+ciN, 0
+cgT, 0
+cgK, 0
+cgP, 0
+endloc
+
+a2M, 0                      // arg2's and range's from and up to
+a2N, 0
+lsLen, 0                    // the last insert's, G's or match's length (second set's ^S)

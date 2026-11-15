@@ -1,0 +1,1472 @@
+// search11.ac -- the second command set's searches, S N _ E_ with n,
+// -nS, m,nS and 0,nS, ::S, FB FC FS FN F_, :, the remembered string and G_, ES, and a
+// failing search in an iteration; EV's lines before the prompt, as ES's.
+//
+// The text is built into the search string, sbBuf, a character a word.
+// ^Q and ^R take the next character as it is, ^V and ^W the next in lower or upper case,
+// ^EQq puts q's text, ^EUq the character q's number is the code of, and ^x is the
+// control character x unless ED&1.
+// A built character carries SB_LIT; a match construct (^X, ^S, ^N, ^E and its
+// letter, ^EG's register name) is kept as typed, without it, and is read again at each
+// comparison.
+// A text that builds to nothing leaves the last string.
+//
+// A search tries each start from one index toward another, comparing the string with the
+// text through bGet (sMat).
+// When the string's first element is a plain character, a forward search looks for it a
+// word of the gap buffer at a time first (sScan), as the 1965 set's does, for it and,
+// while ^X is 0, for its other case.
+// With ^X 0, a letter matches its other case, and ` { | } ~ match @ [ \ ] ^, as the
+// manual has it.
+//
+// The handlers are reached from the dispatch (dTab11, c11E and c11F in interp11.ac, c11G
+// in qreg11.ac), the routines with the extend window open.
+// The file goes in bank 14 (P11_BANK).
+// Needs teco.ah, <AIDS/skipmacros.ah>, interp11.ac (clr11, up11, v11Int, e3Str, the
+// flags), in bank 9 data11.ac (sbBuf, eTab), in bank 0 interp.ac, expr.ac, buffer.ac,
+// edit.ac (scanTo, lnTo, tyRange), search.ac (srFail, srCol, srUp), control.ac (cSemi,
+// itDepth), in bank 1 termio.ac, lpt.ac (lpEnd), and in bank 15 files11.ac (fiPgN,
+// fiPgU), qreg11.ac (q11Name, qText, qRecOf, lqSet).
+
+// The search being done (s11K), for S, N, _ and E_, FB and FC.
+#define SK_S         0
+#define SK_N         1
+#define SK_U         2
+#define SK_FB        3
+
+// eTab's entry for ^E and its letter says what the match construct accepts.
+// It is the classes of chCls in EK_CLS (EK_NOT for a character in none of them), any
+// character, a line's end, a run of spaces and tabs, or one of a register's characters.
+#define EK_CLS       017
+#define EK_NOT       0400
+#define EK_SEP       (EK_NOT+7)
+#define EK_ANY       01000
+#define EK_EOL       02000
+#define EK_SP        04000
+#define EK_REG       010000
+
+local s11G, s11G1, s11Rp, s11Nn, s11One, s11FBf, s11MN, s11Mf, s11Cnt, s11Sc, s11Fw, \
+    s11Mb, s11Wb, s11Txt, s11Ill, s11Isa, s11Pos, s11Pb, sLoop, sNext, sNx1, sNx2, sNxB, \
+    sMiss, sMs1, sMsY, sFound, sFd1, sFail, sFl1, sEnd, sDone, sSrh, spX, spV, snX, \
+    soX, soF0, soF1, soFL, soSl, soBk, soB0, soBL, soYes, soNo, ssX, ss1, ss2, ss3, \
+    ssRun, srnX, ssH, ssL, ssN, ssNone, ssGH, ssGL, ssT, ssC, smX, smL, smEl, smSep, \
+    smKind, smInv, smNot, smEol, smSp, smSpL, smReg, smRg1, smRgL, smLit, smR0, smR1, \
+    smRes, smYes, smNo, isX, isNo, ccX, ccUp, ccDg, ccSym, ccNo, rcX, rcG, prX, prH, \
+    sbX, sbL, sbQ, sbV, sbW, sbVo, sbE5, sbEQ, sbQL, sbEU, sbG1, sbLit, sbCon, sbDn, \
+    sbIce, chX, chLit, chBad, moX, moIss, puX, puStl, t2X, siX, siL, siYes, siNo, seX, \
+    seVer, seMN, seGo, seAf, seCh, sePut, rpX, gsT, gsI, gsE, s11Mu, \
+    s11K, s11R, s11C, s11At, s11Cm, s11M, s11N, s11Bd, s11Cn, s11A, s11B, s11D, s11W, \
+    s11Dl, s11P2, s11L2, soA, soB, soD, soZ1, soFast, ssA, ssB, ssPA, ssPB, ssOff, ssLo, \
+    ssHi, ssK, ssWP, ssPl, smI, smJ, smE, smP, smC, smT, smNeg, smLoc, smK, smQ, sFold, \
+    sC1, sC2, sC1h, sC2h, sDt, ccC, rcN, rcF, sbE, sbN, sbLN, sbT, sbI, sbK, chC, puC, \
+    puP, siI, siCo, seL, seC, seP, seF, gsCo, gsK, gsP, s11E, s11Z
+
+// c11S, c11N, c11Un -- S, N, and _ or E_, each with its text.
+// c11FS, c11FN and c11FU are the same, the match then given up for a second text.
+// c11FB and c11FC are the bounded search, and with a second text.
+// c11EUn is E_, which is _ but for yank protection (s11E).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, c11E or c11F, ends by jmp rsLoop (or through v11Int
+// or cSemi).
+c11FC, law 1
+    jmp .+2
+c11FB, cla
+    dac s11R
+    law SK_FB
+    jmp s11G
+c11FS, law SK_S
+    jmp s11Rp
+c11FN, law SK_N
+    jmp s11Rp
+c11FU, dzm s11E
+    law SK_U
+s11Rp, dac s11K
+    law 1
+    dac s11R
+    jmp s11G1
+c11S, law SK_S
+    jmp s11Z
+c11N, law SK_N
+    jmp s11Z
+c11EUn, law 1
+    jmp .+2
+c11Un, cla
+    dac s11E
+    law SK_U
+s11Z, dzm s11R
+s11G, dac s11K
+    // the modifiers, then the arguments, which argOr clears with them
+s11G1, lac i [colon11:0]
+    dac s11C
+    lac i [at11:0]
+    dac s11At
+    dzm i [srCol:0]
+    dzm i [srUp:0]
+    dzm s11Bd
+    lac i [comma:0]
+    dac s11Cm
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp s11Nn
+    lac i [mval:0]
+    dac i [ra:0]
+    lac i [mval:0+1]
+    dac i [ra:0+1]
+    lac i [mval:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac s11M
+s11Nn, lio [1]
+    jsp i [argOr:0]
+    dac s11N
+    law i 1
+    dac s11Cn               // one occurrence, but for the counted searches
+    lac s11C
+    SKIP_NEXT_IF_SAME [2]
+    jmp s11One
+    // ::S, a compare at the pointer, as .,.:FB
+    lac s11K
+    ior s11R
+    SKIP_NEXT_IF_AC_ZERO
+    jmp s11Ill
+    law 1
+    dac s11Bd
+    lac i [dot:0]
+    dac s11A
+    dac s11B
+    dzm s11D
+    jmp s11Txt
+s11One, lac s11K
+    SKIP_NEXT_IF_SAME [SK_FB]
+    jmp s11Cnt
+    // FB, bounded, the pointer kept on failure
+    law 1
+    dac s11Bd
+    lac s11Cm
+    SKIP_NEXT_IF_AC_ZERO
+    jmp s11MN
+    // nFB, a start in the next n lines; 0 or less, back over this line's start and -n
+    // more
+    lio s11N
+    jsp i [lnTo:0]
+    dac s11B
+    lac s11N
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp s11FBf
+    lac i [dot:0]
+    sub [1]
+    dac s11A
+    law 1
+    dac s11D
+    jmp s11Txt
+s11FBf, lac s11B
+    sub [1]
+    dac s11B
+    lac i [dot:0]
+    dac s11A
+    dzm s11D
+    jmp s11Txt
+    // m,nFB, a start between positions m and n, forward when m is below n, else back;
+    // with m equal to n, only at m
+s11MN, lio s11M
+    jsp s11Pos
+    lio s11N
+    jsp s11Pos
+    dzm s11D
+    lac s11M
+    dac s11A
+    lac s11N
+    sub s11M
+    SKIP_NEXT_IF_AC_ZERO
+    jmp s11Mf
+    lac s11M
+    dac s11B
+    jmp s11Txt
+s11Mf, SKIP_NEXT_IF_AC_NEGATIVE
+    jmp s11Mu
+    law 1                   // m above n, m-1 back to n
+    dac s11D
+    lac s11M
+    sub [1]
+    dac s11A
+    lac s11N
+    dac s11B
+    jmp s11Txt
+s11Mu, lac s11N             // m below n, m to n-1
+    sub [1]
+    dac s11B
+    jmp s11Txt
+    // the counted searches, n occurrences, back for n below 0; N and _ forward only, with
+    // no m,n
+s11Cnt, lac s11N
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp s11Isa
+    lac s11K
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp s11Sc
+    lac s11Cm
+    SKIP_NEXT_IF_AC_ZERO
+    jmp s11Ill
+    lac s11N
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp s11Isa
+s11Sc, lac s11N
+    SKIP_NEXT_IF_AC_NEGATIVE
+    cma
+    dac s11Cn               // -|n|, for isp
+    lac s11N
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp s11Fw
+    law 1
+    dac s11D
+    lac i [dot:0]
+    sub [1]
+    dac s11A
+    dzm s11B
+    jmp s11Mb
+s11Fw, dzm s11D
+    lac i [dot:0]
+    dac s11A
+    lac i [zz:0]
+    dac s11B
+    // m,nS, the start at most |m|-1 places from the pointer; 0,nS unbounded; with
+    // either, the pointer kept on failure
+s11Mb, lac s11Cm
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp s11Txt
+    law 1
+    dac s11Bd
+    lac s11M
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp s11Txt
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    cma
+    sub [1]
+    dac s11W
+    lac s11D
+    SKIP_NEXT_IF_AC_ZERO
+    jmp s11Wb
+    lac i [dot:0]
+    add s11W
+    dac s11B
+    jmp s11Txt
+s11Wb, lac i [dot:0]
+    sub s11W
+    dac s11B
+    // the text, the second text, and the string's first character for sScan
+s11Txt, jsp sBld
+    lac s11R
+    SKIP_NEXT_IF_AC_ZERO
+    jsp sTx2
+    jsp sPrep
+    lac s11A
+    dac soA
+    lac s11B
+    dac soB
+    lac s11D
+    dac soD
+sLoop, jsp sOne
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sMiss
+    isp s11Cn
+    jmp sNext
+    jmp sFound
+    // the next occurrence, forward from the match's end, or with ED&64 from its first
+    // character's next; back from its first character's left
+sNext, lac soD
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sNxB
+    lac flED+2
+    and [0100]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sNx1
+    lac smE
+    jmp sNx2
+sNx1, lac smI
+    add [1]
+sNx2, dac soA
+    jmp sLoop
+sNxB, lac smI
+    sub [1]
+    dac soA
+    jmp sLoop
+    // not in this page, so N writes it out as P does, _ gives it up as Y does, E_ as EY
+    // does (files11.ac); each then reads the next and searches it from its start
+sMiss, lac s11K
+    SKIP_NEXT_IF_SAME [SK_N]
+    jmp sMs1
+    jsp i [fiPgN:EX_BANK]
+    jmp sMsY
+sMs1, SKIP_NEXT_IF_SAME [SK_U]
+    jmp sFail
+    lio s11E
+    jsp i [fiPgU:EX_BANK]
+sMsY, SKIP_NEXT_IF_AC_ZERO
+    jmp sFail
+    dzm soA
+    lac i [zz:0]
+    dac soB
+    jmp sLoop
+    // found, the pointer goes after the match, or with ED&64 after its first character
+    // (not for a replace, nor back); then ^S is its length, ES runs, and the second text
+    // goes in its place
+sFound, jsp sNpr
+    dzm i [srFail:0]
+    lac smE
+    sub smI
+    dac i [lsLen:0]
+    lac smE
+    dac sDt
+    lac soD
+    ior s11R
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sFd1
+    lac flED+2
+    and [0100]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sFd1
+    lac smI
+    add [1]
+    dac sDt
+sFd1, lac sDt
+    dac i [dot:0]
+    jsp sEs
+    lac s11R
+    SKIP_NEXT_IF_AC_ZERO
+    jsp sRepl
+    lio [-1]
+    jmp sEnd
+    // failed, the pointer goes to 0 unless the search was bounded or ED&16; with
+    // :, the value is 0; in an iteration with ; next, that ; leaves it (srFail); in one
+    // without, %Search fail in iter is typed and the iteration left; else SRH
+sFail, jsp sNpr
+    law 1
+    dac i [srFail:0]
+    lac s11Bd
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sFl1
+    lac flED+2
+    and [020]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dzm i [dot:0]
+sFl1, cli
+    lac s11C
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sEnd
+    lac i [itDepth:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sSrh
+    jsp sSemi
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sDone
+    lio [msFail:.]
+    jsp e3Str
+    jsp i [newline:1]
+    jsp clr11
+    law 1
+    dac i [have:0]
+    dzm i [val:0]
+    dzm i [val:0+1]
+    dzm i [val:0+2]
+    jmp i [cSemi:0]
+    // the value in IO, after :
+sEnd, lac s11C
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sDone
+    jsp clr11
+    jmp v11Int
+sDone, jsp clr11
+    jmp i [rsLoop:0]
+sSrh, ERR11(EC_SRH)
+s11Isa, ERR11(EC_ISA)
+s11Ill, lac i [curC:0]      // ILL names the command as m,n and its letter
+    ior [0200]
+    dac i [eArg:0]
+    ERR11(EC_ILL)
+
+// s11Pos -- POP unless IO is a position in the text, 0 to Z.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+s11Pos, dac spX
+    dio spV
+    lac spV
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp s11Pb
+    lac i [zz:0]
+    sub spV
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i spX
+s11Pb, lac i [curC:0]
+    ior [0200]
+    dac i [eArg:0]
+    ERR11(EC_POP)
+
+// sNpr -- after N, put the printer at a line's start, as after P.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+sNpr, dac snX
+    lac s11K
+    SKIP_NEXT_IF_DIFFERENT [SK_N]
+    jsp i [lpEnd:1]
+    jmp i snX
+
+// sOne -- look for the search string starting at an index from soA to soB, toward soB
+// (soD 0 forward, 1 back); a start at Z or past it, or below 0, is none.
+// Takes soA, soB and soD.
+// Found, AC is 0, smI the match's first index and smE the index after it.
+// Not found, AC is 1.
+// soA is moved on.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+sOne, dac soX
+    lac sbLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp soNo
+    lac i [zz:0]
+    sub [1]
+    dac soZ1
+    lac soD
+    SKIP_NEXT_IF_AC_ZERO
+    jmp soBk
+    lac soB
+    sub soZ1
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp soF0
+    jmp soF1
+soF0, lac soZ1
+    dac soB
+soF1, lac soFast
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp soSl
+    // forward, the first character found by the word, the rest compared there
+soFL, lac soB
+    sub soA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp soNo
+    lac soA
+    dac ssA
+    lac soB
+    dac ssB
+    jsp sScan
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp soNo
+    dac smI
+    add [1]
+    dac soA
+    jsp sMat
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp soYes
+    jmp soFL
+    // forward, a place at a time
+soSl, lac soB
+    sub soA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp soNo
+    lac soA
+    dac smI
+    idx soA
+    jsp sMat
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp soYes
+    jmp soSl
+    // back, a place at a time, from Z-1 at most
+soBk, lac soA
+    sub soZ1
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp soB0
+    jmp soBL
+soB0, lac soZ1
+    dac soA
+soBL, lac soA
+    sub soB
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp soNo
+    lac soA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp soNo
+    dac smI
+    sub [1]
+    dac soA
+    jsp sMat
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp soYes
+    jmp soBL
+soYes, cla
+    jmp i soX
+soNo, law 1
+    jmp i soX
+
+// sScan -- find the first index from ssA to ssB, both below Z, whose character is sC1 or
+// sC2.
+// Takes ssA and ssB.
+// AC is the index, -1 with none; IO is preserved.
+// Called via jsp.
+sScan, dac ssX
+    // before the gap, ssA to min(gs-1, ssB), at places equal to them
+    lac ssA
+    dac ssPA
+    lac i [gs:0]
+    sub [1]
+    dac ssPB
+    sub ssB
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ss1
+    jmp ss2
+ss1, lac ssB
+    dac ssPB
+ss2, dzm ssOff
+    jsp ssRun
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i ssX
+    // after it, max(ssA, gs) to ssB, ge-gs places above their indexes
+    lac i [ge:0]
+    sub i [gs:0]
+    dac ssOff
+    lac ssA
+    sub i [gs:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ss3
+    lac i [gs:0]
+    jmp .+2
+ss3, lac ssA
+    dac ssPA
+    lac ssB
+    dac ssPB
+    jsp ssRun
+    jmp i ssX
+
+// ssRun -- sScan in one run, indexes ssPA to ssPB at places ssOff above them.
+// Takes ssPA, ssPB and ssOff.
+// AC is the index found, or -1; IO is preserved.
+// Called via jsp.
+ssRun, dac srnX
+    lac ssPB
+    sub ssPA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ssNone
+    lac ssPA
+    add ssOff
+    dac ssLo                // the first place
+    lac ssPB
+    add ssOff
+    dac ssHi                //   and the last
+    rar 1s
+    and [PK_WORD]
+    dac ssK
+    lac ssLo
+    rar 1s
+    and [PK_WORD]
+    dac ssWP
+    // the words from ssLo's through ssHi's, as -(count) for isp
+    lac ssK
+    sub ssWP
+    add [1]
+    cma
+    dac ssK
+    lac ssWP
+    add [BUF_BASE]
+    dac ssWP
+    // both halves of each word are compared; a half outside the run, which may be the
+    // gap's, is passed over
+ssH, lac i ssWP
+    and [PK_HI]
+    SKIP_NEXT_IF_DIFFERENT sC1h
+    jmp ssGH
+    SKIP_NEXT_IF_DIFFERENT sC2h
+    jmp ssGH
+ssL, lac i ssWP
+    and [PK_LO]
+    SKIP_NEXT_IF_DIFFERENT sC1
+    jmp ssGL
+    SKIP_NEXT_IF_DIFFERENT sC2
+    jmp ssGL
+ssN, idx ssWP
+    isp ssK
+    jmp ssH
+ssNone, law i 1
+    jmp i srnX
+ssGH, lac ssWP
+    sub [BUF_BASE]
+    ral 1s                  // twice the word's offset, which is below 2^16
+    jmp ssT
+ssGL, lac ssWP
+    sub [BUF_BASE]
+    ral 1s
+    add [1]
+    // the character is at place ssPl; before ssLo it is passed over, past ssHi the run
+    // is done
+ssT, dac ssPl
+    sub ssLo
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ssC
+    lac ssHi
+    sub ssPl
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ssNone
+    lac ssPl
+    sub ssOff
+    jmp i srnX
+    // on with the low half after a high one, else the next word
+ssC, lac ssPl
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ssN
+    jmp ssL
+
+// sMat -- match the search string against the text from index smI.
+// Takes smI.
+// Returns AC 0 when it matches, smE then the index after the match, else AC 1.
+// Each element takes one character of the text, but ^ES all the spaces and tabs in a
+// row; ^N before an element takes any character it does not.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+sMat, dac smX
+    lac smI
+    dac smJ
+    lac [sbBuf:D11_BANK]
+    dac smP
+smL, lac smP
+    sub sbEnd
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp smYes
+    lac smJ
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp smNo
+    lio smJ
+    jsp i [bGet:0]
+    dio smC
+    dzm smNeg
+smEl, lac i smP
+    dac smT
+    idx smP
+    lac smT
+    and [SB_LIT]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smLit
+    lac smT
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLN]
+    jmp smNot
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLX]
+    jmp smR1
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLS]
+    jmp smSep
+    // ^E, its letter's entry in eTab (sBld stores no other construct)
+    lio i smP
+    idx smP
+    lai
+    sub [0101]
+    add [eTab:D11_BANK]
+    dac smT
+    lac i smT
+    jmp smKind
+smSep, law EK_SEP
+smKind, dac smT
+    and [EK_ANY]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smR1
+    lac smT
+    and [EK_EOL]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smEol
+    lac smT
+    and [EK_SP]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smSp
+    lac smT
+    and [EK_REG]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smReg
+    // a class, in one of smT's, or with EK_NOT in none
+    lio smC
+    jsp chCls
+    and smT
+    and [EK_CLS]
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    dac smK
+    lac smT
+    and [EK_NOT]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smInv
+    lac smK
+    jmp smRes
+smInv, lac smK
+    xor [1]
+    jmp smRes
+smNot, lac smNeg
+    xor [1]
+    dac smNeg
+    jmp smEl
+smEol, lac smC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp smR1
+    SKIP_NEXT_IF_DIFFERENT [CH_VT]
+    jmp smR1
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp smR1
+    jmp smR0
+    // ^ES, a space or a tab, and every one after it; under ^N, one character alone
+smSp, jsp isSp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smR0
+    lac smNeg
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smR1
+smSpL, lac smJ
+    add [1]
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp smR1
+    lac smJ
+    add [1]
+    lia
+    jsp i [bGet:0]
+    dio smC
+    jsp isSp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smR1
+    idx smJ
+    jmp smSpL
+    // ^EGq, any character of q's text, exactly; q is looked up at each comparison, as .q
+    // belongs to the current level
+smReg, dzm smLoc
+    lio i smP
+    idx smP
+    lai
+    SKIP_NEXT_IF_SAME [CH_DOT]
+    jmp smRg1
+    law 1
+    dac smLoc
+    lio i smP
+    idx smP
+smRg1, jsp sRec             // the name in IO
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smR0
+    cma
+    dac smK
+    dzm smQ
+smRgL, lac i [qtB:EX_BANK]
+    add [2]
+    dac i [gBase:0]
+    lac smQ
+    dac i [gPos:0]
+    jsp i [gch:0]
+    lai
+    SKIP_NEXT_IF_DIFFERENT smC
+    jmp smR1
+    idx smQ
+    isp smK
+    jmp smRgL
+    jmp smR0
+    // a character as it is; with ^X 0 its other case too
+smLit, lac smT
+    and [0177]
+    SKIP_NEXT_IF_DIFFERENT smC
+    jmp smR1
+    xor smC
+    SKIP_NEXT_IF_SAME [040]
+    jmp smR0
+    lac sFold
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smR0
+    lac smC
+    and [0137]
+    sub [0100]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp smR0
+    sub [037]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp smR0
+smR1, law 1
+    jmp smRes
+smR0, cla
+smRes, xor smNeg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smNo
+    idx smJ
+    jmp smL
+smYes, lac smJ
+    dac smE
+    cla
+    jmp i smX
+smNo, law 1
+    jmp i smX
+
+// isSp -- tell whether smC is a space or a tab.
+// Takes smC.
+// Returns AC 1 when it is, else 0.
+// AC is the result, IO is preserved.
+// Called via jsp.
+isSp, dac isX
+    lac smC
+    SKIP_NEXT_IF_DIFFERENT [040]
+    jmp .+3
+    SKIP_NEXT_IF_SAME [CH_TAB]
+    jmp isNo
+    law 1
+    jmp i isX
+isNo, cla
+    jmp i isX
+
+// chCls -- get the classes of the character in IO, 1 a digit, 2 an upper-case letter, 4 a
+// lower-case one, 010 . or $ (RT-11's other symbol constituents), 0 for none.
+// AC is the result, IO is preserved.
+// Called via jsp.
+chCls, dac ccX
+    dio ccC
+    lac ccC
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp ccSym
+    SKIP_NEXT_IF_DIFFERENT [CH_DOLLAR]
+    jmp ccSym
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ccNo
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ccDg
+    lac ccC
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ccNo
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ccUp
+    lac ccC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ccNo
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ccNo
+    law 4
+    jmp i ccX
+ccUp, law 2
+    jmp i ccX
+ccDg, law 1
+    jmp i ccX
+ccSym, law 010
+    jmp i ccX
+ccNo, cla
+    jmp i ccX
+
+// sRec -- set qR (qreg11.ac) to the record of the register whose name, a digit or a
+// letter, is the character in IO, of this level's local set when smLoc is set.
+// Returns AC the length of its text, 0 with none, and qtB its block (qText).
+// AC is the result, IO is not preserved.
+// Called via jsp.
+sRec, dac rcX
+    lai
+    and [0177]
+    dac rcN
+    sub [CH_ZERO]
+    dac ccC
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp .+3
+    lac ccC
+    jmp .+4
+    lac rcN
+    and [0137]
+    sub [0101-0d10]
+    dac rcN                 // the name's number, 0-9 a digit, 10-35 a letter
+    lac smLoc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcG
+    jsp i [lqSet:EX_BANK]
+    add [lqFst:EX_BANK]
+    dac rcF
+    lac i rcF
+    add rcN
+    dac rcN
+rcG, lio rcN
+    jsp i [qRecOf:EX_BANK]
+    dac i [qR:EX_BANK]
+    jsp i [qText:EX_BANK]
+    jmp i rcX
+
+// sPrep -- before a search, set sbEnd to the string's end, sFold to 1 while ^X is 0, and
+// soFast to 1 when the first element is a plain character.
+// For soFast, sC1 is that character, sC2 its other case or itself, and sC1h and sC2h the
+// two as high halves, for sScan.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+sPrep, dac prX
+    lac [sbBuf:D11_BANK]
+    add sbLen
+    dac sbEnd
+    dzm sFold
+    lac flCX
+    ior flCX+1
+    ior flCX+2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx sFold
+    dzm soFast
+    lac i [sbBuf:D11_BANK]
+    and [SB_LIT]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i prX
+    idx soFast
+    lac i [sbBuf:D11_BANK]
+    and [0177]
+    dac sC1
+    dac sC2
+    lac sFold
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp prH
+    lac sC1
+    and [0137]
+    sub [0100]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp prH
+    sub [037]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp prH
+    lac sC1
+    xor [040]
+    dac sC2
+prH, lac sC1
+    ral 9s
+    dac sC1h
+    lac sC2
+    ral 9s
+    dac sC2h
+    jmp i prX
+
+// sBld -- build the search string from the command's text, to ALT MODE, or after @
+// between two of the character after the command (s11Dl), as this file's header says.
+// A ^N with nothing after it is ISS, ^E with nothing or an unknown letter ICE, more than
+// SB_MAX characters STL.
+// The source is read through nextCh, so the trace shows it; the delimiter is passed.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+sBld, dac sbX
+    lio [CH_ESC]
+    lac s11At
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [nextCh:0]
+    dio s11Dl
+    jsp i [scanTo:0]
+    add i [srcPos:0]
+    dac sbE                 // the delimiter's index
+    dzm sbN
+    dzm sbLN
+sbL, lac i [srcPos:0]
+    sub sbE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sbDn
+    jsp sbCh
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLQ]
+    jmp sbQ
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLR]
+    jmp sbQ
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp sbV
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLW]
+    jmp sbW
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLE]
+    jmp sbE5
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLX]
+    jmp sbCon
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLS]
+    jmp sbCon
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLN]
+    jmp sbCon
+sbLit, ior [SB_LIT]
+sbCon, lia
+    jsp sbPut
+    jmp sbL
+    // ^Q and ^R take the next character as it is, a control character in the caret
+    // form included
+sbQ, jsp sbMore
+    jsp sbCh
+    jmp sbLit
+    // ^V and ^W take the next in lower or upper case
+sbV, jsp sbMore
+    jsp sbCh
+    dac sbT
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sbVo
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sbVo
+    lac sbT
+    add [040]
+    jmp sbLit
+sbW, jsp sbMore
+    jsp sbCh
+    dac sbT
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sbVo
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sbVo
+    lac sbT
+    sub [040]
+    jmp sbLit
+sbVo, lac sbT
+    jmp sbLit
+    // ^E and its letter; Q and U build, the rest are match constructs kept as typed
+sbE5, lac i [srcPos:0]
+    sub sbE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sbIce
+    jsp up11
+    dac sbT
+    SKIP_NEXT_IF_DIFFERENT [0121]
+    jmp sbEQ
+    SKIP_NEXT_IF_DIFFERENT [0125]
+    jmp sbEU
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sbIce
+    dac sbI
+    sub [0d24]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sbIce
+    lac sbI
+    add [eTab:D11_BANK]
+    dac sbI
+    lac i sbI
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbIce
+    dac sbI
+    lio [CH_CTLE]
+    jsp sbPut
+    lio sbT
+    jsp sbPut
+    lac sbI
+    and [EK_REG]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbL
+    // ^EGq, the name checked now (q11Name) and kept as typed, . and all
+    jsp i [q11Name:EX_BANK]
+    lac i [qLoc:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbG1
+    lio [CH_DOT]
+    jsp sbPut
+sbG1, lac i [srcPos:0]
+    sub [1]
+    lia
+    jsp i [srcGet:0]
+    lai
+    and [0177]
+    lia
+    jsp sbPut
+    jmp sbL
+    // ^EQq puts q's text, each character as it is
+sbEQ, jsp i [q11Name:EX_BANK]
+    jsp i [qText:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbL
+    cma
+    dac sbK
+    dzm sbT
+sbQL, lac i [qtB:EX_BANK]
+    add [2]
+    dac i [gBase:0]
+    lac sbT
+    dac i [gPos:0]
+    jsp i [gch:0]
+    lai
+    and [0177]
+    ior [SB_LIT]
+    lia
+    jsp sbPut
+    idx sbT
+    isp sbK
+    jmp sbQL
+    jmp sbL
+    // ^EUq puts the character whose code is q's number, its low 7 bits
+sbEU, jsp i [q11Name:EX_BANK]
+    lac i [qR:EX_BANK]
+    add [3]
+    dac sbI
+    lac i sbI
+    and [0177]
+    jmp sbLit
+    // the end, past the delimiter; an empty string leaves the last
+sbDn, jsp i [nextCh:0]
+    lac sbLN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp moIss
+    lac sbN
+    SKIP_NEXT_IF_AC_ZERO
+    dac sbLen
+    jmp i sbX
+sbIce, ERR11(EC_ICE)
+
+// sbCh -- get the text's next character.
+// ^ and a character is that control character, unless ED&1, and with no character
+// after it ISS; ^ and one not @ to _ in either case is IUC.
+// Has no arguments.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+sbCh, dac chX
+    jsp i [nextCh:0]
+    lai
+    and [0177]
+    SKIP_NEXT_IF_SAME [CH_UPARROW]
+    jmp i chX
+    lac flED+2
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp chLit
+    jsp sbMore
+    jsp up11
+    dac chC
+    sub [0100]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp chBad
+    sub [040]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp chBad
+    lac chC
+    and [037]
+    jmp i chX
+chLit, law CH_UPARROW
+    jmp i chX
+chBad, lac chC
+    dac i [eArg:0]
+    ERR11(EC_IUC)
+
+// sbMore -- ISS when the text has no more characters.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+sbMore, dac moX
+    lac i [srcPos:0]
+    sub sbE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp moIss
+    jmp i moX
+moIss, ERR11(EC_ISS)
+
+// sbPut -- put the character in IO into the search string being built, STL when it is
+// full; sbLN is 1 when it is ^N, the construct, else 0.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+sbPut, dac puX
+    dio puC
+    lac sbN
+    sub [SB_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp puStl
+    lac sbN
+    add [sbBuf:D11_BANK]
+    dac puP
+    lac puC
+    dac i puP
+    idx sbN
+    dzm sbLN
+    lac puC
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLN]
+    idx sbLN
+    jmp i puX
+puStl, ERR11(EC_STL)
+
+// sTx2 -- find a replace's second text, to the same delimiter as the first, set
+// its index s11P2 and length s11L2, and pass it.
+// Has no arguments.
+// Does not preserve AC or IO.
+// Called via jsp.
+sTx2, dac t2X
+    lio s11Dl
+    jsp i [scanTo:0]
+    dac s11L2
+    lac i [srcPos:0]
+    dac s11P2
+    add s11L2
+    add [1]
+    dac i [srcPos:0]
+    jmp i t2X
+
+// sSemi -- tell whether the next command is ; or :;, spaces, CRs and LFs passed over, as
+// TECO C looks ahead.
+// Nothing is taken from the source.
+// Has no arguments.
+// Returns AC 1 when it is, else 0.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+sSemi, dac siX
+    lac i [srcPos:0]
+    dac siI
+    dzm siCo
+siL, lac siI
+    sub i [srcLen:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp siNo
+    lio siI
+    jsp i [srcGet:0]
+    idx siI
+    lai
+    and [0177]
+    SKIP_NEXT_IF_DIFFERENT [040]
+    jmp siL
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp siL
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp siL
+    SKIP_NEXT_IF_DIFFERENT [CH_SEMI]
+    jmp siYes
+    SKIP_NEXT_IF_SAME [CH_COLON]
+    jmp siNo
+    lac siCo
+    SKIP_NEXT_IF_AC_ZERO
+    jmp siNo
+    idx siCo
+    jmp siL
+siYes, law 1
+    jmp i siX
+siNo, cla
+    jmp i siX
+
+// sEs -- ES after a search that found, at the top level (no iteration, no macro).
+// ES -1 types the line; otherwise the low byte marks the pointer, 1 to 31 with a line
+// feed, 32 and up with that character, and the next byte is how many lines, 0 as 1.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+sEs, dac seX
+    lac i [itDepth:0]
+    ior i [srcBlk:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i seX
+    lac [flES:.]
+    jmp seVer
+
+// sEv -- EV before the prompt (cmdread11.ac), typing the lines ES would type,
+// from EV's value.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+sEv, dac seX
+    lac [flEV:.]
+seVer, dac seP              // the flag's three words, copied to seF
+    lac i seP
+    dac seF
+    idx seP
+    lac i seP
+    dac seF+1
+    idx seP
+    lac i seP
+    dac seF+2
+    lac seF
+    ior seF+1
+    ior seF+2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i seX
+    lac seF+2
+    and seF+1
+    and seF
+    SKIP_NEXT_IF_SAME [07777]
+    jmp seMN
+    law 1
+    dac seL
+    dzm seC
+    jmp seGo
+seMN, lac seF+2
+    and [0377]
+    dac seC
+    lac seF+2
+    rar 8s
+    and [017]
+    dac seL
+    lac seF+1
+    and [017]
+    ral 4s
+    ior seL
+    dac seL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx seL
+    // the lines before the pointer, the mark, the rest
+seGo, law 1
+    sub seL
+    lia
+    jsp i [lnTo:0]
+    dac i [a2M:0]
+    lac i [dot:0]
+    dac i [a2N:0]
+    jsp i [tyRange:0]
+    lac seC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp seAf
+    sub [040]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp seCh
+    lio [CH_LF]
+    jmp sePut
+seCh, lio seC
+sePut, jsp i [putc:1]
+seAf, lac i [dot:0]
+    dac i [a2M:0]
+    lio seL
+    jsp i [lnTo:0]
+    dac i [a2N:0]
+    jsp i [tyRange:0]
+    jmp i seX
+
+// sRepl -- give up the match, the ^S characters before the pointer, for the second text;
+// ^S is then its length.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+sRepl, dac rpX
+    lio i [lsLen:0]
+    jsp i [bDelL:0]
+    lio s11L2
+    jsp i [bRoom:0]
+    lac s11L2
+    dac i [insN:0]
+    dac i [lsLen:0]
+    lac i [srcArr:0]
+    dac i [insB:0]
+    lac s11P2
+    dac i [insP:0]
+    jsp i [bIns:0]
+    jmp i rpX
+
+// c11Gs -- G_ inserts the search string at the pointer, :G_ types it.
+// AC is the command's colon.
+// Does not preserve AC or IO.
+// Entered by jmp from c11G (qreg11.ac), ends by jmp rsLoop.
+c11Gs, dac gsCo
+    lac sbLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gsE
+    cma
+    dac gsK
+    lac [sbBuf:D11_BANK]
+    dac gsP
+    lac gsCo
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gsT
+    lio sbLen
+    jsp i [bRoom:0]
+    lac sbLen
+    dac i [lsLen:0]
+gsI, lac i gsP
+    and [0177]
+    lia
+    jsp i [bIns1:0]
+    idx gsP
+    isp gsK
+    jmp gsI
+    jmp gsE
+gsT, lac i gsP
+    and [0177]
+    lia
+    jsp i [putc:1]
+    idx gsP
+    isp gsK
+    jmp gsT
+gsE, jmp i [rsLoop:0]
+
+s11K, 0                     // the search, SK_S, SK_N, SK_U or SK_FB
+s11R, 0                     //   1 to replace the match with a second text
+s11E, 0                     //   1 for E_, no yank protection
+s11C, 0                     //   its : modifiers, 2 for ::S
+s11At, 0                    //   its @
+s11Cm, 0                    //   m given
+s11M, 0                     //   m, and n, as counts
+s11N, 0
+s11Bd, 0                    //   bounded, the pointer kept on failure
+s11Cn, 0                    //   -(occurrences still to find)
+s11A, 0                     //   the first start, the last, the direction (1 back)
+s11B, 0
+s11D, 0
+s11W, 0
+s11Dl, 0                    //   the texts' delimiter
+s11P2, 0                    //   the second text's index and length
+s11L2, 0
+soA, 0                      // sOne's next start, the last, the direction
+soB, 0
+soD, 0
+soZ1, 0
+soFast, 0                   //   1 when the first element is a plain character
+ssA, 0                      // sScan
+ssB, 0
+ssPA, 0
+ssPB, 0
+ssOff, 0
+ssLo, 0
+ssHi, 0
+ssK, 0
+ssWP, 0
+ssPl, 0
+smI, 0                      // sMat's start, the next index, the index after the match
+smJ, 0
+smE, 0
+smP, 0                      //   the next element's address
+smC, 0                      //   the text's character
+smT, 0
+smNeg, 0                    //   1 after ^N
+smLoc, 0                    //   ^EG's register is local
+smK, 0
+smQ, 0
+sFold, 0                    // 1 while ^X is 0
+sC1, 0                      // the first character, its other case, both as high halves
+sC2, 0
+sC1h, 0
+sC2h, 0
+sDt, 0
+ccC, 0
+rcN, 0
+rcF, 0
+sbE, 0                      // sBld's index of the delimiter
+sbN, 0                      //   the characters built
+sbLN, 0                     //   the last was ^N
+sbT, 0
+sbI, 0
+sbK, 0
+chC, 0
+puC, 0
+puP, 0
+siI, 0
+siCo, 0
+seL, 0                      // the lines and the mark, for sEs and sEv
+seC, 0
+seP, 0                      //   the flag's address, then its three words, ES's or EV's
+seF, 0
+    0
+    0
+gsCo, 0
+gsK, 0
+gsP, 0
+spX, 0                      // the return addresses
+spV, 0
+snX, 0
+soX, 0
+ssX, 0
+srnX, 0
+smX, 0
+isX, 0
+ccX, 0
+rcX, 0
+prX, 0
+sbX, 0
+chX, 0
+moX, 0
+puX, 0
+t2X, 0
+siX, 0
+seX, 0
+rpX, 0
+endloc
+
+// The warning for a search failing in an iteration.
+msFail, ascii "%Search fail in iter"
+    0
+
+// The search string is sbLen characters at sbBuf (data11.ac); sbEnd is the address
+// after them.
+sbLen, 0
+sbEnd, 0

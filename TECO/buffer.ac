@@ -1,0 +1,635 @@
+// buffer.ac -- the text buffer, a gap buffer over banks 2-7.
+// It holds BUF_CHARS places, two characters a word, the first in the
+// high 9 bits.
+// The text before the gap fills places 0 to gs-1, the text after it places
+// ge to BUF_CHARS-1; the pointer, dot, is a character count from the start
+// of the text, 0 to zz.
+// The gap moves to the pointer only when an insertion or a deletion needs it
+// there.
+//
+// The copier moves characters between any two such arrays, the buffer, a
+// q-register block or the command string, a word at a time where it can,
+// whole words when source and destination share a half, words built from
+// two halves when they do not.
+//
+// Every routine is entered by jsp from bank 0 with the extend window open
+// and returns by jmp i.
+// The file goes in bank 0; its data words follow its code.
+// Needs teco.ah and <AIDS/skipmacros.ah>; err (interp.ac).
+
+local giX, gcX, gcW, brN, brMem, pcX, pcW, pcC, cfX, cfW, cfK, cfS, cfD, cfT, cfEv, cfWL, \
+    cfSh, cfAdv, cfTail, cbX, cbW, cbK, cbS, cbD, cbT, cbSrc, cbDst, cbOdd, cbWL, \
+    cbSh, cbAdv, cbTail, c1X, c2X, gtX, gtN, gtR, bgX, bgI, brX, biX, b1X, \
+    b1C, bdX, bdDo, bdA, bdM, bdW, dlA, dlB, boX, boE, boS, boL2, boDone, gcLow, pcLow, \
+    bgAft
+
+// bufInit -- empty the buffer and put the pointer at 0.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+bufInit, dac giX
+    dzm gs
+    lac [BUF_CHARS]
+    dac ge
+    dzm dot
+    dzm zz
+    jmp i giX
+
+// gch -- get the character at a place of an array.
+// gPos is the place, gBase the full address of the array's first word.
+// IO is the character.
+// IO is the result, AC is not preserved.
+// Called via jsp.
+gch, dac gcX
+    lac gPos
+    rar 1s
+    and [PK_WORD]
+    add gBase
+    dac gcW
+    lac gPos
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gcLow
+    lac i gcW
+    rar 9s
+    and [PK_LO]
+    lia
+    jmp i gcX
+gcLow, lac i gcW
+    and [PK_LO]
+    lia
+    jmp i gcX
+
+// pch -- put a character at a place of an array.
+// IO is the character, pPos the place, pBase the array's full address.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+pch, dac pcX
+    dio pcC
+    lac pPos
+    rar 1s
+    and [PK_WORD]
+    add pBase
+    dac pcW
+    lac pPos
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pcLow
+    lac pcC
+    ral 9s
+    dac pcC
+    lac i pcW
+    and [PK_LO]
+    ior pcC
+    dac i pcW
+    jmp i pcX
+pcLow, lac i pcW
+    and [PK_HI]
+    ior pcC
+    dac i pcW
+    jmp i pcX
+
+// cpyF -- copy characters between arrays, first to last.
+// This is right for two arrays, and for one when the destination is below
+// the source.
+// cN is the count, cSP and cSB the source place and array, cDP and cDB the
+// destination place and array.
+// No return value.
+// cSP and cDP end past the last character copied, cN at 0.
+// Does not preserve AC or IO.
+// Called via jsp.
+cpyF, dac cfX
+    lac cN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i cfX
+    // a destination in a low half takes one character alone
+    lac cDP
+    and [1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cfEv
+    jsp cp1F
+    lac cN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i cfX
+cfEv, lac cN
+    rar 1s
+    and [PK_WORD]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cfTail              // one character left
+    dac cfW                 // whole destination words
+    cma
+    dac cfK
+    lac cSP
+    rar 1s
+    and [PK_WORD]
+    add cSB
+    dac cfS
+    lac cDP
+    rar 1s
+    and [PK_WORD]
+    add cDB
+    dac cfD
+    lac cSP
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cfSh
+    // source and destination both in high halves, so whole words
+cfWL, lac i cfS
+    dac i cfD
+    idx cfS
+    idx cfD
+    isp cfK
+    jmp cfWL
+    jmp cfAdv
+    // the source in a low half, so each word is built from two
+cfSh, lac i cfS
+    ral 9s
+    and [PK_HI]
+    dac cfT
+    idx cfS
+    lac i cfS
+    rar 9s
+    and [PK_LO]
+    ior cfT
+    dac i cfD
+    idx cfD
+    isp cfK
+    jmp cfSh
+cfAdv, lac cfW
+    ral 1s
+    dac cfT
+    add cSP
+    dac cSP
+    lac cfT
+    add cDP
+    dac cDP
+    lac cN
+    sub cfT
+    dac cN
+cfTail, lac cN
+    SKIP_NEXT_IF_AC_ZERO
+    jsp cp1F
+    jmp i cfX
+
+// cp1F -- copy one character for cpyF, place cSP to place cDP.
+// Reads cSB, cSP, cDB, cDP and cN.
+// No return value.
+// cSP and cDP are advanced, cN is one less.
+// Does not preserve AC or IO.
+// Called via jsp.
+cp1F, dac c1X
+    lac cSB
+    dac gBase
+    lac cSP
+    dac gPos
+    jsp gch
+    lac cDB
+    dac pBase
+    lac cDP
+    dac pPos
+    jsp pch
+    idx cSP
+    idx cDP
+    lac cN
+    sub [1]
+    dac cN
+    jmp i c1X
+
+// cpyB -- copy as cpyF does, last to first, for one array when the
+// destination is above the source.
+// Takes cpyF's arguments.
+// No return value.
+// cSP and cDP are left as they were, cN at 0.
+// Does not preserve AC or IO.
+// Called via jsp.
+cpyB, dac cbX
+    lac cN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i cbX
+    lac cSP
+    add cN
+    sub [1]
+    dac cbSrc                 // the last source place
+    lac cDP
+    add cN
+    sub [1]
+    dac cbDst                 // the last destination place
+    // a last destination in a high half takes one character alone
+    lac cbDst
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cbOdd
+    jsp cp1B
+    lac cN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i cbX
+cbOdd, lac cN
+    rar 1s
+    and [PK_WORD]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cbTail
+    dac cbW
+    cma
+    dac cbK
+    lac cbSrc
+    rar 1s
+    and [PK_WORD]
+    add cSB
+    dac cbS
+    lac cbDst
+    rar 1s
+    and [PK_WORD]
+    add cDB
+    dac cbD
+    lac cbSrc
+    and [1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cbSh
+    // the last source in a low half too, so whole words
+cbWL, lac i cbS
+    dac i cbD
+    lac cbS
+    sub [1]
+    dac cbS
+    lac cbD
+    sub [1]
+    dac cbD
+    isp cbK
+    jmp cbWL
+    jmp cbAdv
+    // the last source in a high half, so each word is built from two
+cbSh, lac i cbS
+    rar 9s
+    and [PK_LO]
+    dac cbT
+    lac cbS
+    sub [1]
+    dac cbS
+    lac i cbS
+    ral 9s
+    and [PK_HI]
+    ior cbT
+    dac i cbD
+    lac cbD
+    sub [1]
+    dac cbD
+    isp cbK
+    jmp cbSh
+cbAdv, lac cbW
+    ral 1s
+    dac cbT
+    lac cbSrc
+    sub cbT
+    dac cbSrc
+    lac cbDst
+    sub cbT
+    dac cbDst
+    lac cN
+    sub cbT
+    dac cN
+cbTail, lac cN
+    SKIP_NEXT_IF_AC_ZERO
+    jsp cp1B
+    jmp i cbX
+
+// cp1B -- copy one character for cpyB, place cbSrc to place cbDst.
+// Reads cSB, cbSrc, cDB, cbDst and cN.
+// No return value.
+// cbSrc and cbDst are moved back, cN is one less.
+// Does not preserve AC or IO.
+// Called via jsp.
+cp1B, dac c2X
+    lac cSB
+    dac gBase
+    lac cbSrc
+    dac gPos
+    jsp gch
+    lac cDB
+    dac pBase
+    lac cbDst
+    dac pPos
+    jsp pch
+    lac cbSrc
+    sub [1]
+    dac cbSrc
+    lac cbDst
+    sub [1]
+    dac cbDst
+    lac cN
+    sub [1]
+    dac cN
+    jmp i c2X
+
+// gapTo -- move the gap to the pointer, the text between them crossing it.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+gapTo, dac gtX
+    lac dot
+    sub gs
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i gtX
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gtR
+    // the pointer before the gap, so places dot to gs-1 go up to end at ge
+    lac gs
+    sub dot
+    dac cN
+    dac gtN
+    lac [BUF_BASE]
+    dac cSB
+    dac cDB
+    lac dot
+    dac cSP
+    lac ge
+    sub gtN
+    dac cDP
+    jsp cpyB
+    lac dot
+    dac gs
+    lac ge
+    sub gtN
+    dac ge
+    jmp i gtX
+    // the pointer after the gap, so dot-gs places from ge come down to gs
+gtR, dac cN
+    dac gtN
+    lac [BUF_BASE]
+    dac cSB
+    dac cDB
+    lac ge
+    dac cSP
+    lac gs
+    dac cDP
+    jsp cpyF
+    lac gs
+    add gtN
+    dac gs
+    lac ge
+    add gtN
+    dac ge
+    jmp i gtX
+
+// bGet -- get a character of the text.
+// IO is its index, 0 to zz-1.
+// IO is the character.
+// IO is the result, AC is not preserved.
+// Called via jsp.
+bGet, dac bgX
+    dio bgI
+    lac [BUF_BASE]
+    dac gBase
+    lac bgI
+    sub gs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp bgAft
+    lac bgI
+    dac gPos
+    jsp gch
+    jmp i bgX
+bgAft, add ge
+    dac gPos
+    jsp gch
+    jmp i bgX
+
+// bRoom -- an error (err), the second set's MEM, unless the gap holds a
+// number of characters more.
+// IO is the number.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+bRoom, dac brX
+    dio brN
+    lac ge
+    sub gs
+    sub brN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp brMem
+    jmp i brX
+brMem, ERR0(EC_MEM)
+
+// bIns -- insert characters from an array at the pointer, which ends after
+// them.
+// insN is the count, insP and insB the source place and array; the caller
+// has made room (bRoom).
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+bIns, dac biX
+    jsp gapTo
+    lac insB
+    dac cSB
+    lac insP
+    dac cSP
+    lac insN
+    dac cN
+    lac [BUF_BASE]
+    dac cDB
+    lac gs
+    dac cDP
+    jsp cpyF
+    lac gs
+    add insN
+    dac gs
+    lac dot
+    add insN
+    dac dot
+    lac zz
+    add insN
+    dac zz
+    jmp i biX
+
+// bIns1 -- insert a character at the pointer, which ends after it, an error
+// (err) when the buffer is full.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+bIns1, dac b1X
+    dio b1C
+    law 1
+    lia
+    jsp bRoom
+    jsp gapTo
+    lac [BUF_BASE]
+    dac pBase
+    lac gs
+    dac pPos
+    lio b1C
+    jsp pch
+    idx gs
+    idx dot
+    idx zz
+    jmp i b1X
+
+// bDelR -- delete characters after the pointer.
+// IO is the count; the caller has checked that there are so many.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+bDelR, dac bdX
+    dio dlB
+    lac dot
+    dac dlA
+    add dlB
+    dac dlB
+    jmp bdDo
+
+// bDelL -- delete characters before the pointer, which moves back over them.
+// IO is the count; the caller has checked that there are so many.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+bDelL, dac bdX
+    dio dlA
+    lac dot
+    dac dlB
+    sub dlA
+    dac dlA
+
+// bDelR's and bDelL's deletion of the text from index dlA up to dlB.
+// The pointer and the gap end at dlA.
+// The gap moves only as far as the nearer end of the range, or not at all
+// when it is inside it, so no character the deletion drops is copied.
+// HK with the pointer at the end of a full buffer would otherwise carry all
+// 49,152 across the gap to drop them.
+bdDo, lac gs
+    sub dlA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp bdA                 // the gap before the range moves up to dlA
+    lac dlB
+    sub gs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp bdW                 // the gap inside the range stays
+    lac dlB                 // the gap after the range moves down to dlB
+    jmp bdM
+bdA, lac dlA
+bdM, dac dot
+    jsp gapTo
+    // the gap from dlA to dlB's place after it
+bdW, lac dlB
+    sub gs
+    add ge
+    dac ge
+    lac zz
+    sub dlB
+    add dlA
+    dac zz
+    lac dlA
+    dac gs
+    dac dot
+    jmp i bdX
+
+// bOut -- copy a range of the text to an array, the part before the gap,
+// then the part after it.
+// boM and boN are the range's indexes, 0 <= boM <= boN <= zz, and outP and
+// outB the destination place and array.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+bOut, dac boX
+    lac [BUF_BASE]
+    dac cSB
+    lac outB
+    dac cDB
+    lac outP
+    dac cDP
+    // the first part is boM to boE, boE = min(boN, gs)
+    lac boN
+    sub gs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp .+3
+    lac boN
+    jmp .+2
+    lac gs
+    dac boE
+    sub boM
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp boL2
+    dac cN
+    lac boM
+    dac cSP
+    jsp cpyF
+    // the second part is boS to boN, boS = max(boM, gs)
+boL2, lac boM
+    sub gs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp .+3
+    lac gs
+    jmp .+2
+    lac boM
+    dac boS
+    lac boN
+    sub boS
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp boDone
+    dac cN
+    lac boS
+    add ge
+    sub gs
+    dac cSP
+    jsp cpyF
+boDone, jmp i boX
+
+giX, 0                      // the return addresses
+gcX, 0
+pcX, 0
+cfX, 0
+cbX, 0
+c1X, 0
+c2X, 0
+gtX, 0
+bgX, 0
+brX, 0
+biX, 0
+b1X, 0
+bdX, 0
+boX, 0
+gcW, 0
+pcW, 0
+pcC, 0
+cfW, 0
+cfK, 0
+cfS, 0
+cfD, 0
+cfT, 0
+cbW, 0
+cbK, 0
+cbS, 0
+cbD, 0
+cbT, 0
+cbSrc, 0
+cbDst, 0
+gtN, 0
+bgI, 0
+b1C, 0
+dlA, 0                      // bdDo's range, dlA up to dlB
+dlB, 0
+brN, 0
+boE, 0
+boS, 0
+endloc
+
+gs, 0                       // the gap's first place
+ge, 0                       // the first place after it
+dot, 0                      // the pointer, ".", an index into the text
+zz, 0                       // the text's length, "Z"
+gBase, 0                    // gch's array, a full address, and place
+gPos, 0
+pBase, 0                    // pch's
+pPos, 0
+cSB, 0                      // the copiers' source array and place,
+cSP, 0                      //   destination array and place, and count
+cDB, 0
+cDP, 0
+cN, 0
+insB, 0                     // bIns's source array, place, count
+insP, 0
+insN, 0
+outB, 0                     // bOut's range, and where it goes
+outP, 0
+boM, 0
+boN, 0

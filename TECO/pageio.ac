@@ -1,0 +1,336 @@
+// pageio.ac -- pages in and out, with the input and output
+// selection, Y and A, P, PW, nP and i,jP, and nF.
+//
+// Input is paper tape (ptape.ac), which /S selects, or a file on Microtape or
+// the drum (tapefile.ac), which ER and /Q select.
+// /C empties the paper tape reader's buffer.
+// Output goes to every device selected, which can be the punch (on at the
+// start, /R and /T), a file on Microtape or the drum (tapeout.ac, EI and /W,
+// /V) and the line printer (lpt.ac, off at the start, /E and /B).
+//
+// A page is read through the next FORM, which is not kept, or to the tape's
+// end.
+// When the buffer fills first, the reading stops at the end of the last
+// whole line read, and that line's start and the character that did not fit
+// go back to the reader's buffer for the next Y or A.
+// A line too long for the reader's buffer, or for the whole text buffer, is
+// not cut; what fits is kept, and only the character goes back.
+// From the Microtape the reader's place moves back instead (mtBack), with no
+// buffer to fill.
+//
+// PW punches the buffer and one FORM, nothing more; P is PWY.
+// nP is P n times, ending early when a Y finds the tape's end with nothing
+// read, so Y1000P copies a tape.
+// i,jP punches the text from i up to j, with no FORM.
+// Every output command ends with the printer at a line's start.
+//
+// The handlers are reached from the dispatch (interp.ac, in bank 0), the
+// routines from bank 1 with the extend window open.
+// The file goes in bank 1; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, ptape.ac, lpt.ac, brkChk (termio.ac),
+// and in bank 0 clkTick, the interpreter's argument state (expr.ac, edit.ac,
+// interp.ac) and the buffer (buffer.ac).
+
+local giX, gyX, prX, prLoop, prLf, prFull, prPt, prMt, prMtL, prCut2, prDel, \
+    prDone, prEof, \
+    prRet, ocX, ocMt, ocLp, ocBrk, orX, orL, obX, cpOne, cpN, cpL, cpDone, \
+    prDot, prCut, prN, prC, prE, ocC, cpK
+
+// pgInit -- select input from paper tape and output to the punch alone, and
+// reset the reader and the printer.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+pgInit, dac giX
+    law 1
+    dac outPt
+    dzm outLp
+    jsp rdInit
+    jsp lpInit
+    jmp i giX
+
+// pgY -- Y, empty the buffer, then read a page into it, the pointer
+// at 0.
+// Has no arguments.
+// AC is pgRead's result, IO is not preserved.
+// Called via jsp.
+pgY, dac gyX
+    jsp i [bufInit:0]
+    jsp pgRead
+    jmp i gyX
+
+// pgRead -- append the next page at the end of the buffer, the pointer left
+// where it was (A).
+// Has no arguments.
+// Returns AC 1 when the tape's end came with nothing read, else 0.
+// AC is the result, IO is not preserved.
+// A break leaves through tmErr.
+// Called via jsp.
+pgRead, dac prX
+    lac i [dot:0]
+    dac prDot
+    // the insertions go at the end; prCut is where the last whole line read
+    // ends, the start of this reading until a line feed is read
+    lac i [zz:0]
+    dac i [dot:0]
+    dac prCut
+    dzm prN
+    jsp rdStart
+prLoop, jsp rdGet
+    SKIP_NEXT_IF_AC_ZERO
+    jmp prEof
+    dio prC
+    idx prN
+    lac prC
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp prDone
+    lac i [ge:0]
+    sub i [gs:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp prFull
+    lio prC
+    jsp i [bIns1:0]
+    lac prC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp prLoop
+prLf, lac i [zz:0]
+    dac prCut
+    jmp prLoop
+// the buffer is full, so the line cut short and the character go back.
+// With no whole line before it, the line is longer than the buffer, and what
+// fits is kept, or Y would never get past it.
+prFull, lac i [inMt:MT_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp prMt
+prPt, lac prCut
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp prCut2
+    dac rbFrom
+    lio prC
+    jsp rdBack
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp prDel
+    // the line is too long for the reader's buffer, so only the character
+prCut2, lac i [zz:0]
+    dac prCut
+    dac rbFrom
+    lio prC
+    jsp rdBack
+    jmp prDel
+// from the Microtape, back to the line's start, or with no whole line read,
+// the character alone
+prMt, lac prCut
+    SKIP_NEXT_IF_AC_ZERO
+    jmp prMtL
+    lac i [zz:0]
+    dac prCut
+    cli
+    jsp i [mtBack:MT_BANK]
+    jmp prDel
+prMtL, law 1
+    lia
+    jsp i [mtBack:MT_BANK]
+prDel, lac i [zz:0]
+    sub prCut
+    lia
+    jsp i [bDelL:0]
+prDone, cla
+    jmp prRet
+prEof, lac prN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp prDone
+    law 1
+prRet, dac prE
+    lac prDot
+    dac i [dot:0]
+    lac prE
+    jmp i prX
+
+// outCh -- send the ASCII character in IO to every output selected (the
+// punch, the Microtape by mtPut in tapeout.ac, the printer), then look for
+// the break and read the clock, the punch being slow.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+outCh, dac ocX
+    dio ocC
+    lac outPt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ocMt
+    lio ocC
+    jsp ptPut
+ocMt, lac outMt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ocLp
+    lio ocC
+    jsp mtPut
+ocLp, lac outLp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ocBrk
+    lio ocC
+    jsp lpPut
+ocBrk, jsp brkChk
+    jsp i [clkTick:0]
+    jmp i ocX
+
+// outRange -- send the text from index orM up to orN to every output
+// selected.
+// Takes orM and orN, 0 <= orM <= orN <= Z.
+// No return value; orM ends at orN.
+// Does not preserve AC or IO.
+// Called via jsp.
+outRange, dac orX
+orL, lac orM
+    sub orN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i orX
+    lio orM
+    jsp i [bGet:0]
+    jsp outCh
+    idx orM
+    jmp orL
+
+// outBuf -- PW, send the whole buffer and one FORM to every output
+// selected.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+outBuf, dac obX
+    dzm orM
+    lac i [zz:0]
+    dac orN
+    jsp outRange
+    lio [CH_FF]
+    jsp outCh
+    jmp i obX
+
+// cY -- Y, which takes no argument.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cY, lac i [have:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [err:0]
+    cli
+    jsp i [argOr:0]
+    jsp pgY
+    jmp i [rsLoop:0]
+
+// cAppend -- A with no argument, append a page.
+// Does not preserve AC or IO.
+// Entered by jmp from cA (expr.ac), ends by jmp rsLoop.
+cAppend, cli
+    jsp i [argOr:0]
+    jsp pgRead
+    jmp i [rsLoop:0]
+
+// cP -- i,jP punches the text from i up to j with no FORM, PW the buffer and
+// a FORM, and nP (P as 1P) n times PW then Y, ending at the tape's end.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cP, lac i [comma:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpOne
+    jsp i [arg2:0]
+    lac i [a2M:0]
+    dac orM
+    lac i [a2N:0]
+    dac orN
+    jsp outRange
+    jmp cpDone
+cpOne, jsp i [peekCh:0]
+    SKIP_NEXT_IF_SAME [0127]
+    jmp cpN
+    // PW, which takes no argument
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [err:0]
+    idx i [srcPos:0]
+    cli
+    jsp i [argOr:0]
+    jsp outBuf
+    jmp cpDone
+cpN, law 1
+    lia
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [err:0]
+    dac cpK
+cpL, lac cpK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpDone
+    sub [1]
+    dac cpK
+    jsp outBuf
+    jsp pgY
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpL
+cpDone, jsp lpEnd
+    jmp i [rsLoop:0]
+
+// cF -- nF, punch n blank frames; n is required, 0 or more.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cF, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [err:0]
+    lia
+    jsp ptFeed
+    jmp i [rsLoop:0]
+
+// The selections; each ends any argument.
+// /S selects input from paper tape, the Microtape's file kept open for /Q.
+// /C empties the reader's buffer.
+// /R and /T turn the punch on and off.
+// /E and /B turn the printer on and off, a line begun printed first.
+// Each does not preserve AC or IO.
+// Each is entered by jmp from the dispatch and ends by jmp rsLoop.
+cSelS, cli
+    jsp i [argOr:0]
+    dzm i [inMt:MT_BANK]
+    jmp i [rsLoop:0]
+cSelC, cli
+    jsp i [argOr:0]
+    jsp rdClear
+    jmp i [rsLoop:0]
+cSelR, cli
+    jsp i [argOr:0]
+    law 1
+    dac outPt
+    jmp i [rsLoop:0]
+cSelT, cli
+    jsp i [argOr:0]
+    dzm outPt
+    jmp i [rsLoop:0]
+cSelE, cli
+    jsp i [argOr:0]
+    law 1
+    dac outLp
+    jmp i [rsLoop:0]
+cSelB, cli
+    jsp i [argOr:0]
+    jsp lpEnd
+    dzm outLp
+    jmp i [rsLoop:0]
+
+giX, 0                      // the return addresses
+gyX, 0
+prX, 0
+ocX, 0
+orX, 0
+obX, 0
+prDot, 0                    // pgRead's pointer before it
+prCut, 0                    //   where the last whole line read ends
+prN, 0                      //   characters read
+prC, 0                      //   the character read
+prE, 0                      //   what it returns
+ocC, 0
+cpK, 0                      // the Ps still to do
+endloc
+
+outPt, 0                    // not 0 while the punch is selected (/R, /T)
+outLp, 0                    // not 0 while the printer is selected (/E, /B)
+orM, 0                      // outRange's from and up to
+orN, 0

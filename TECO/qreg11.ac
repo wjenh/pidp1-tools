@@ -1,0 +1,916 @@
+// qreg11.ac -- the second command set's q-registers.
+// A register holds a number and a text at once.
+// There are the 36 global ones in qTab (qreg.ac) and, for each macro level, a set
+// of 36 local ones, .A to .Z and .0 to .9.
+// The file holds the push-down list of q-registers, [q and ]q, and the
+// commands U Q % G M X ^U [ ] with their : forms.
+//
+// The local sets and the push-down list are records as qTab's, at LQ_BASE (teco.ah),
+// first LQ_NSET sets, a set taken from that pool when its level first names a local
+// register, then LQ_NPDL records for the list.
+// A record's number, its block's owner, is 0 to 35 in qTab, then NQREG on through
+// LQ_BASE's (qRecOf).
+// Prompt level has a set too, kept from string to string, as TECO C keeps it.
+// A macro started by Mq opens a level of its own, marking the iteration count its
+// frame keeps (LQ_MARK); mRet then calls mRet11, which ends the level and frees its
+// set.
+// An error ends every macro level (lqDrop).
+// The number words of a record are its number always; the kind says whether it has
+// a text, as the 1965 set reads it.
+//
+// Handlers are entered by jmp from the dispatch (dTab11) and end by jmp i [rsLoop:0];
+// the routines are entered by jsp with the extend window open and return by jmp i.
+// The file goes in bank 15 (EX_BANK), below LQ_BASE; an address of its data that is
+// used indirectly is taken as [name:.], a full address.
+// Needs teco.ah, <AIDS/skipmacros.ah>; in bank 0 interp.ac, expr.ac, buffer.ac,
+// qreg.ac, edit.ac (range, cgTx), control.ac (cmTx); in bank 1 termio.ac's putc; in
+// bank 14 interp11.ac (clr11), edit11.ac (txSv, txArg), control11.ac (trBlk).
+
+local roX, roN, roT, roG, liX, liP, liK, liL, ntX, ntP, ntK, ntL, ntQ, ntN, nmX, nmC, \
+    nmN, nmF, nmDot, nmChr, nmBad, nmGlb, nmRec, lsX, lsK, lsS, lsP, lsTake, lsZero, \
+    lfX, lfS, lfP, lfL, lfN, leX, leL, ldX, ldS, ldN, ldL, ldNx, frX, frS, frP, frK, \
+    frL, frN, mtX, qtX, qtNone, qwX, qwN, qwOld, qwC, cuMN, cuNau, cqN, cqM1, cqOut, \
+    cqLen, cqNum, cpAmt, cgCol, cgK, cgN, cgL, cgT, cgSb, cgSt, cuOne, cuTxt, cuOn, cbN, cbR, cbS, \
+    cbNum, cbNoT, cbFull, crT, crNum, crV, crPes
+
+// qRecOf -- find a record by its number, qTab's for 0 to 35, else LQ_BASE's.
+// IO is the record's number.
+// AC is the record's address.
+// AC is the result, IO is preserved.
+// Called via jsp.
+qRecOf, dac roX
+    dio roN
+    lac roN
+    sub [NQREG]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp roG
+    // LQ_BASE + 5 (n - 36)
+    dac roT
+    ral 2s
+    add roT
+    add [LQ_BASE]
+    jmp i roX
+roG, lac roN
+    ral 2s
+    add roN
+    add [qTab:0]
+    jmp i roX
+
+// lqInit -- take no local set, make prompt level current, empty the push-down list,
+// and make every record at LQ_BASE undefined with the number 0.
+// Called from qInit, when every text is gone.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+lqInit, dac liX
+    dzm lqLev
+    dzm lqSP
+    dzm lqOwn
+    dzm lqOwn+1
+    dzm lqOwn+2
+    dzm lqOwn+3
+    assert LQ_NSET == 4, "lqInit clears four sets' owners"
+    lac [LQ_BASE]
+    dac liP
+    law i LQ_RECS*QR_WORDS
+    dac liK
+liL, dzm i liP
+    idx liP
+    isp liK
+    jmp liL
+    jmp i liX
+
+// qNorm -- set to 0 the number words of every global register that holds no number,
+// so a register the 1965 set gave a text, or left undefined, reads as 0.
+// Called from p11Init, at each greeting that chooses the second set.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qNorm, dac ntX
+    lac [qTab:0]
+    dac ntP
+    law i NQREG
+    dac ntK
+ntL, lac i ntP
+    SKIP_NEXT_IF_DIFFERENT [QK_NUM]
+    jmp ntN
+    lac ntP
+    add [1]
+    dac ntQ
+    dzm i ntQ
+    idx ntQ
+    dzm i ntQ
+    idx ntQ
+    dzm i ntQ
+ntN, lac ntP
+    add [QR_WORDS]
+    dac ntP
+    isp ntK
+    jmp ntL
+    jmp i ntX
+
+// q11Name -- read a register's name from the source, a digit or a letter of either
+// case, or . and one, a local register of this level (lqSet).
+// Another character is IQN, its message naming it; a fifth level's local set is MEM.
+// Has no arguments.
+// qIdx (bank 0) is the record's number, qRec and qR its address, and qLoc is 1 for a
+// local name.
+// Does not preserve AC or IO.
+// Called via jsp.
+q11Name, dac nmX
+    dzm qLoc
+    jsp i [nextCh:0]
+    dio nmC
+    lac nmC
+    and [0177]
+    SKIP_NEXT_IF_SAME [CH_DOT]
+    jmp nmChr
+nmDot, law 1
+    dac qLoc
+    jsp i [nextCh:0]
+    dio nmC
+    // the name's number, a digit 0-9, a letter 10-35
+nmChr, lac nmC
+    and [0177]
+    dac nmC
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp nmBad
+    dac nmN
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp nmGlb
+    lac nmC
+    and [0137]              // lower case as upper
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp nmBad
+    dac nmN
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp nmBad
+    lac nmN
+    add [0d10]
+    dac nmN
+nmGlb, lac qLoc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nmRec
+    // a local one is its set's first record number plus the name's
+    jsp lqSet
+    add [lqFst:.]
+    dac nmF
+    lac i nmF
+    add nmN
+    dac nmN
+nmRec, lac nmN
+    dac i [qIdx:0]
+    lio nmN
+    jsp qRecOf
+    dac qR
+    dac i [qRec:0]
+    jmp i nmX
+nmBad, lac nmC
+    dac i [eArg:0]
+    ERR11(EC_IQN)
+
+// lqSet -- get this level's local set, taken from the pool and cleared when the level
+// has none yet.
+// None free is MEM.
+// Has no arguments.
+// AC is the set's index.
+// AC is the result, IO is preserved.
+// Called via jsp.
+lqSet, dac lsX
+    lac lqLev
+    add [1]
+    dac lsK                 // the owner word of this level's set
+    jsp lsFind
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i lsX
+    dzm lsK
+    jsp lsFind
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp lsTake
+    ERR11(EC_MEM)
+    // the free set is this level's, its records undefined with the number 0
+lsTake, dac lsS
+    add [lqOwn:.]
+    dac lsP
+    lac lqLev
+    add [1]
+    dac i lsP
+    lac lsS
+    add [lqBase:.]
+    dac lsP
+    lac i lsP
+    dac lsP
+    law i NQREG*QR_WORDS
+    dac lsK
+lsZero, dzm i lsP
+    idx lsP
+    isp lsK
+    jmp lsZero
+    lac lsS
+    jmp i lsX
+
+// lsFind -- find the local set with a given owner word.
+// lsK is the owner word.
+// AC is the set's index, or -1 with none.
+// AC is the result, IO is preserved.
+// Called via jsp.
+lsFind, dac lfX
+    dzm lfS
+lfL, lac lfS
+    add [lqOwn:.]
+    dac lfP
+    lac i lfP
+    SKIP_NEXT_IF_DIFFERENT lsK
+    jmp lfN
+    idx lfS
+    sub [LQ_NSET]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfL
+    lac [-1]
+    jmp i lfX
+lfN, lac lfS
+    jmp i lfX
+
+// lqEnd -- end the level a macro started, its set, if it took one, freed, and its
+// caller's level made current.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+lqEnd, dac leX
+    lac lqLev
+    add [1]
+    dac lsK
+    jsp lsFind
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp leL
+    lia
+    jsp lqFree
+leL, lac lqLev
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac lqLev
+    jmp i leX
+
+// lqDrop -- end every macro level at once, for an error or ^C, the sets of all but
+// prompt level freed and prompt level made current.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+lqDrop, dac ldX
+    dzm ldS
+ldL, lac ldS
+    add [lqOwn:.]
+    dac ldN
+    lac i ldN
+    sub [2]                 // a macro level's set has its owner word 2 or more
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ldNx
+    lio ldS
+    jsp lqFree
+ldNx, idx ldS
+    sub [LQ_NSET]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ldL
+    dzm lqLev
+    jmp i ldX
+
+// lqFree -- free a local set, each of its registers' texts freed (qFree), then the set.
+// IO is the set's index.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+lqFree, dac frX
+    dio frS
+    lac frS
+    add [lqOwn:.]
+    dac frP
+    dzm i frP
+    lac frS
+    add [lqBase:.]
+    dac frP
+    lac i frP
+    dac frP
+    law i NQREG
+    dac frK
+frL, lac i frP
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp frN
+    lac frP
+    dac i [qRec:0]
+    jsp i [qFree:0]
+    dzm i frP
+frN, lac frP
+    add [QR_WORDS]
+    dac frP
+    isp frK
+    jmp frL
+    jmp i frX
+
+// mRet11 -- after mRet (control.ac), in the second set, make the trace follow the
+// caller's source, and end a level Mq started (LQ_MARK on the caller's iteration
+// count).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+mRet11, dac mtX
+    lac [-1]
+    dac i [trBlk:P11_BANK]
+    lac i [itDepth:0]
+    and [LQ_MARK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i mtX
+    lac i [itDepth:0]
+    and [~LQ_MARK]
+    dac i [itDepth:0]
+    jsp lqEnd
+    jmp i mtX
+
+// qText -- get the length of a register's text.
+// qR is the register's record.
+// AC is the length, 0 when it has no text, and qtB its block when it has one.
+// AC is the result, IO is preserved.
+// Called via jsp.
+qText, dac qtX
+    lac i qR
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp qtNone
+    lac qR
+    add [QR_BLK]
+    dac qtB
+    lac i qtB
+    dac qtB
+    add [1]
+    dac qtL
+    lac i qtL
+    jmp i qtX
+qtNone, cla
+    jmp i qtX
+
+// qNew -- make a block for a register's text and a number of characters more, those
+// after the text when qApp is set, the text copied in first.
+// The register itself is changed only by qSetText after.
+// A store that cannot fit is MEM with the register as it was, since qAlloc is shown
+// an empty record (qxRec) and so gives none of its text up.
+// IO is the count of characters more, qR the register's record, qIdx its number.
+// qBlk (bank 0) is the block, qW the place of the first character added.
+// Does not preserve AC or IO.
+// Called via jsp.
+qNew, dac qwX
+    dio qwN
+    dzm qwOld
+    lac qApp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp qwC
+    jsp qText
+    dac qwOld
+qwC, lac [qxRec:.]
+    dac i [qRec:0]
+    lac qwOld
+    add qwN
+    lia
+    jsp i [qAlloc:0]
+    lac qR
+    dac i [qRec:0]
+    lac qwOld
+    dac qW
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i qwX
+    // the old text, where compaction may have moved it
+    jsp qText
+    dac i [cN:0]
+    lac qtB
+    add [2]
+    dac i [cSB:0]
+    dzm i [cSP:0]
+    lac i [qBlk:0]
+    add [2]
+    dac i [cDB:0]
+    dzm i [cDP:0]
+    jsp i [cpyF:0]
+    jmp i qwX
+
+// c11U -- nUq, m,nUq, set q's number to n; m,n leaves m as the value.
+// With no n it is NAU.
+// Reads n and m from have, val, comma and mval.
+// For m,n, m is passed on as an operand (opnd).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11U, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cuNau
+    jsp q11Name
+    lac qR
+    add [1]
+    dac ntP
+    lac i [val:0]
+    dac i ntP
+    idx ntP
+    lac i [val:0+1]
+    dac i ntP
+    idx ntP
+    lac i [val:0+2]
+    dac i ntP
+    // undefined becomes a number; a text's kind stays, the number being the words
+    lac i qR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law QK_NUM
+    dac i qR
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cuMN
+    jsp i [clr11:P11_BANK]
+    jmp i [rsLoop:0]
+cuMN, lac i [mval:0]
+    dac i [ra:0]
+    lac i [mval:0+1]
+    dac i [ra:0+1]
+    lac i [mval:0+2]
+    dac i [ra:0+2]
+    jsp i [clr11:P11_BANK]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+cuNau, ERR11(EC_NAU)
+
+// c11Q -- Qq, nQq, :Qq, give q's number, the code of its text's character n
+// (-1 out of range), or the text's length.
+// Reads n from have, val and op, and colon11.
+// The value is passed on as an operand (opnd).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Q, jsp q11Name
+    lac i [colon11:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cqLen
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cqNum
+    lac i [op:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cqNum
+    // for nQq, n is the argument, no operator after it
+    lac i [val:0]
+    dac i [ra:0]
+    lac i [val:0+1]
+    dac i [ra:0+1]
+    lac i [val:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac cqN
+    jsp i [clr11:P11_BANK]
+    lac cqN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cqM1
+    jsp qText
+    dac cgK
+    lac cqN
+    sub cgK
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cqM1
+    lac qtB
+    add [2]
+    dac i [gBase:0]
+    lac cqN
+    dac i [gPos:0]
+    jsp i [gch:0]
+    jmp cqOut
+cqM1, lio [-1]
+cqOut, jsp i [fromInt:0]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+cqLen, dzm i [colon11:0]
+    jsp qText
+    lia
+    jmp cqOut
+cqNum, lac qR
+    add [1]
+    dac ntP
+    lac i ntP
+    dac i [ra:0]
+    idx ntP
+    lac i ntP
+    dac i [ra:0+1]
+    idx ntP
+    lac i ntP
+    dac i [ra:0+2]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+
+// c11Pct -- n%q, %q, add n, or 1, to q's number and store it.
+// Reads n from have and val.
+// The sum is passed on as an operand (opnd).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Pct, jsp q11Name
+    dzm i [rb:0]
+    dzm i [rb:0+1]
+    law 1
+    dac i [rb:0+2]
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpAmt
+    lac i [val:0]
+    dac i [rb:0]
+    lac i [val:0+1]
+    dac i [rb:0+1]
+    lac i [val:0+2]
+    dac i [rb:0+2]
+cpAmt, jsp i [clr11:P11_BANK]
+    lac qR
+    add [1]
+    dac ntP
+    lac i ntP
+    dac i [ra:0]
+    idx ntP
+    lac i ntP
+    dac i [ra:0+1]
+    idx ntP
+    lac i ntP
+    dac i [ra:0+2]
+    jsp i [add36:0]
+    // the sum goes back low word first, ntP being at the number's last word
+    lac i [ra:0+2]
+    dac i ntP
+    lac ntP
+    sub [1]
+    dac ntP
+    lac i [ra:0+1]
+    dac i ntP
+    lac ntP
+    sub [1]
+    dac ntP
+    lac i [ra:0]
+    dac i ntP
+    lac i qR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law QK_NUM
+    dac i qR
+    jmp cqNum
+
+// c11G -- Gq, insert q's text at the pointer (cgTx), nothing when it has none;
+// :Gq types it.
+// G_ and :G_ are the search string's (search11.ac's c11Gs), G* and :G* the last file
+// specification's (files11.ac's fiGSt).
+// Reads colon11.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop or through cgTx, c11Gs or
+// fiGSt.
+c11G, lac i [colon11:0]
+    dac cgCol
+    jsp i [clr11:P11_BANK]
+    jsp i [peekCh:0]
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp cgSb
+    SKIP_NEXT_IF_DIFFERENT [CH_STAR]
+    jmp cgSt
+    jsp q11Name
+    lac cgCol
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cgL
+    lac i qR
+    SKIP_NEXT_IF_DIFFERENT [QK_TEXT]
+    jmp i [cgTx:0]
+    dzm i [lsLen:0]
+    jmp i [rsLoop:0]
+    // :Gq types the characters as they are
+cgL, jsp qText
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    cma
+    dac cgK
+    lac qtB
+    add [2]
+    dac qtB
+    dzm cgN
+cgT, lac qtB
+    dac i [gBase:0]
+    lac cgN
+    dac i [gPos:0]
+    jsp i [gch:0]
+    jsp i [putc:1]
+    idx cgN
+    isp cgK
+    jmp cgT
+    jmp i [rsLoop:0]
+    // G_ has the _ consumed and the colon passed in AC
+cgSb, jsp i [nextCh:0]
+    lac cgCol
+    jmp i [c11Gs:P11_BANK]
+cgSt, jsp i [nextCh:0]
+    lac cgCol
+    jmp fiGSt
+
+// c11M -- Mq, :Mq, M.q, run q's text as a macro with the arguments before
+// it (cmTx).
+// Mq opens a level of local registers; :Mq and M.q run in this one.
+// A register with no text runs nothing.
+// Reads colon11.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop or through cmTx.
+c11M, lac i [colon11:0]
+    dac cgCol
+    dzm i [colon11:0]
+    jsp q11Name
+    lac i qR
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp i [rsLoop:0]
+    lac [-1]
+    dac i [trBlk:P11_BANK]
+    lac cgCol
+    ior qLoc
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [cmTx:0]
+    idx lqLev
+    lac i [itDepth:0]
+    ior [LQ_MARK]
+    dac i [itDepth:0]
+    jmp i [cmTx:0]
+
+// c11X -- nXq, m,nXq, copy the text range gives into q; :X appends it.
+// Reads colon11, and the range from range.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11X, lac i [colon11:0]
+    dac qApp
+    jsp i [range:0]
+    jsp i [clr11:P11_BANK]
+    jsp q11Name
+    lac i [a2N:0]
+    sub i [a2M:0]
+    lia
+    jsp qNew
+    lac i [qBlk:0]
+    add [2]
+    dac i [outB:0]
+    lac qW
+    dac i [outP:0]
+    lac i [a2M:0]
+    dac i [boM:0]
+    lac i [a2N:0]
+    dac i [boN:0]
+    jsp i [bOut:0]
+    jsp i [qSetText:0]
+    jmp i [rsLoop:0]
+
+// c11CtU -- ^Uqtext$, :^Uqtext$, set q's text to the text, or append it;
+// n^Uq$ and n:^Uq$ do so with the character n, modulo 256.
+// @^Uq/text/ has its own delimiter.
+// Reads colon11, and n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11CtU, lac i [colon11:0]
+    dac qApp
+    lac i [have:0]
+    dac cuOne
+    lac i [val:0+2]
+    and [0377]
+    dac cuTxt               // n's character
+    jsp i [txSv:P11_BANK]
+    jsp i [clr11:P11_BANK]
+    jsp q11Name
+    lio [CH_ESC]
+    jsp i [txArg:P11_BANK]
+    dac cgK                 // the text's length; it starts at srcPos - length - 1
+    lac cuOne
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cuOn
+    lio cgK
+    jsp qNew
+    lac i [srcPos:0]
+    sub cgK
+    sub [1]
+    dac i [cSP:0]
+    lac i [srcArr:0]        // read after qNew, which may move a macro's source
+    dac i [cSB:0]
+    lac i [qBlk:0]
+    add [2]
+    dac i [cDB:0]
+    lac qW
+    dac i [cDP:0]
+    lac cgK
+    dac i [cN:0]
+    jsp i [cpyF:0]
+    jsp i [qSetText:0]
+    jmp i [rsLoop:0]
+cuOn, law 1
+    lia
+    jsp qNew
+    lac i [qBlk:0]
+    add [2]
+    dac i [pBase:0]
+    lac qW
+    dac i [pPos:0]
+    lio cuTxt
+    jsp i [pch:0]
+    jsp i [qSetText:0]
+    jmp i [rsLoop:0]
+
+// c11Lb -- [q, push a copy of q's number and text onto the push-down list; the
+// arguments pass through.
+// The list is LQ_NPDL deep, then PDO.
+// Has no arguments.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Lb, jsp q11Name
+    lac lqSP
+    sub [LQ_NPDL]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cbFull
+    // the entry's record is number NQREG + LQ_NSET*NQREG + lqSP
+    lac lqSP
+    add [NQREG+LQ_NSET*NQREG]
+    dac cbN
+    lio cbN
+    jsp qRecOf
+    dac cbR
+    dac ntP
+    lac qR
+    dac cbS
+    // the kind and number words
+    law i 4
+    dac cgK
+cbNum, lac i cbS
+    dac i ntP
+    idx cbS
+    idx ntP
+    isp cgK
+    jmp cbNum
+    lac i cbR
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp cbNoT
+    // its text goes in a block of the entry's own, the source found again after qAlloc
+    dzm i cbR
+    jsp qText
+    dac cgK
+    lac cbN
+    dac i [qIdx:0]
+    lac cbR
+    dac i [qRec:0]
+    lio cgK
+    jsp i [qAlloc:0]
+    jsp qText
+    lac qtB
+    add [2]
+    dac i [cSB:0]
+    dzm i [cSP:0]
+    lac i [qBlk:0]
+    add [2]
+    dac i [cDB:0]
+    dzm i [cDP:0]
+    lac cgK
+    dac i [cN:0]
+    jsp i [cpyF:0]
+    lac cbR
+    add [QR_BLK]
+    dac ntP
+    lac i [qBlk:0]
+    dac i ntP
+    law QK_TEXT
+    dac i cbR
+cbNoT, idx lqSP
+    jmp i [rsLoop:0]
+cbFull, ERR11(EC_PDO)
+
+// c11Rb -- ]q, pop the list's last entry into q's number and text; the
+// arguments pass through.
+// An empty list is PES.
+// :]q does it if it can, -1 if it did, 0 if not.
+// Reads colon11.
+// For :]q, the -1 or 0 is passed on as an operand (opnd).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Rb, lac i [colon11:0]
+    dac cgCol
+    dzm i [colon11:0]
+    jsp q11Name
+    lac lqSP
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crT
+    lac cgCol
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp crPes
+    cli
+    jmp cqOut
+crT, sub [1]
+    dac lqSP
+    add [NQREG+LQ_NSET*NQREG]
+    lia
+    jsp qRecOf
+    dac cbR
+    jsp i [qFree:0]         // q's text, qRec being q's
+    // the kind and number words; the text's block changes owner
+    lac cbR
+    dac cbS
+    lac qR
+    dac ntP
+    law i 4
+    dac cgK
+crNum, lac i cbS
+    dac i ntP
+    idx cbS
+    idx ntP
+    isp cgK
+    jmp crNum
+    lac i cbR
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp crV
+    lac cbR
+    add [QR_BLK]
+    dac cbS
+    lac i cbS
+    dac cbS                 // the block
+    lac i cbS
+    and [QR_HOLDS]
+    ior i [qIdx:0]
+    dac i cbS
+    lac qR
+    add [QR_BLK]
+    dac ntP
+    lac cbS
+    dac i ntP
+crV, dzm i cbR
+    lac cgCol
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    lio [-1]
+    jmp cqOut
+crPes, ERR11(EC_PES)
+
+roX, 0                      // the return addresses
+liX, 0
+ntX, 0
+nmX, 0
+lsX, 0
+lfX, 0
+leX, 0
+ldX, 0
+frX, 0
+mtX, 0
+qtX, 0
+qwX, 0
+roN, 0
+roT, 0
+liP, 0
+liK, 0
+ntP, 0
+ntK, 0
+ntQ, 0
+nmC, 0
+nmN, 0
+nmF, 0
+lsK, 0
+lsS, 0
+lsP, 0
+lfS, 0
+lfP, 0
+ldS, 0
+ldN, 0
+frS, 0
+frP, 0
+frK, 0
+qwN, 0
+qwOld, 0
+cqN, 0
+cgCol, 0
+cgK, 0
+cgN, 0
+cuOne, 0
+cuTxt, 0
+cbN, 0
+cbR, 0
+cbS, 0
+endloc
+
+qR, 0                       // q11Name's record, a full address
+qLoc, 0                     //   1 for a local name
+qtB, 0                      // qText's block
+qtL, 0
+qApp, 0                     // qNew's flag, append to the text
+qW, 0                       //   the first new character's place
+lqLev, 0                    // the macro level, 0 prompt level, 1 up a level Mq started
+lqSP, 0                     // the push-down list's entries
+lqOwn, 0                    // each local set's level plus 1, 0 while it is free
+    0
+    0
+    0
+lqBase, LQ_BASE             // each set's first record
+    LQ_BASE+NQREG*QR_WORDS
+    LQ_BASE+2*NQREG*QR_WORDS
+    LQ_BASE+3*NQREG*QR_WORDS
+lqFst, NQREG                // each set's first record number
+    2*NQREG
+    3*NQREG
+    4*NQREG
+qxRec, 0                    // an empty record, for qNew's qAlloc
+    0
+    0
+    0
+    0

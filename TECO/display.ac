@@ -1,0 +1,1629 @@
+// display.ac -- the Type 340 display.
+// It builds the list in bank 11 from the buffer at every idle (dpyShow), and every wait
+// starts the list again once it stops (dpyTick).
+// It also holds V, VW, n/N, n/D and /U, and the WAIT program a Microtape call shows
+// (mtCall).
+// Sense switch 5 (SW_DPY) on turns the 340 off, so no list is built and none is started.
+// The switch is read at every idle, in every wait and before VW and WAIT.
+// The second set's 0W (dpy11.ac), its split screen and VT100 mode (vt11.ac) set dpyNo,
+// which idle (teco.am1) and mtCall read alike.
+//
+// The list is character mode, both sets (charsets(2)).
+// A row starts with a parameter word, a y point word and an x point word that enters
+// character mode, then the codes three to a word, a shift before each change of set,
+// and the end code.
+// A row is the screen's, from DPY_LEFT in, and a line too long goes on in the
+// next one.
+// The pointer's bar is a vector after its point words, one scale step left of the
+// character after the pointer, in the gap between two characters or, in column 0, in
+// the margin.
+// dpyTick turns its visible bit on and off with the clock's half second.
+// The list ends in a halt.
+//
+// Characters are as the memo has them.
+// Space, TAB, CR and LF act as such.
+// Every other non-printing character, BELL, @ and DEL among them (in neither set), is a
+// down arrow and its code in octal as a subscript.
+// 0136 and 0137 are 1965 ASCII's up and left arrows, from set 2.
+// The grave is set 2's accent over a space, so it keeps its place.
+//
+// Handlers are entered by jmp from the dispatch (interp.ac, in bank 0) and end by
+// jmp i [rsLoop:0]; an error is jmp i [err:0].
+// Routines are called via jsp with the extend window open and return by jmp i.
+// Addresses kept in words are full 16-bit ones.
+// The file goes in bank 1, where the WAIT program's jump can reach it.
+// Its data words follow its code, and the resume points of a build (dRec) are in bank
+// 13 (DPY_RING).
+// Needs teco.ah, <AIDS/skipmacros.ah>, <TYPE340/type340defs.ah>,
+// <MICROTAPE/microtape.ah>, pollc and brkChk (termio.ac); in bank 0 dot, zz, gs, ge,
+// range and its a2M and a2N, argOr, have, fromInt, opnd, peekCh, srcPos, clkTick and
+// ckLo; in bank 12 unitO, hGet, hAdr, entGet, elS, mtEnt, nmUnp, mtNmCh, nmLen and nmSp
+// (tapefile.ac).
+
+local diX, dsX, dtX, dtW, dtSet, dtGo, dwX, dwV, dwU, dwGo, dbX, dbB, dbT, dbS, \
+    dbF, dbR, dbNx, dbDr, dbJ, dbK, dbQ, dbP, dkX, dkEv, dkRe, dkH, dkL, dkGo, dkUn, \
+    dkPk, dkSet, dkSl, dkI, dkSeg, dkN, dkNx, dkStp, mnX, mnC, paX, paI, paT, paB, \
+    atX, atH, sbX, sbI, sbC, sbL, sbR, sbE, sbTr, xcX, hlX, reX, reI, reP, \
+    dpX, dpS, dpD, dmX, dmP, dmQ, dmK, dmL, dgX, dgS, dgW, dnX, \
+    lpX, cpX, cpC, roX, rcX, rcPad, gpX, gpE, gpGo, gpC, gpSp, dcX, dcC, dcP, dcE, \
+    dcW, dcK, dcG, dcJ, dcCtl, dcTab, dcCr, dcLf, dcGrv, dcGn, dcD2, dcD1, dcD0, \
+    dcCa, dcCu, wrX, wrW, wrNew, ruX, ruTop, ruK, kcX, cuX, nlX, duB, duC, \
+    duX, duP, duN, duK, duZ, duZe0, duBig, duF, duS, duL, duM, duNx, duE, duQ, \
+    duCell, duFree, duDir, duPut, duChart, duPad, duLst, duL2, duN2, duTwo, duBk, \
+    duMode, duStar, duMc, duA, duZe, dhX, dhN, dhL, drX, drL, nmX, nmV, nmZ, ngX, ngP, ngK, \
+    cvV, cvW, cvK, cdT, cnBig, tcRet, tcFn, tcGo, tcA, tcI, wtProg
+
+// dpyInit -- set the display as at the start, at size 1 with DPY_LINES lines a side,
+// nothing held and the 340 stopped.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp, from any bank with the extend window open.
+dpyInit, dac diX
+    law 1
+    dac dpySize
+    law DPY_LINES
+    dac dpyLines
+    dzm dpyHeld
+    jsp dpyStop
+    jmp i diX
+
+// dpyStop -- send the 340 to a halt word, and clear dpyOn so dpyTick does not start
+// the list again.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp, from any bank with the extend window open.
+dpyStop, dac dsX
+    dzm dpyOn
+    lio [dpyHlt:.]
+    dla
+    jmp i dsX
+
+// dpyTick -- once the list has stopped, at its halt or at an edge, start it again,
+// with the pointer's bar drawn in the first half of each 1,024 ms of the clock's total
+// and not in the second.
+// The clock is not read here, as its readers time their intervals.
+// With the display's switch on, it never starts the list again, which runs to its halt
+// and stays there.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp, in every wait (termio.ac).
+dpyTick, dac dtX
+    szs SW_DPY*010          // skip if the display's switch is off
+    dzm dpyOn
+    lac dpyOn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i dtX
+    dss dsv dsh             // skip once the list has stopped
+    jmp i dtX
+    lac dpyBar
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dtGo
+    lac i dpyBar
+    and [0577777]           // visible off
+    dac dtW
+    lac i [ckLo:0]
+    and [DPY_FLASH]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp dtSet
+    lac dtW
+    ior [visible]
+    dac dtW
+dtSet, lac dtW
+    dac i dpyBar
+dtGo, lio [DPY_BASE]
+    dla
+    jmp i dtX
+
+// dpyShow -- at every idle, build in bank 11 and start the display the last command
+// string leaves.
+// That is V's range or /U's directory when the string ended with one, else dpyLines
+// lines each side of the pointer and the pointer's line, the range lnTo would give,
+// which dpyBuf finds as it goes.
+// The hold is used up.
+// With the display's switch on, nothing is built or started, and dpyTick stops what
+// still runs.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp, from any bank with the extend window open.
+dpyShow, dac dwX
+    lac dpyHeld
+    dzm dpyHeld
+    szs SW_DPY*010          // skip if the display's switch is off
+    jmp i dwX
+    SKIP_NEXT_IF_DIFFERENT [DH_U]
+    jmp dwU
+    dzm dLfN
+    SKIP_NEXT_IF_DIFFERENT [DH_V]
+    jmp dwV
+    dzm dpyA
+    lac i [zz:0]
+    dac dpyB
+    lac dpyLines
+    add [1]
+    dac dLfN
+dwV, jsp dpyBuf
+    jmp dwGo
+dwU, jsp dpyDir
+dwGo, law 1
+    dac dpyOn
+    lio [DPY_BASE]
+    dla
+    jmp i dwX
+
+// dpyBuf -- build the list of the buffer from dpyA up to dpyB at size dpySize, with the
+// pointer's bar where it falls.
+// With dLfN not 0, it shows only dLfN line feeds each side of the pointer within those
+// bounds, as lnTo counts them.
+// When there are more rows than the screen holds, it shows as many as it holds,
+// centered on the pointer's row, or the last screenful when that is further up, and
+// with no pointer in the range, the first rows.
+// Its arguments are dpyA, dpyB, dpySize and dLfN.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+dpyBuf, dac dbX
+    lio dpySize
+    jsp dGeom
+    dzm dFirst
+    dzm dbF
+    lac dpyA
+    dac dbS
+    // the pointer in the range and before the buffer's end has a row to center on
+    dzm sbTr
+    lac i [dot:0]
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp dbB
+    lac i [dot:0]
+    sub dpyA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dbB
+    lac dpyB
+    sub i [dot:0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dbB
+    law 1
+    dac sbTr
+dbB, lac sbTr
+    ior dLfN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dbDr                // V's range with no pointer in it, so from dpyA
+    jsp dBack
+    dac dbS
+    lac sbTr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dbDr                // the pointer at the buffer's end, so the first rows
+    // a pointer to center on takes two walks; the first counts rows, drawing nothing,
+    // from where the screen cannot be changed by starting further back (dBack) to as
+    // far past the pointer as dFirst needs; the second draws from the last resume
+    // point (dRec) at or above row dFirst to the screen's last row
+    // the count, its start the first resume point
+    lac dbS
+    dac i [DPY_RING]
+    dzm i [DPY_RING+1]
+    law 1
+    dac dRngI
+    dac dRngN
+    dac dCnt
+    lac [0377777]
+    dac dFirst              // no row drawn
+    dac dStop
+    dzm dRow
+    dzm dRun
+    dzm dKeep
+    dzm dFull
+    dzm dLfB
+    lac dbS
+    dac dkI
+    jsp dWalk
+    dzm dCnt
+    dzm dFirst
+    lac dRow
+    sub dRows
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dbDr                // every row fits
+    lac dPRow
+    sub dHalf
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp dbDr                // the pointer's row in the first half, so the first rows
+    dac dFirst
+    // no further than the last screenful, of dRow+1 rows in all
+    lac dRow
+    sub dRows
+    add [1]
+    dac dbT
+    lac dFirst
+    sub dbT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp .+3                 // dFirst short of the last screenful is kept
+    lac dbT
+    dac dFirst
+    // the newest resume point at or above row dFirst; the count's start if none is
+    // left in the ring
+    lac dRngN
+    cma
+    dac dbK
+    lac dRngI
+    dac dbJ
+dbR, lac dbJ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    lac [DPY_RINGN]
+    sub [1]
+    dac dbJ
+    add dbJ
+    add [DPY_RING]
+    dac dbP
+    add [1]
+    dac dbQ
+    lac i dbQ
+    sub dFirst
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp dbNx
+    lac i dbQ
+    dac dbF
+    lac i dbP
+    dac dbS
+    jmp dbDr
+dbNx, isp dbK
+    jmp dbR
+dbDr, lio [DPY_END]
+    jsp dBegin
+    lac dbF
+    dac dRow
+    jsp kCalc
+    lac dFirst
+    add dRows
+    dac dStop               // the first row not drawn ends the walk (rowUp)
+    lac dbS
+    dac dkI
+    jsp dWalk
+    jsp dEnd
+    jmp i dbX
+
+// dBack -- find where the walk starts, back from the pointer to just after the
+// dLfN-th line feed before it (none when 0), or dpyA, as lnTo finds the start.
+// With a pointer's row to center on (sbTr), it stops sooner, just after a CR LF at
+// least dRows+1 line feeds back.
+// The column is 0 there however far back the walk starts, and with the pointer's line
+// at least dRows rows down, the rows dpyBuf draws are the same.
+// Its arguments are dpyA, dLfN, sbTr and dRows.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+dBack, dac sbX
+    lac i [dot:0]
+    dac sbI
+    dzm sbC
+sbL, lac sbI
+    sub dpyA
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp sbR
+    lac dpyA
+    jmp i sbX
+sbR, lac sbI
+    sub [1]
+    dac sbI
+    lia
+    jsp dAt
+    lai
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp sbL
+    idx sbC
+    SKIP_NEXT_IF_DIFFERENT dLfN
+    jmp sbE                 // the dLfN-th
+    lac sbTr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbL
+    lac sbC
+    sub dRows
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp sbL                 // not dRows+1 back yet
+    lac sbI
+    sub dpyA
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp sbL                 // nothing before it in the range
+    lac sbI
+    sub [1]
+    lia
+    jsp dAt
+    lai
+    SKIP_NEXT_IF_SAME [CH_CR]
+    jmp sbL
+sbE, lac sbI
+    add [1]
+    jmp i sbX
+
+// dWalk -- draw the text from index dkI up to dpyB through dChar, the cursor in row
+// dRow at column 0 at the start.
+// A glyph that fits in its row goes the short way here, as dChar and gPut would draw
+// it.
+// It ends sooner when rowUp or a line feed asks (dHalt).
+// Its arguments are dkI and dRow.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+dWalk, dac dkX
+    dzm dkStp
+    dzm dCol
+    // the text is read in runs, each to its next event, which is the pointer, where
+    // dPtr is called, the gap, which the reading jumps, or the end; dkN counts a run's
+    // characters up to 0
+dkEv, lac dkStp             // an event at dkI, its character not yet read
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i dkX
+    lac dkI
+    SKIP_NEXT_IF_DIFFERENT i [dot:0]
+    jsp dPtr
+    lac dkStp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i dkX
+    lac dkI
+    sub dpyB
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i dkX               // the end
+    lac dpyB
+    dac dkSeg
+    lio i [gs:0]
+    jsp dkMin
+    lio i [dot:0]
+    jsp dkMin
+    lac dkI
+    sub dkSeg
+    sub [1]
+    dac dkN
+    lio dkI
+    jsp dPlace
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp dkH
+    jmp dkL
+dkH, isp dkN                // an even place, the word's high half
+    jmp .+2
+    jmp dkRe
+    lac i dRdP
+    rar 9s
+    and [0177]
+    lia
+    lac [dkL|thisbank]
+    dac dkNx
+    jmp dkGo
+dkL, isp dkN                // an odd place, the low half, then the next word
+    jmp .+2
+    jmp dkRe
+    lac i dRdP
+    and [0177]
+    lia
+    idx dRdP
+    lac [dkH|thisbank]
+    dac dkNx
+dkGo, dio dcC
+    lai
+    add [dsTab:DT_BANK]
+    dac dcP
+    lac i dcP
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dkSl                // TAB, CR, LF, the grave, a control
+    dac dcE
+    lac dCol
+    sub dCols
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp dkSl                // a new row first
+    lac dKeep
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dkUn
+    lac dRun
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dkSl                // no run open
+    lac dcE
+    and [0300]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp dkSet
+dkPk, lac dcE               // as cPut packs it, three to a word
+    and [077]
+    dac cpC
+    lac dW
+    ral 6s
+    ior cpC
+    dac dW
+    idx dN
+    SKIP_NEXT_IF_SAME [3]
+    jmp dkUn
+    lio dW
+    jsp lPut
+    dzm dW
+    dzm dN
+dkUn, idx dCol
+    jmp i dkNx
+dkSet, sar 6s               // the glyph's set is the run's, or dChar shifts
+    SKIP_NEXT_IF_SAME dShift
+    jmp dkSl
+    jmp dkPk
+dkSl, lio dcC
+    jsp dChar
+    jmp i dkNx
+dkRe, lac dkSeg             // the run's end
+    dac dkI
+    jmp dkEv
+
+// dkMin -- make dkSeg IO when IO is past dkI and short of dkSeg.
+// IO is an index.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+dkMin, dac mnX
+    dio mnC
+    lac dkI
+    sub mnC
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i mnX
+    lac mnC
+    sub dkSeg
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i mnX
+    dio dkSeg
+    jmp i mnX
+
+// dPlace -- set dRdP to the word of the text holding index IO.
+// IO is the index.
+// AC is negative when the character is the word's low half (an odd place), as
+// buffer.ac's gch has it.
+// AC is the result, IO is preserved.
+// Called via jsp.
+dPlace, dac paX
+    dio paI
+    lac paI
+    sub i [gs:0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp paB
+    add i [ge:0]
+    jmp .+2
+paB, lac paI
+    rar 1s
+    dac paT
+    and [PK_WORD]
+    add [BUF_BASE]
+    dac dRdP
+    lac paT
+    jmp i paX
+
+// dAt -- read the character at an index of the text, as bGet has it, without the far
+// call.
+// IO is the index.
+// IO is the character on return, AC is not preserved.
+// Called via jsp.
+dAt, dac atX
+    jsp dPlace
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp atH
+    lac i dRdP
+    and [0177]
+    lia
+    jmp i atX
+atH, lac i dRdP
+    rar 9s
+    and [0177]
+    lia
+    jmp i atX
+
+// dHalt -- end the walk at its next event, by making the run's count its last.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+dHalt, dac hlX
+    law 1
+    dac dkStp
+    lac [-1]
+    dac dkN
+    jmp i hlX
+
+// dRec -- in the count (dCnt), after a line feed, when the column is 0, record the
+// next index and its row as a resume point, the newest of DPY_RINGN kept in bank 13.
+// Its arguments are the walk's dkStp, dkSeg, dkN, dCol and dRow.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+dRec, dac reX
+    lac dkStp
+    ior dCol
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i reX
+    lac dkSeg               // the line feed's index is dkSeg plus dkN
+    add dkN
+    add [1]
+    dac reI
+    lac dRngI
+    add dRngI
+    add [DPY_RING]
+    dac reP
+    lac reI
+    dac i reP
+    idx reP
+    lac dRow
+    dac i reP
+    lac dRngI
+    add [1]
+    and [DPY_RINGN-1]
+    dac dRngI
+    lac dRngN
+    sub [DPY_RINGN]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i reX
+    idx dRngN
+    jmp i reX
+    assert (DPY_RINGN & (DPY_RINGN-1)) == 0, "the ring of resume points is a power of 2"
+    // more rows than that, size 0's, can leave none at or above dFirst, and the walk
+    // then starts at the count's start, slower, the same rows drawn
+    assert DPY_RINGN > DG_ROWS(2), "the ring keeps a point above size 1's first row"
+    assert DPY_RING >= WRBUF+0400 && DPY_RING+2*DPY_RINGN <= 0160000, "the ring is in bank 13's free end"
+
+// dPtr -- at the pointer, unless it is at the buffer's end, record its row and arm the
+// range's end dLfN line feeds on (dcLf).
+// In the count, it sets the row where counting may stop, or stops the walk now when
+// the pointer's row is in the first half.
+// Otherwise it draws the bar at the cursor.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+dPtr, dac dpX
+    lac i [dot:0]
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i dpX
+    lac dRow
+    dac dPRow
+    lac dLfN
+    SKIP_NEXT_IF_AC_ZERO
+    cma
+    dac dLfB
+    lac dCnt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dpD
+    lac dRow
+    sub dHalf
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp dpS
+    jsp dHalt
+    jmp i dpX
+dpS, add dRows              // dpyBuf's dFirst is fixed once dRow-dRows+1 reaches it
+    sub [1]
+    dac dStop
+    jmp i dpX
+dpD, lac dKeep
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i dpX
+    jsp rClose
+    lio [next(point)]
+    jsp lPut
+    lac dYc
+    ior [y(0)|next(point)]
+    lia
+    jsp lPut
+    // a scale step left of the next character, in the gap after the last or, in
+    // column 0, in the margin, which is wider than any step
+    jsp dXcOf
+    sub dF
+    ior [next(vector)]
+    lia
+    jsp lPut
+    lac dP
+    dac dpyBar
+    lio [visible|up|deltay(DPY_BARH)]
+    jsp lPut
+    lio [down|deltay(DPY_BARH)|end]
+    jsp lPut
+    jmp i dpX
+
+// dXcOf -- compute the cursor's x, the margin and dCol characters.
+// Its arguments are dCol and dChW.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+dXcOf, dac xcX
+    lac dCol
+    mul dChW
+    scr 1s                  // mul leaves the product shifted left one in AC:IO
+    lai
+    add [DPY_LEFT]
+    jmp i xcX
+
+// dGeom -- load the geometry of a size into dSize and dF to dHalf (dgTab).
+// IO is the size, 0 to 3.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+dGeom, dac dmX
+    dio dSize
+    lac dSize
+    sal 3s
+    sub dSize               // 7 words a size
+    add [dgTab:DT_BANK]
+    dac dmP
+    lac [dF:.]
+    dac dmQ
+    law 7
+    cma
+    dac dmK
+dmL, lac i dmP
+    dac i dmQ
+    idx dmP
+    idx dmQ
+    isp dmK
+    jmp dmL
+    jmp i dmX
+
+// dBegin -- begin a new list, with the emitter at row 0, column 0, no run and no bar,
+// and the list's first word the parameter word of size dSize.
+// dYc is row 0's y, right when dFirst is 0 (rowUp sets it at dFirst).
+// dpyTick does not start the list again until the build that clears dpyOn here sets
+// it, so a list a break leaves unfinished (rowUp) is never started.
+// IO is the full address the list's words end below.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+dBegin, dac dgX
+    dzm dpyOn
+    dio dHard
+    lac dHard
+    sub [1]
+    dac dHard
+    sub [DPY_ROOM]
+    dac dLim
+    lac [DPY_BASE]
+    dac dP
+    dzm dFull
+    dzm dW
+    dzm dN
+    dzm dRun
+    dzm dShift
+    dzm dRow
+    dzm dCol
+    dzm dCnt
+    dzm dLfB
+    lac [0377777]
+    dac dStop
+    dzm dpyBar
+    lac [-1]
+    dac dPRow
+    lac dYtop
+    dac dYc
+    jsp kCalc
+    // size 0 dimmer (DPY_INTEN0), as its glyphs are smaller and closer, so brighter
+    // to the eye
+    lac dSize
+    SKIP_NEXT_IF_AC_ZERO
+    jmp dgS
+    lac [0100|intensity(DPY_INTEN0)|charsets(2)|lpoff]
+    jmp dgW
+dgS, sal 4s
+    ior [0100|intensity(DPY_INTEN)|charsets(2)|lpoff]
+dgW, lia
+    jsp lPut
+    jmp i dgX
+
+// dEnd -- end the list, closing the run, then adding the halt, which always has its
+// word.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+dEnd, dac dnX
+    jsp rClose
+    lio [halt]
+    dio i dP
+    jmp i dnX
+
+// lPut -- put a word into the list.
+// Past dLim the list is full, and nothing more is drawn, though what is open is still
+// closed; past dHard nothing is stored.
+// IO is the word.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+lPut, dac lpX
+    lac dP
+    sub dHard
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i lpX
+    dio i dP
+    idx dP
+    sub dLim
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i lpX
+    law 1
+    dac dFull
+    dzm dKeep
+    jmp i lpX
+
+// cPut -- pack a character code into the word being packed, three to a word, the first
+// in the high bits; a full word goes to the list.
+// IO is the code, 0 to 077.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+cPut, dac cpX
+    dio cpC
+    lac dW
+    ral 6s                  // below 2^12, so nothing wraps round
+    ior cpC
+    dac dW
+    idx dN
+    SKIP_NEXT_IF_SAME [3]
+    jmp i cpX
+    lio dW
+    jsp lPut
+    dzm dW
+    dzm dN
+    jmp i cpX
+
+// rOpen -- begin a run of characters at the cursor, unless one is open.
+// The beam is placed by point words, y first, which costs nothing unlit, then x into
+// character mode, and the shift is unknown.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+rOpen, dac roX
+    lac dRun
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i roX
+    lio [next(point)]
+    jsp lPut
+    lac dYc
+    ior [y(0)|next(point)]
+    lia
+    jsp lPut
+    jsp dXcOf
+    ior [next(character)]
+    lia
+    jsp lPut
+    law 1
+    dac dRun
+    dzm dShift
+    jmp i roX
+
+// rClose -- end the open run, if any, with the end code, and pad the last word out.
+// The 340 is then in parameter mode.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+rClose, dac rcX
+    lac dRun
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i rcX
+    dzm dRun
+    lio [037]
+    jsp cPut
+rcPad, lac dN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i rcX
+    cli
+    jsp cPut
+    jmp rcPad
+
+// gPut -- draw a glyph at the cursor, when the cursor's row is drawn, with a shift
+// first when the set changes.
+// A space with no run open is not drawn, and the next run starts past it.
+// The cursor does not move.
+// IO is the glyph's dsTab entry, its set in bits 0300 and its code in 077.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+gPut, dac gpX
+    dio gpE
+    lac dKeep
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i gpX
+    lac gpE
+    SKIP_NEXT_IF_DIFFERENT [040]
+    jmp gpSp
+gpGo, jsp rOpen
+    lac gpE
+    sar 6s
+    and [3]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gpC                 // in both sets
+    SKIP_NEXT_IF_DIFFERENT dShift
+    jmp gpC
+    dac dShift
+    add [034]               // set 1 is the upper shift, 035; set 2 the lower, 036
+    lia
+    jsp cPut
+gpC, lac gpE
+    and [077]
+    lia
+    jsp cPut
+    jmp i gpX
+gpSp, lac dRun
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gpGo
+    jmp i gpX
+
+// dChar -- draw an ASCII character at the cursor, which moves past it.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+dChar, dac dcX
+    lai
+    and [0177]
+    dac dcC
+    add [dsTab:DT_BANK]
+    dac dcP
+    lac i dcP
+    dac dcE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp dcG
+    and [7]
+    add [dcJ|thisbank]
+    dac dcP
+    jmp i dcP
+dcJ, jmp dcCtl
+    jmp dcTab
+    jmp dcCr
+    jmp dcLf
+    jmp dcGrv
+dcG, lio [1]
+    jsp wrap
+    lio dcE
+    jsp gPut
+    jsp colUp
+    jmp i dcX
+    // TAB, spaces to the next column a multiple of 8, at least one
+dcTab, lio [1]
+    jsp wrap
+    lio [040]
+    jsp gPut
+    jsp colUp
+    lac dCol
+    and [TAB_STOP-1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp dcTab
+    jmp i dcX
+dcCr, jsp rClose
+    dzm dCol
+    jmp i dcX
+    // LF, a new row; in the count, a resume point; the range's end at the dLfN-th past
+    // the pointer (dPtr arms dLfB), as lnTo counts them
+dcLf, jsp rowUp
+    lac dCnt
+    SKIP_NEXT_IF_AC_ZERO
+    jsp dRec
+    lac dLfB
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i dcX
+    isp dLfB
+    jmp i dcX
+    jsp dHalt
+    jmp i dcX
+dcGrv, lio [1]
+    jsp wrap
+    lac dKeep
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dcGn
+    jsp rOpen
+    lio [040]
+    jsp gPut
+    lio [0266]              // set 2's grave, over the space
+    jsp gPut
+dcGn, jsp colUp
+    jmp i dcX
+    // a down arrow, then the code in octal as a subscript, 1 to 3 digits, from set 1;
+    // the superscript code brings the line back, and the next run starts afresh
+dcCtl, law 2
+    dac dcW
+    lac dcC
+    sub [010]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    idx dcW
+    lac dcC
+    sub [0100]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    idx dcW
+    lio dcW
+    jsp wrap
+    lac dKeep
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dcCa
+    lio [0250]              // set 2's down arrow
+    jsp gPut
+    lio [0273]              //   and its subscript
+    jsp gPut
+    lac dcW
+    SKIP_NEXT_IF_DIFFERENT [4]
+    jmp dcD2
+    SKIP_NEXT_IF_DIFFERENT [3]
+    jmp dcD1
+    jmp dcD0
+dcD2, lac dcC
+    sar 6s
+    and [7]
+    add [0160]
+    lia
+    jsp gPut
+dcD1, lac dcC
+    sar 3s
+    and [7]
+    add [0160]
+    lia
+    jsp gPut
+dcD0, lac dcC
+    and [7]
+    add [0160]
+    lia
+    jsp gPut
+    lio [0277]              // set 2's superscript
+    jsp gPut
+    jsp rClose
+dcCa, lac dcW
+    cma
+    dac dcK
+dcCu, jsp colUp
+    isp dcK
+    jmp dcCu
+    jmp i dcX
+
+// wrap -- start a new row, at column 0, when IO columns more do not fit in this one.
+// IO is the columns.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+wrap, dac wrX
+    dio wrW
+    lac dCol
+    add wrW
+    sub [1]
+    sub dCols
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp wrNew
+    jmp i wrX
+wrNew, jsp rowUp
+    dzm dCol
+    jmp i wrX
+
+// rowUp -- move the cursor down a row, closing the run, and set its y and whether it
+// is drawn.
+// Row dStop ends the walk (dpyBuf).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+rowUp, dac ruX
+    // every build passes here once a row, so the console is polled here, as the
+    // typewriter holds one key and a build can outlast a typist; a break, or a lost
+    // caller, leaves the list unfinished, dpyOn clear (dBegin) until the next idle
+    // builds it
+    jsp brkChk
+    jsp rClose
+    idx dRow
+    SKIP_NEXT_IF_DIFFERENT dStop
+    jsp dHalt
+    lac dRow
+    SKIP_NEXT_IF_DIFFERENT dFirst
+    jmp ruTop
+    lac dYc
+    sub dPitch
+    dac dYc
+    jmp ruK
+ruTop, lac dYtop
+    dac dYc
+ruK, jsp kCalc
+    jmp i ruX
+
+// colUp -- move the cursor a column right; its x follows from dCol (dXcOf).
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+colUp, dac cuX
+    idx dCol
+    jmp i cuX
+
+// kCalc -- set dKeep to 1 while the list has room and the cursor's row is one drawn,
+// dFirst to dFirst+dRows-1, else to 0.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+kCalc, dac kcX
+    dzm dKeep
+    lac dFull
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i kcX
+    lac dRow
+    sub dFirst
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i kcX
+    sub dRows
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i kcX
+    law 1
+    dac dKeep
+    jmp i kcX
+
+// dNl -- draw CR LF at the cursor.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+dNl, dac nlX
+    lio [CH_CR]
+    jsp dChar
+    lio [CH_LF]
+    jsp dChar
+    jmp i nlX
+
+// dNum -- draw a count in decimal at the cursor, with no leading zeros.
+// IO is the count, 0 to 999.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+dNum, dac nmX
+    dio nmV
+    dzm nmZ
+    lio [0d100]
+    jsp dDig
+    lio [0d10]
+    jsp dDig
+    law 1
+    dac nmZ
+    lio [1]
+    jsp dDig
+    jmp i nmX
+
+// dDig -- draw the digit of nmV in a place and take it off nmV.
+// The digit is not drawn while it would be a leading zero (nmZ 0).
+// IO is the place, 100, 10 or 1.
+// No return value; nmV and nmZ are changed.
+// Does not preserve AC or IO.
+// Called via jsp.
+dDig, dac ngX
+    dio ngP
+    dzm ngK
+    lac nmV
+    sub ngP
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp .+4
+    dac nmV
+    idx ngK
+    jmp .-6
+    lac ngK
+    ior nmZ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ngX
+    law 1
+    dac nmZ
+    lac ngK
+    add [CH_ZERO]
+    lia
+    jsp dChar
+    jmp i ngX
+
+// dpyDir -- build the list of unit dpyUnit's directory, at size 1 whatever /D
+// says.
+// The map is a column for each block from block 1, DPY_UCELLS a row, holding its file's
+// character (duCh), blank when free, DPY_UDIR for the directory's two.
+// From row DPY_UCHART there is a line a file, with its number and character, the mode's
+// character, the subnames (@ first when there is one), the blocks allocated, the
+// columns every 8.
+// Files are as EL shows them (entGet), so a pending deletion's blocks, and the output's
+// scratch file's, are blank.
+// Its argument is dpyUnit.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+dpyDir, dac duX
+    lio [1]
+    jsp dGeom
+    dzm dFirst
+    lio [DPY_MAP]
+    jsp dBegin
+    lio dpyUnit
+    jsp i [hGet:MT_BANK]
+    lac [mtEnt:MT_BANK]
+    dac duE
+    // the tape's blocks, no more than the map holds
+    lac i [hAdr:MT_BANK]
+    add [FS_HDIR+FS_DBLKS]
+    dac duP
+    lac i duP
+    dac duN
+    sub [DPY_MAPW]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp duBig
+duZe0, lac [DPY_MAP]
+    dac duP
+    lac duN
+    cma
+    dac duK
+duZ, dzm i duP
+    idx duP
+    isp duK
+    jmp duZ
+    // each file's blocks get its number, the files numbered as EL lists them
+    dzm duF
+    dzm duS
+duL, lac duS
+    dac i [elS:MT_BANK]
+    jsp i [entGet:MT_BANK]
+    SKIP_NEXT_IF_SAME [1]
+    jmp duNx
+    idx duF
+    lac duE
+    add [FS_DEFIRST]
+    dac duQ
+    lac i duQ
+    dac duB
+    lac duE
+    add [FS_DEALLOC]
+    dac duQ
+    lac i duQ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp duNx
+    cma
+    dac duK
+duM, lac duB
+    sub duN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp duNx                // past the tape's end
+    lac duB
+    add [DPY_MAP]
+    dac duQ
+    lac duF
+    dac i duQ
+    idx duB
+    isp duK
+    jmp duM
+duNx, idx duS
+    SKIP_NEXT_IF_SAME [FS_NENT]
+    jmp duL
+    lac [-1]
+    dac i [DPY_MAP+FS_DIRBLK]
+    dac i [DPY_MAP+FS_DIRBLK2]
+    // the map, from block 1
+    law 1
+    dac duB
+    dzm duC
+duCell, lac duB
+    sub duN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp duChart
+    lac duB
+    add [DPY_MAP]
+    dac duQ
+    lac i duQ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp duFree
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp duDir
+    lia
+    jsp duCh
+    jmp duPut
+duFree, law 040
+    jmp duPut
+duDir, law DPY_UDIR
+duPut, lia
+    jsp dChar
+    idx duB
+    idx duC
+    SKIP_NEXT_IF_SAME [DPY_UCELLS]
+    jmp duCell
+    dzm duC
+    jsp dNl
+    jmp duCell
+    // the chart, below the map
+duChart, jsp dNl
+duPad, lac dRow
+    sub [DPY_UCHART]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp duLst
+    lio [CH_LF]
+    jsp dChar
+    jmp duPad
+duLst, dzm duF
+    dzm duS
+duL2, lac duS
+    dac i [elS:MT_BANK]
+    jsp i [entGet:MT_BANK]
+    SKIP_NEXT_IF_SAME [1]
+    jmp duN2
+    idx duF
+    lia
+    jsp dNum
+    lio [040]
+    jsp dChar
+    lio duF
+    jsp duCh
+    lia
+    jsp dChar
+    lio [CH_TAB]
+    jsp dChar
+    // the mode, the type 0 to 3 as the memo's blank ! " # and another type as *, as EL
+    lac duE
+    add [FS_DEINFO]
+    dac duQ
+    lac i duQ
+    and [FS_ITYPE]
+    dac duMode
+    sub [4]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp duStar
+    lac duMode
+    add [040]
+    jmp duMc
+duStar, law 052
+duMc, lia
+    jsp dChar
+    lio [CH_TAB]
+    jsp dChar
+    jsp i [nmUnp:MT_BANK]
+    lac i [nmSp:MT_BANK]
+    SKIP_NEXT_IF_SAME i [nmLen:MT_BANK]
+    jmp duTwo
+    lio [CH_AT]
+    jsp dChar
+    lio [CH_TAB]
+    jsp dChar
+    dzm duA
+    lac i [nmLen:MT_BANK]
+    dac duZe
+    jsp dRng
+    jmp duBk
+duTwo, dzm duA
+    lac i [nmSp:MT_BANK]
+    dac duZe
+    jsp dRng
+    lio [CH_TAB]
+    jsp dChar
+    lac i [nmSp:MT_BANK]
+    add [1]
+    dac duA
+    lac i [nmLen:MT_BANK]
+    dac duZe
+    jsp dRng
+duBk, lio [CH_TAB]
+    jsp dChar
+    lac duE
+    add [FS_DEALLOC]
+    dac duQ
+    lio i duQ
+    jsp dNum
+    jsp dNl
+duN2, idx duS
+    SKIP_NEXT_IF_SAME [FS_NENT]
+    jmp duL2
+    jsp dEnd
+    jmp i duX
+duBig, lac [DPY_MAPW]
+    dac duN
+    jmp duZe0
+    assert DPY_UCELLS <= DG_COLS(2), "a row of /U's map fits size 1"
+    assert (DPY_MAPW+DPY_UCELLS-1)/DPY_UCELLS < DPY_UCHART, "/U's chart starts below its map"
+    assert DPY_UCHART+FS_NENT <= DG_ROWS(2), "/U's chart fits size 1"
+
+// duCh -- find the map's character for a file, 1 to 9, then A to V for 10 to 31.
+// IO is the file's number, 1 to 31.
+// AC is the result, IO is preserved.
+// Called via jsp.
+duCh, dac dhX
+    dio dhN
+    lac dhN
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp dhL
+    lac dhN
+    add [CH_ZERO]
+    jmp i dhX
+dhL, add [0101]
+    jmp i dhX
+
+// dRng -- draw the name's characters in mtNmCh (tapefile.ac) from duA up to duZe.
+// Its arguments are duA and duZe.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+dRng, dac drX
+drL, lac duA
+    sub duZe
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i drX
+    lac [mtNmCh:MT_BANK]
+    add duA
+    dac duQ
+    lio i duQ
+    jsp dChar
+    idx duA
+    jmp drL
+
+// cV -- nV, V and i,jV, which show the text T would type when the string ends
+// with them (dpyShow); a command after one ends the hold (interp.ac).
+// nVW, VW and i,jVW show it at once, and nothing more is done until a key is typed,
+// whose code is then VW's value; the display then ceases.
+// Ctrl-C there is a break.
+// With the display's switch on, VW shows nothing and still waits for its key.
+// Its arguments are the command's.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cV, jsp i [peekCh:0]
+    SKIP_NEXT_IF_SAME [0127]
+    jmp cvV
+    idx i [srcPos:0]
+    jsp i [range:0]
+    lac i [a2M:0]
+    dac dpyA
+    lac i [a2N:0]
+    dac dpyB
+    szs SW_DPY*010          // skip if the display's switch is off
+    jmp cvW
+    dzm dLfN
+    jsp dpyBuf
+    law 1
+    dac dpyOn
+    lio [DPY_BASE]
+    dla
+cvW, jsp i [clkTick:0]
+    jsp pollc               // which refreshes the display
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cvW
+    dio cvK
+    jsp dpyStop
+    lio cvK
+    jsp i [fromInt:0]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+cvV, jsp i [range:0]
+    lac i [a2M:0]
+    dac dpyA
+    lac i [a2N:0]
+    dac dpyB
+    law DH_V
+    dac dpyHeld
+    jmp i [rsLoop:0]
+
+// cSlD -- n/D, which sets the size, 0 to 3, the 340's scale, for V, VW and the
+// display at idle, not /U.
+// With no n, or another, it is an error.
+// Its argument is n.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSlD, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [err:0]
+    dac cdT
+    sub [4]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i [err:0]
+    lac cdT
+    dac dpySize
+    jmp i [rsLoop:0]
+
+// cSlN -- n/N, which shows n lines each side of the pointer at idle, 0 or more,
+// past 077777 as 077777, which no screen holds anyway.
+// With no n, or a negative one, it is an error.
+// Its argument is n.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSlN, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [err:0]
+    dac cdT
+    sub [077777]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp cnBig
+    lac cdT
+    dac dpyLines
+    jmp i [rsLoop:0]
+cnBig, lac [077777]
+    dac dpyLines
+    jmp i [rsLoop:0]
+
+// cSlU -- o/U, which shows unit o's directory on the scope when the string ends
+// with it, the unit as EL takes it.
+// The directory is read now if it is not in memory.
+// Its argument is o.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSlU, jsp i [unitO:MT_BANK]
+    dac dpyUnit
+    lia
+    jsp i [hGet:MT_BANK]
+    law DH_U
+    dac dpyHeld
+    jmp i [rsLoop:0]
+
+// mtCall -- make a call of the Microtape library that may move the tape, which keeps
+// sequence breaks off for up to 30 s.
+// WAIT is in the screen's center meanwhile, from a loop the 340 runs by itself, then
+// the 340 is stopped, and dpyShow starts the text again at idle.
+// With the display's switch on, or after the second set's 0W (dpyNo), there is no WAIT.
+// The argument is in tcArg and the routine's full address in IO.
+// The call is as farjda makes it, the argument into the routine's first word, then jsp
+// to the next.
+// AC and IO are the routine's on return.
+// Called via jsp through mtcall() (teco.ah), from any bank with the extend window open.
+mtCall, dac tcRet
+    dio tcFn
+    lio [wtProg|thisbank]
+    lac dpyNo
+    szs SW_DPY*010          // skip if the display's switch is off
+    law 1
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dla
+    lac tcFn
+    add [1]
+    dac tcGo
+    lac tcArg
+    dac i tcFn
+    jsp i tcGo
+    eem
+    dac tcA
+    dio tcI
+    dzm dpyOn               // not again until idle
+    lio [dpyHlt:.]
+    dla
+    lac tcA
+    lio tcI
+    jmp i tcRet
+
+diX, 0                      // the return addresses
+dsX, 0
+dtX, 0
+dwX, 0
+dbX, 0
+dkX, 0
+dpX, 0
+dmX, 0
+dgX, 0
+dnX, 0
+lpX, 0
+cpX, 0
+roX, 0
+rcX, 0
+gpX, 0
+dcX, 0
+wrX, 0
+ruX, 0
+cuX, 0
+kcX, 0
+nlX, 0
+nmX, 0
+ngX, 0
+dhX, 0
+duX, 0
+drX, 0
+tcRet, 0
+dtW, 0
+dbT, 0                      // dpyBuf's, the last screenful's first row,
+dbS, 0                      //   a walk's first index and row, the ring's
+dbF, 0                      //   slot, the slots left, the slot's two words
+dbJ, 0
+dbK, 0
+dbP, 0
+dbQ, 0
+dkI, 0                      // dWalk's, the next event's index, the run's end, its
+dkSeg, 0                    //   count, where reading goes on, a stop asked
+dkN, 0
+dkNx, 0
+dkStp, 0
+mnX, 0
+mnC, 0
+paX, 0                      // dPlace's index, rotated
+paI, 0
+paT, 0
+atX, 0
+sbX, 0                      // dBack's, the index, the line feeds, sooner allowed
+sbI, 0
+sbC, 0
+sbTr, 0
+xcX, 0
+hlX, 0
+reX, 0                      // dRec's index and word
+reI, 0
+reP, 0
+dmP, 0                      // dGeom's
+dmQ, 0
+dmK, 0
+cpC, 0
+gpE, 0
+dcC, 0                      // dChar's, the character, its entry, its columns
+dcE, 0
+dcP, 0
+dcW, 0
+dcK, 0
+wrW, 0
+nmV, 0                      // dNum's, what is left, a digit drawn
+nmZ, 0
+ngP, 0
+ngK, 0
+dhN, 0                      // duCh's file number
+duP, 0                      // dpyDir's, the tape's blocks, files numbered, the slot,
+duN, 0                      //   the map's block and cells in its row, the entry's
+duK, 0                      //   address, a name's range
+duF, 0
+duS, 0
+duE, 0
+duQ, 0
+duB, 0
+duC, 0
+duMode, 0
+duA, 0
+duZe, 0
+cvK, 0                      // VW's key
+cdT, 0
+tcFn, 0                     // mtCall's, the routine, its entry, AC and IO after it
+tcGo, 0
+tcA, 0
+tcI, 0
+
+// The WAIT program, the word in the screen's center, drawn by the 340 on its own while
+// a library call keeps the CPU.
+// Its jump reaches banks 0 and 1 only, so it stays here.
+// The invisible vectors only pace it, so it steals few cycles.
+wtProg, scale(2) intensity(DPY_INTEN) charsets(2) lpoff next(point)
+    y(DPY_WAITY) next(point)
+    x(DPY_WAITX) next(character)
+    type340 "\UWAIT"
+    scale(0) next(vector)
+    up deltay(0d127)
+    down deltay(0d127)
+    up deltay(0d127)
+    down deltay(0d127)
+    up deltay(0d127)
+    down deltay(0d127)
+    up deltay(0d127)
+    down deltay(0d127) end
+    next(subroutine)
+    jump (wtProg|thisbank) next(parameter)
+endloc
+
+dpyHlt, halt                // where the 340 is sent to stop
+dpySize, 0                  // n/D, 0 to 3
+dpyLines, 0                 // n/N, the lines each side of the pointer at idle
+dpyHeld, 0                  // DH_V or DH_U while the string has ended with V or /U
+dpyA, 0                     // V's range, and the idle display's
+dpyB, 0
+dpyUnit, 0                  // /U's unit
+dpyOn, 0                    // not 0 while dpyTick starts the list again
+dpyNo, 0                    // no display and no WAIT, 1 after the second set's 0W, ior
+                            // VT_DPYNO while its screen is split (vt11.ac), ior
+                            // VT_SWNO for a session in VT100 mode (switch 2)
+dpyBar, 0                   // the bar's vector word, a full address; 0 for none
+tcArg, 0                    // mtCall's argument
+
+// The list being built, word by word, is as follows.
+// Where the next word goes, where the list is full, where it must end; the codes being
+// packed and how many; a run open, its set; the cursor's row and column, the first row
+// drawn, the pointer's row; the cursor's row's y; whether its row is drawn; the list
+// full.
+dP, 0
+dLim, 0
+dHard, 0
+dW, 0
+dN, 0
+dRun, 0
+dShift, 0
+dRow, 0
+dCol, 0
+dFirst, 0
+dPRow, 0
+dYc, 0
+dKeep, 0
+dFull, 0
+// A walk's state (dpyBuf), word by word, is as follows.
+// The line feeds each side of the pointer, none when 0; the count of them left past
+// it, negative, 0 when unarmed; counting, not drawing; the row that ends the walk; the
+// ring of resume points' next slot and its entries; the word being read.
+dLfN, 0
+dLfB, 0
+dCnt, 0
+dStop, 0
+dRngI, 0
+dRngN, 0
+dRdP, 0
+dSize, 0                    // the size the list is built at, and its geometry (dgTab)
+dF, 0
+dCols, 0
+dRows, 0
+dPitch, 0
+dChW, 0
+dYtop, 0
+dHalf, 0

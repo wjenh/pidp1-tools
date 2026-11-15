@@ -1,0 +1,1787 @@
+// tapefile.ac -- files on Type 550 Microtape, on the file system library
+// (Am1Includes/FILESYSTEM and MICROTAPE).
+// It holds ER and /Q, the tape's text for Y, A, N and P through rdStart and rdGet
+// (ptape.ac), EL, ET, EK, ED, EC, u,0EC and u,vEC, and the directory as TECO shows it.
+// The output, EI, EF, EN, /W and /V, is tapeout.ac's, in bank 1, where there is room.
+// Unit DR_UNIT is the drum's volume, mounted and formatted by additions.ac's
+// drvMount and drvFormat, in bank 15, which choose the device.
+// Every other call is the same on it.
+//
+// The library's code and this file are in bank 12.
+// The handles, the descriptors, the changes pending and the buffers are in bank 13
+// (teco.ah).
+// Four units' directories are held at once, a handle each.
+// A fifth unit takes the place of one with no change pending and no file open, which is
+// only forgotten, as EK forgets it.
+//
+// Text on tape is fstool's text form.
+// That is two 8-bit characters a word, the first in the high half, a line ending in CR
+// alone, and a zero half padding the end.
+// Reading gives CR as CR LF, drops an LF that follows a CR on the tape, drops the eighth
+// bit, and passes over NUL and DEL, as the paper tape reader does.
+//
+// A full buffer gives back to the tape by moving the reader's place.
+// The place moves back to the start of the line cut short, or, with no whole line read,
+// to the character that did not fit.
+// So a page cut short is read on from there, with no reader's buffer between.
+//
+// ED and EN change only the directory in memory.
+// A deletion or a rename is pending until EC or EF writes it, EL shows it, and EK
+// forgets it.
+// A name is found as TECO shows the directory (mtFindN).
+// A pending rename's new name finds its file, its old name and a pending deletion's name
+// find nothing, and the output's scratch file is not shown.
+//
+// A failure the library reports types its message in place of ?, as the memo's i-o
+// routines did.
+// errTxt is the message, and errIdle (teco.am1) types it.
+// The rest is as any error, the string dropped and TECO idle.
+// The messages, and EL's type-out, are tapemsg.ac's, in bank 15.
+//
+// An error is jmp i [err:0], and a library failure jmp mtFail with its status in AC.
+// The file goes in bank 12, after the library's calls, and its data words follow its
+// code.
+// A library call that may move the tape is made through mtcall (teco.ah), so WAIT shows
+// meanwhile.
+// One that does not is farjda.
+// entGet, elS, nmUnp, nmLen and nmSp are global, for /U (display.ac) and the second
+// set's EN.
+// erOpn, edGo and elGo, cER's, cED's and cEL's work as routines, are global with nrN,
+// mtPackN, fnSoft and mfS, for the second set's files (files11.ac).
+// Requires the file system library's version 2.1, whose handle and descriptor sizes
+// teco.ah's bank 13 layout takes (the asserts below).
+// Needs teco.ah, <AIDS/skipmacros.ah>, <MICROTAPE/microtape.ah>, fsio.ac, mtmount.ac,
+// mtformat.ac and fsdelete.ac.
+// Needs nextCh, argOr, toInt, fromInt, fmtNum, the argument state and clkTick in bank 0.
+// Needs putc, newline, brkChk, tapeout.ac and display.ac's mtCall in bank 1.
+// Needs additions.ac's drvMount, drvFormat and drvHnd in bank 15.
+
+assert FS_HANDLEW == 01047, "teco.ah's bank 13 layout takes a handle as 01047 words"
+assert FS_FILEW == 012, "teco.ah's bank 13 layout takes a descriptor as 012 words"
+assert FD_IN == HND0 + (MT_NHND*FS_HANDLEW), "teco.ah's descriptors follow the handles"
+assert MT_PEND == FD_OUT + FS_FILEW, "teco.ah's pending deletions follow the descriptors"
+assert MT_PENDW >= FS_NENT, "teco.ah's pending deletions take a word a directory slot"
+assert MT_NAMEC == FS_DENAMEW*3, "teco.ah's name is the directory's, 3 sixbit characters a word"
+assert MT_NSTRW == (MT_NAMEC+1)/2+1, "teco.ah's name string is two characters a word and a zero"
+assert MTWDS == 0400, "entGet's sar 8s divides by a block's words"
+assert FS_DENAMEW == 3, "a pending rename keeps a name as 3 sixbit words"
+
+local miX, ceC, ceD, cER, cEL, cET, cEK, cED, cEC, erU, erOk, \
+    elN, elPB, elK, el1, el1s, el1p, el1n, egPd, el2, el2s, el2n, elStar, elMc, \
+    elTwo, elT, elBk, ekGo, ekOut, edU, edS, edI, edP, edRo, ecS, ecP, ecL, ecDel, ecN, \
+    ecTwo, ecU, ecV, ecE, ecFmt, uoX, uoArg, uuX, ucX, ucHi, \
+    nrX, nrL, nrBl, nrPut, nrEnd, nrPk, nrW1, nrZ, nrC, nrSp, nrTwo, erX, edX, elX, fnSf, \
+    nrI, nrQ, nrW, nrAdd, naX, naP, hFind, hfX, hfL, hfHit, hfU, hfI, \
+    hfP, hgX, hgU, hgE, hTake, htX, htF, htE, htP0, htP1, htNx, htUse, htU, htI, htP, \
+    hsX, hsP, hzX, hzP, pendAny, paX, paL, paP, paK, zeroW, zwX, zwL, \
+    zP, zN, onX, icX, uDrop, udX, udH, udO, udU, udP, cp400, cwX, cwL, \
+    cpS, cpD, cwK, mfP, mfQ, mtCh, mcX, mcAgain, mcLo, mcOut, \
+    mcFill, mcP, mcW, mgX, mgLoop, mgTape, mgIsLf, mgCr, mgLf, mgOut, mgC, msX, \
+    mkX, mkP, mkPos, mkI, mkSeek, cpSave, csX, csP, \
+    egX, egShow, egPend, egR, egT, nuX, nu3, n3X, n3W, nuPut, npX, npP, \
+    nuC, nuI, nuL, nuT, nuS, erP, \
+    nuM, pkX, fnX, fnK, fnR, fnNo, fnS, fnHid, fnTape, enmX, enmI, enmL, enmP, enmEnd, \
+    trfX, trfP, trfK, trfL, trfH, trfN, trfQ, trfNx, trfHit, trClr, trcX, trcL, trcP, \
+    trcH, trcN, trsX, trsL, trsP, trsH, trsN, trsQ, trsNx, pwX, paH, paR
+
+// mtInit -- forget every tape and every pending change and take input from paper tape,
+// every handle, descriptor and pending deletion as when TECO is loaded (not mounted,
+// not open), so the restart starts clean.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtInit, dac miX
+    lac [MT_DATA]
+    dac zP
+    lac [MT_DEND-MT_DATA]
+    dac zN
+    jsp zeroW
+    dzm hUnit
+    dzm hUnit+1
+    dzm hUnit+2
+    dzm hUnit+3
+    dzm inMt
+    dzm inOpen
+    dzm mtUnit
+    dzm errTxt
+    jsp i [outInit:1]
+    jmp i miX
+
+// cE -- dispatch E and its letter, a lower-case letter as its upper case.
+// Any other letter is an error.
+// Reads the letter (nextCh).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, and goes by jmp to the letter's handler.
+cE, jsp i [nextCh:0]
+    lai
+    and [0177]
+    dac ceC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ceD
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ceD
+    lac ceC
+    sub [040]
+    dac ceC
+ceD, lac ceC
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp cER
+    SKIP_NEXT_IF_DIFFERENT [0114]
+    jmp cEL
+    SKIP_NEXT_IF_DIFFERENT [0124]
+    jmp cET
+    SKIP_NEXT_IF_DIFFERENT [0113]
+    jmp cEK
+    SKIP_NEXT_IF_DIFFERENT [0104]
+    jmp cED
+    SKIP_NEXT_IF_DIFFERENT [0103]
+    jmp cEC
+    // the output's, tapeout.ac's; any other letter is no command
+    SKIP_NEXT_IF_DIFFERENT [0111]
+    jmp i [cEI:1]
+    SKIP_NEXT_IF_DIFFERENT [0106]
+    jmp i [cEF:1]
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp i [cEN:1]
+    jmp i [err:0]
+
+// cER -- oERnm$ makes file nm on unit o, as TECO shows the directory, the
+// input, and takes input from the tape (/Q).
+// The file read before is closed, even when nm is not found.
+// Reads the argument state (unitO) and the name (nmRead).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE, ends by jmp rsLoop.
+cER, jsp unitO
+    dac erU
+    jsp nmRead
+    lio erU
+    jsp erOpn
+    jmp i [rsLoop:0]
+
+// erOpn -- do cER's work, making file mtNmStr on unit IO the input, from the tape.
+// For the second set's ER and EB too (files11.ac).
+// IO is the unit; mtNmStr is read.
+// No return value.
+// Does not preserve AC or IO.
+// A failure leaves by mtFail with the library's message.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+erOpn, dac erX
+    jsp hGet
+    jsp inClose
+    jsp mtFindN
+    dac mtPb+FS_PINDEX
+    lac hAdr
+    dac mtPb+FS_PHANDLE
+    lac [FD_IN]
+    dac mtPb+FS_PFD
+    lac [mtPb:.]
+    farjda(fsOpenIndex:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+erOk, law 1
+    dac inOpen
+    dac inMt
+    lac hIdx
+    dac inHnd
+    dzm rbStart
+    dzm rbLen
+    dzm rbIdx
+    dzm rbHalf
+    dzm rbLF
+    dzm rbCR
+    jmp i erX
+
+// cSelQ -- /Q takes input from the tape, the file ER opened, read on from where
+// it was.
+// With none open, it is an error.
+// Reads the argument state (argOr).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSelQ, cli
+    jsp i [argOr:0]
+    lac inOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    law 1
+    dac inMt
+    jmp i [rsLoop:0]
+
+// cET -- uET reads unit u's directory into memory, if it is not there.
+// Reads the argument state (unitU).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE, ends by jmp rsLoop.
+cET, jsp unitU
+    lia
+    jsp hGet
+    jmp i [rsLoop:0]
+
+// cEK -- uEK forgets unit u's directory, its pending changes with it.
+// The tape is not touched.
+// It is an error while the input file or the output's file is on u.
+// Reads the argument state (unitU).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE, ends by jmp rsLoop.
+cEK, jsp unitU
+    lia
+    jsp hFind
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [rsLoop:0]
+    lac inOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ekOut
+    lac inHnd
+    SKIP_NEXT_IF_DIFFERENT hIdx
+    jmp i [err:0]
+ekOut, lac i [outOpen:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ekGo
+    lac i [outHnd:1]
+    SKIP_NEXT_IF_DIFFERENT hIdx
+    jmp i [err:0]
+ekGo, jsp hForget
+    jmp i [rsLoop:0]
+
+// cED -- oEDnm$ makes file nm's deletion pending on unit o, written by EC or EF.
+// A rename pending for it is dropped.
+// A read-only file is refused at once.
+// Reads the argument state (unitO) and the name (nmRead).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE, ends by jmp rsLoop.
+cED, jsp unitO
+    dac edU
+    jsp nmRead
+    lio edU
+    jsp edGo
+    jmp i [rsLoop:0]
+
+// edGo -- do cED's work, making file mtNmStr's deletion pending on unit IO, whose
+// handle is left selected.
+// For the second set's :EGDEL too (files11.ac).
+// IO is the unit; mtNmStr is read.
+// No return value.
+// Does not preserve AC or IO.
+// Changes elS.
+// A failure leaves by mtFail with the library's message.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+edGo, dac edX
+    jsp hGet
+    jsp mtFindN
+    dac edS
+    dac elS
+    jsp entGet
+    lac mtEnt+FS_DEINFO
+    and [FS_IRO]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp edRo
+    lac edS
+    add hPend
+    dac edP
+    law 1
+    dac i edP
+    lio edS
+    jsp trFind
+    SKIP_NEXT_IF_AC_ZERO
+    dzm i trfP
+    jmp i edX
+edRo, law FS_EREADONLY
+    jmp mtFail
+
+// cEC -- uEC writes unit u's pending changes to the tape (mtPendW).
+// u,0EC writes an empty directory on u.
+// u,vEC writes v's directory on u, as v's tape holds it.
+// Reads the argument state (comma, mval, have, argOr, unitU).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE, ends by jmp rsLoop.
+cEC, lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ecTwo
+    jsp unitU
+    lia
+    jsp hGet
+    jsp mtPendW
+    jmp i [rsLoop:0]
+
+// mtPendW -- write the selected handle's pending changes to the tape.
+// The deletions go first, the input file closed first if it is one of them, then the
+// renames (rnApply, tapeout.ac).
+// A failure leaves by mtFail with the library's message, and what was written stays
+// written.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtPendW, dac pwX
+    dzm ecS
+ecL, lac ecS
+    add hPend
+    dac ecP
+    lac i ecP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ecN
+    lac inOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ecDel
+    lac inHnd
+    SKIP_NEXT_IF_SAME hIdx
+    jmp ecDel
+    lac i [FD_IN+FS_FSLOT]
+    SKIP_NEXT_IF_SAME ecS
+    jmp ecDel
+    jsp inClose
+ecDel, lac hAdr
+    dac mtPb+FS_PHANDLE
+    lac ecS
+    dac mtPb+FS_PINDEX
+    lac [FD_X]
+    dac mtPb+FS_PFD
+    lac [mtPb:.]
+    farjda(fsOpenIndex:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    lac [FD_X]
+    mtcall(fsDelete:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    dzm i ecP
+ecN, idx ecS
+    SKIP_NEXT_IF_SAME [FS_NENT]
+    jmp ecL
+    jsp i [rnApply:1]
+    jmp i pwX
+    // u,v takes u from the first argument, v from the second
+ecTwo, lac i [mval:0]
+    dac i [ra:0]
+    lac i [mval:0+1]
+    dac i [ra:0+1]
+    lac i [mval:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac ecU
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    cli
+    jsp i [argOr:0]
+    dac ecV
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ecFmt
+    lio ecV
+    jsp unitChk
+    lio ecU
+    jsp unitChk
+    lac ecU
+    SKIP_NEXT_IF_DIFFERENT ecV
+    jmp i [rsLoop:0]        // a tape's own directory, so nothing changes
+    // no copy between the drum and a tape
+    SKIP_NEXT_IF_DIFFERENT [DR_UNIT]
+    jmp i [err:0]
+    lac ecV
+    SKIP_NEXT_IF_DIFFERENT [DR_UNIT]
+    jmp i [err:0]
+    lio ecV
+    jsp hGet
+    // v's directory twice, for u's blocks 1 and 2
+    lac hAdr
+    add [FS_HDIR]
+    dac cpS
+    lac [SCRBUF]
+    dac cpD
+    jsp cp400
+    lac hAdr
+    add [FS_HDIR]
+    dac cpS
+    jsp cp400
+    lio ecU
+    jsp uDrop
+    lac ecU
+    dac mtPb+MTB_PDRIVE
+    law FS_DIRBLK
+    dac mtPb+MTB_PBLOCK
+    law 2
+    dac mtPb+MTB_PCOUNT
+    lac [SCRBUF]
+    dac mtPb+MTB_PBUF
+    lac [mtPb:.]
+    mtcall(mtbWrite:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    jmp i [rsLoop:0]
+    // u,0 writes an empty directory, as the library formats.
+    // A tape holding another program's data in blocks 1 and 2 is refused.
+ecFmt, lio ecU
+    jsp unitChk
+    lio ecU
+    jsp uDrop
+    lio ecU
+    jsp hTake
+    lac hAdr
+    dac i [drvHnd:EX_BANK]
+    lio ecU
+    jsp i [drvFormat:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    dac ecE
+    jsp hForget
+    lac ecE
+    jmp mtFail
+
+// cEL -- oEL types unit o's directory as TECO holds it (entGet), with pending
+// deletions gone, pending renames under their new names and the output's scratch file
+// hidden.
+// It types the free directory entries and the free blocks, then a line for each file
+// with its mode's character, its subnames (@ for the first when it has one) and its
+// blocks.
+// The columns are PDP-6 TECO's, every 8, and the numbers decimal.
+// Reads the argument state (unitO).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from cE, ends by jmp rsLoop.
+cEL, jsp unitO
+    lia
+    jsp elGo
+    jmp i [rsLoop:0]
+
+// elGo -- do cEL's work, typing unit IO's directory.
+// For the second set's :EGDIR too (files11.ac).
+// IO is the unit.
+// No return value.
+// Does not preserve AC or IO.
+// A failure leaves by mtFail with the library's message.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+elGo, dac elX
+    jsp hGet
+    dzm elN
+    dzm elPB
+    dzm elS
+el1, jsp entGet
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp el1s
+    SKIP_NEXT_IF_DIFFERENT [2]
+    jmp el1p
+    jmp el1n
+el1s, idx elN
+    jmp el1n
+el1p, lac elPB
+    add mtEnt+FS_DEALLOC
+    dac elPB
+el1n, idx elS
+    SKIP_NEXT_IF_SAME [FS_NENT]
+    jmp el1
+    lac hAdr
+    dac mtPb+FS_PHANDLE
+    dzm mtPb+FS_PNEED
+    lac [mtPb:.]
+    farjda(fsFree:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    jsp i [newline:1]
+    dzm i [elCol:EX_BANK]
+    lio [mtHdrF:EX_BANK]
+    jsp i [elStr:EX_BANK]
+    jsp i [elTab:EX_BANK]
+    law FS_NENT
+    sub elN
+    lia
+    jsp i [elNum:EX_BANK]
+    jsp i [elTab:EX_BANK]
+    lio [mtHdrB:EX_BANK]
+    jsp i [elStr:EX_BANK]
+    jsp i [elTab:EX_BANK]
+    lac mtPb+FS_PTOTAL
+    add elPB
+    lia
+    jsp i [elNum:EX_BANK]
+    jsp i [newline:1]
+    dzm elS
+el2, jsp entGet
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp el2s
+    jmp el2n
+el2s, dzm i [elCol:EX_BANK]
+    // the mode is the type, 0 to 3, as the memo's characters, blank ! " #.
+    // Any other type a program gave its file is *.
+    lac mtEnt+FS_DEINFO
+    and [FS_ITYPE]
+    dac elT
+    sub [4]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp elStar
+    lac elT
+    add [040]
+    jmp elMc
+elStar, law 052
+elMc, lia
+    jsp i [elPut:EX_BANK]
+    jsp i [elTab:EX_BANK]
+    jsp nmUnp
+    lac nmSp
+    SKIP_NEXT_IF_SAME nmLen
+    jmp elTwo
+    // one subname types @, then it
+    lio [CH_AT]
+    jsp i [elPut:EX_BANK]
+    jsp i [elTab:EX_BANK]
+    dzm i [erA:EX_BANK]
+    lac nmLen
+    dac i [erB:EX_BANK]
+    jsp i [elRng:EX_BANK]
+    jmp elBk
+elTwo, dzm i [erA:EX_BANK]
+    lac nmSp
+    dac i [erB:EX_BANK]
+    jsp i [elRng:EX_BANK]
+    jsp i [elTab:EX_BANK]
+    lac nmSp
+    add [1]
+    dac i [erA:EX_BANK]
+    lac nmLen
+    dac i [erB:EX_BANK]
+    jsp i [elRng:EX_BANK]
+elBk, jsp i [elTab:EX_BANK]
+    lio mtEnt+FS_DEALLOC
+    jsp i [elNum:EX_BANK]
+    jsp i [newline:1]
+el2n, idx elS
+    SKIP_NEXT_IF_SAME [FS_NENT]
+    jmp el2
+    jmp i elX
+
+// entGet -- read slot elS of the selected handle's directory into mtEnt, as TECO shows
+// it, with a pending rename's new name, and its mode when it gives one.
+// elS is the slot.
+// AC is 0 for a free slot, 1 for a file, and 2 for one not shown, whose blocks count as
+// free.
+// One not shown is a file whose deletion is pending, or the output's scratch file, its
+// allocation in mtEnt then the blocks not yet written.
+// AC is the result, IO is not preserved.
+// A failure leaves by mtFail with the library's message.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+entGet, dac egX
+    lac hAdr
+    dac mtPb+FS_PHANDLE
+    lac elS
+    dac mtPb+FS_PINDEX
+    lac [mtEnt:.]
+    dac mtPb+FS_PDEST
+    lac [mtPb:.]
+    farjda(fsEntry:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    lac mtEnt
+    SKIP_NEXT_IF_AC_ZERO
+    jmp egShow
+    jmp i egX
+egShow, lac i [outOpen:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp egR
+    lac i [outHnd:1]
+    SKIP_NEXT_IF_SAME hIdx
+    jmp egR
+    lac i [FD_OUT+FS_FSLOT]
+    SKIP_NEXT_IF_SAME elS
+    jmp egR
+    // its words written, those in the output's block, and a half word
+    lac i [FD_OUT+FS_FLEN]
+    add i [wrIdx:1]
+    add i [wrHalf:1]
+    add [MTWDS-1]
+    sar 8s
+    dac egT
+    lac mtEnt+FS_DEALLOC
+    sub egT
+    dac mtEnt+FS_DEALLOC
+    law 2
+    jmp i egX
+egR, lio elS
+    jsp trFind
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp egPd
+    add [RN_SIX]
+    dac egPend
+    lac i egPend
+    dac mtEnt
+    idx egPend
+    lac i egPend
+    dac mtEnt+1
+    idx egPend
+    lac i egPend
+    dac mtEnt+2
+    lac trfP
+    add [RN_MODE]
+    dac egPend
+    lac i egPend
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp egPd
+    sub [1]
+    dac egT
+    lac mtEnt+FS_DEINFO
+    and [FS_IRO+FS_IAPP]           // all but the type
+    ior egT
+    dac mtEnt+FS_DEINFO
+egPd, lac elS
+    add hPend
+    dac egPend
+    lac i egPend
+    SKIP_NEXT_IF_AC_ZERO
+    jmp .+3
+    law 1
+    jmp i egX
+    law 2
+    jmp i egX
+
+// nmUnp -- unpack mtEnt's name, 9 sixbit characters, into mtNmCh, one a word.
+// Reads mtEnt.
+// nmLen is the characters before the trailing blanks, and nmSp the first blank before
+// them, or nmLen when there is none.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+nmUnp, dac nuX
+    dzm nuI
+    lio mtEnt
+    jsp nu3
+    lio mtEnt+1
+    jsp nu3
+    lio mtEnt+2
+    jsp nu3
+    law MT_NAMEC
+    dac nmLen
+nuL, lac nmLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nuS
+    add [mtNmCh:.]
+    sub [1]
+    dac nuT
+    lac i nuT
+    SKIP_NEXT_IF_SAME [040]
+    jmp nuS
+    lac nmLen
+    sub [1]
+    dac nmLen
+    jmp nuL
+nuS, dzm nmSp
+nuM, lac nmSp
+    SKIP_NEXT_IF_DIFFERENT nmLen
+    jmp i nuX
+    add [mtNmCh:.]
+    dac npP
+    lac i npP
+    SKIP_NEXT_IF_DIFFERENT [040]
+    jmp i nuX
+    idx nmSp
+    jmp nuM
+
+// nu3 -- put the three sixbit characters of the word in IO to mtNmCh, as ASCII.
+// IO is the word.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+nu3, dac n3X
+    dio n3W
+    lac n3W
+    rar 9s
+    rar 3s
+    and [077]
+    add [040]
+    dac nuC
+    jsp nuPut
+    lac n3W
+    rar 6s
+    and [077]
+    add [040]
+    dac nuC
+    jsp nuPut
+    lac n3W
+    and [077]
+    add [040]
+    dac nuC
+    jsp nuPut
+    jmp i n3X
+
+// nuPut -- put nuC to mtNmCh at nuI, which advances.
+// Reads nuC and nuI.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+nuPut, dac npX
+    lac nuI
+    add [mtNmCh:.]
+    dac npP
+    lac nuC
+    dac i npP
+    idx nuI
+    jmp i npX
+
+// unitO -- take the optional unit o, the argument, a unit (unitChk), else the unit
+// last named (mtUnit).
+// With neither, or with a comma, it is an error.
+// Reads the argument state, and clears it.
+// AC is the unit, IO is not preserved.
+// The unit becomes the unit last named (mtUnit).
+// Reached from any bank with the extend window open.
+// Called via jsp.
+unitO, dac uoX
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [err:0]
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp uoArg
+    cli
+    jsp i [argOr:0]
+    lac mtUnit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    jmp i uoX
+uoArg, cli
+    jsp i [argOr:0]
+    lia
+    jsp unitChk
+    lac mtUnit
+    jmp i uoX
+
+// unitU -- take the unit u, required, as unitO does, but with no argument it is
+// an error.
+// Reads the argument state, and clears it.
+// AC is the unit, IO is not preserved.
+// The unit becomes the unit last named (mtUnit).
+// Called via jsp.
+unitU, dac uuX
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [err:0]
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    cli
+    jsp i [argOr:0]
+    lia
+    jsp unitChk
+    lac mtUnit
+    jmp i uuX
+
+// unitChk -- an error unless IO is a unit, 1 to 8 the library's drives and DR_UNIT the
+// drum.
+// A unit becomes the unit last named (mtUnit).
+// IO is the unit.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+unitChk, dac ucX
+    lai
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ucHi
+    jmp i [err:0]
+ucHi, sub [DR_UNIT+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i [err:0]
+    dio mtUnit
+    jmp i ucX
+
+// nmRead -- read the name nm, the source's text up to the next ALT MODE, passed
+// with it, into mtNmStr as an am1 ascii string for the library.
+// A name is one or two subnames of printing characters, a run of blanks between them.
+// Blanks before and after are dropped.
+// It has at most 9 characters in all, the blank between included, which is the
+// library's limit, so a subname may be longer than the memo's 6 when the other is short.
+// Anything else is an error.
+// The case is kept, and the library takes lower case as upper.
+// Reads the command string (nextCh).
+// No return value; sets mtNmStr, mtNmRaw and nrN.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+nmRead, dac nrX
+    dzm nrN
+    dzm nrSp
+    dzm nrTwo
+nrL, jsp i [nextCh:0]
+    lai
+    and [0177]
+    dac nrC
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp nrEnd
+    SKIP_NEXT_IF_DIFFERENT [040]
+    jmp nrBl
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp i [err:0]
+    sub [041]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [err:0]
+    // blanks since the last character begin the second subname
+    lac nrSp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nrPut
+    dzm nrSp
+    lac nrTwo
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [err:0]
+    law 1
+    dac nrTwo
+    lio [040]
+    jsp nrAdd
+nrPut, lio nrC
+    jsp nrAdd
+    jmp nrL
+    // a blank before the first character is dropped
+nrBl, lac nrN
+    SKIP_NEXT_IF_AC_ZERO
+    dac nrSp
+    jmp nrL
+nrEnd, lac nrN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    jsp mtPackN
+    jmp i nrX
+
+// mtPackN -- pack the nrN characters at mtNmRaw into mtNmStr, an am1 ascii string, two
+// to a word, the first in the high half, then a word of 0.
+// Reads nrN and mtNmRaw.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtPackN, dac pkX
+    dzm nrI
+    lac [mtNmStr:.]
+    dac nrQ
+nrPk, lac nrI
+    sub nrN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp nrZ
+    lac nrI
+    add [mtNmRaw:.]
+    dac naP
+    lac i naP
+    ral 9s
+    dac nrW
+    idx nrI
+    sub nrN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp nrW1
+    lac nrI
+    add [mtNmRaw:.]
+    dac naP
+    lac nrW
+    ior i naP
+    dac nrW
+    idx nrI
+nrW1, lac nrW
+    dac i nrQ
+    idx nrQ
+    jmp nrPk
+nrZ, dzm i nrQ
+    jmp i pkX
+
+// mtEntNm -- put the name of slot IO on the selected handle, as the tape holds it, into
+// mtNmStr, for fsRename's old name.
+// IO is the slot.
+// No return value.
+// Does not preserve AC or IO.
+// Changes elS and mtEnt.
+// A failure leaves by mtFail with the library's message.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtEntNm, dac enmX
+    dio elS
+    lac hAdr
+    dac mtPb+FS_PHANDLE
+    lac elS
+    dac mtPb+FS_PINDEX
+    lac [mtEnt:.]
+    dac mtPb+FS_PDEST
+    lac [mtPb:.]
+    farjda(fsEntry:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    jsp nmUnp
+    dzm enmI
+enmL, lac enmI
+    SKIP_NEXT_IF_DIFFERENT nmLen
+    jmp enmEnd
+    add [mtNmCh:.]
+    dac enmP
+    lio i enmP
+    lac enmI
+    add [mtNmRaw:.]
+    dac enmP
+    dio i enmP
+    idx enmI
+    jmp enmL
+enmEnd, lac nmLen
+    dac nrN
+    jsp mtPackN
+    jmp i enmX
+
+// nrAdd -- add the character in IO to the name.
+// Past 9 characters, it is an error.
+// IO is the character.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+nrAdd, dac naX
+    lac nrN
+    SKIP_NEXT_IF_DIFFERENT [MT_NAMEC]
+    jmp i [err:0]
+    add [mtNmRaw:.]
+    dac naP
+    dio i naP
+    idx nrN
+    jmp i naX
+
+// opnName -- open mtNmStr on the selected handle (hAdr) into the descriptor whose
+// address is in IO.
+// IO is the descriptor's address.
+// No return value.
+// Does not preserve AC or IO.
+// A failure leaves by mtFail with the library's message.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+opnName, dac onX
+    dio mtPb+FS_PFD
+    lac hAdr
+    dac mtPb+FS_PHANDLE
+    lac [mtNmStr:.]
+    dac mtPb+FS_PNAME
+    lac [mtPb:.]
+    farjda(fsOpenName:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    jmp i onX
+
+// mtFindN -- find the slot of the name in mtNmStr on the selected handle, as TECO shows
+// the directory.
+// A pending rename's new name finds its file.
+// A name the tape holds is found unless a deletion or a rename is pending for its file,
+// or it is the output's scratch file.
+// Reads mtNmStr and fnSoft.
+// AC is the slot, IO is not preserved.
+// A name not found is FILE NOT FOUND, or, with fnSoft set (the second set's lookups,
+// files11.ac), AC -0 and fnSoft cleared.
+// mtSix is left the name in sixbit.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtFindN, dac fnX
+    lac hAdr
+    dac mtPb+FS_PHANDLE
+    lac [mtNmStr:.]
+    dac mtPb+FS_PNAME
+    lac [mtSix:.]
+    dac mtPb+FS_PNAMED
+    lac [mtPb:.]
+    farjda(fsLookup:*)
+    dio fnK
+    dac fnS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnR
+    SKIP_NEXT_IF_SAME [FS_ENOTFOUND]
+    jmp mtFail
+fnR, jsp trSix
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnTape
+    add [RN_SLOT]
+    dac fnK
+    lac i fnK
+    jmp i fnX
+fnTape, lac fnS
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnNo
+    lac fnK
+    add hPend
+    dac fnS
+    lac i fnS
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnNo
+    lio fnK
+    jsp trFind
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnNo
+    lac i [outOpen:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnHid
+    lac i [outHnd:1]
+    SKIP_NEXT_IF_SAME hIdx
+    jmp fnHid
+    lac i [FD_OUT+FS_FSLOT]
+    SKIP_NEXT_IF_DIFFERENT fnK
+    jmp fnNo
+fnHid, lac fnK
+    jmp i fnX
+fnNo, lac fnSoft
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnSf
+    law FS_ENOTFOUND
+    jmp mtFail
+fnSf, dzm fnSoft
+    cla
+    cma
+    jmp i fnX
+
+// trFind -- find the selected handle's pending rename of slot IO.
+// IO is the slot.
+// AC is the rename's address, also in trfP, or 0 when there is none.
+// AC is the result, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+trFind, dac trfX
+    dio trfK
+    lac [MT_REN]
+    dac trfP
+    law MT_NREN
+    dac trfN
+    lac hIdx
+    add [1]
+    dac trfH
+trfL, lac i trfP
+    SKIP_NEXT_IF_SAME trfH
+    jmp trfNx
+    lac trfP
+    add [RN_SLOT]
+    dac trfQ
+    lac i trfQ
+    SKIP_NEXT_IF_DIFFERENT trfK
+    jmp trfHit
+trfNx, lac trfP
+    add [MT_RENW]
+    dac trfP
+    lac trfN
+    sub [1]
+    dac trfN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trfL
+    cla
+    jmp i trfX
+trfHit, lac trfP
+    jmp i trfX
+
+// trSix -- find the selected handle's pending rename whose new name is mtSix's.
+// Reads mtSix.
+// AC is the rename's address, or 0 when there is none.
+// AC is the result, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+trSix, dac trsX
+    lac [MT_REN]
+    dac trsP
+    law MT_NREN
+    dac trsN
+    lac hIdx
+    add [1]
+    dac trsH
+trsL, lac i trsP
+    SKIP_NEXT_IF_SAME trsH
+    jmp trsNx
+    lac trsP
+    add [RN_SIX]
+    dac trsQ
+    lac i trsQ
+    SKIP_NEXT_IF_SAME mtSix
+    jmp trsNx
+    idx trsQ
+    lac i trsQ
+    SKIP_NEXT_IF_SAME mtSix+1
+    jmp trsNx
+    idx trsQ
+    lac i trsQ
+    SKIP_NEXT_IF_SAME mtSix+2
+    jmp trsNx
+    lac trsP
+    jmp i trsX
+trsNx, lac trsP
+    add [MT_RENW]
+    dac trsP
+    lac trsN
+    sub [1]
+    dac trsN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trsL
+    cla
+    jmp i trsX
+
+// trClr -- drop the selected handle's pending renames.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+trClr, dac trcX
+    lac [MT_REN]
+    dac trcP
+    law MT_NREN
+    dac trcN
+    lac hIdx
+    add [1]
+    dac trcH
+trcL, lac i trcP
+    SKIP_NEXT_IF_DIFFERENT trcH
+    dzm i trcP
+    lac trcP
+    add [MT_RENW]
+    dac trcP
+    lac trcN
+    sub [1]
+    dac trcN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trcL
+    jmp i trcX
+
+// inClose -- close the input file, if one is open.
+// Input stays as selected.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+inClose, dac icX
+    lac inOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i icX
+    dzm inOpen
+    lac [FD_IN]
+    mtcall(fsClose:*)      // read only, so nothing is written
+    jmp i icX
+
+// uDrop -- forget unit IO's directory before its tape is written by other means.
+// The input file is closed if it is on that unit, and the handle forgotten.
+// It is an error while the output's file is on that unit.
+// IO is the unit.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+uDrop, dac udX
+    dio udU
+    lac i [outOpen:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp udO
+    lac i [outHnd:1]
+    add [hUnit:.]
+    dac udP
+    lac i udP
+    SKIP_NEXT_IF_DIFFERENT udU
+    jmp i [err:0]
+udO, lac inOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp udH
+    lac inHnd
+    add [hUnit:.]
+    dac udP
+    lac i udP
+    SKIP_NEXT_IF_SAME udU
+    jmp udH
+    jsp inClose
+udH, lio udU
+    jsp hFind
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jsp hForget
+    jmp i udX
+
+// hFind -- find the handle holding unit IO's directory, which is then selected (hSel).
+// IO is the unit.
+// AC is the handle's index, or -0, negative, when none does.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+hFind, dac hfX
+    dio hfU
+    dzm hfI
+hfL, lac hfI
+    add [hUnit:.]
+    dac hfP
+    lac i hfP
+    SKIP_NEXT_IF_DIFFERENT hfU
+    jmp hfHit
+    idx hfI
+    SKIP_NEXT_IF_SAME [MT_NHND]
+    jmp hfL
+    cla
+    cma
+    jmp i hfX
+hfHit, lio hfI
+    jsp hSel
+    lac hfI
+    jmp i hfX
+
+// hGet -- make sure unit IO's directory is in memory, read from the tape when it is not
+// (uET), with its handle selected.
+// IO is the unit.
+// No return value.
+// Does not preserve AC or IO.
+// A failure leaves by mtFail with the library's message, the handle left free.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+hGet, dac hgX
+    dio hgU
+    jsp hFind
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i hgX
+    lio hgU
+    jsp hTake
+    lac hAdr
+    dac i [drvHnd:EX_BANK]
+    lio hgU
+    jsp i [drvMount:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i hgX
+    dac hgE
+    jsp hForget
+    lac hgE
+    jmp mtFail
+
+// hTake -- take a handle for unit IO, selected and zeroed, not read.
+// It is a free one, else one with no change pending and not the input file's or the
+// output's, forgotten.
+// With none, it is an error.
+// IO is the unit.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+hTake, dac htX
+    dio htU
+    dzm htI
+htF, lac htI
+    add [hUnit:.]
+    dac htP
+    lac i htP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp htUse
+    idx htI
+    SKIP_NEXT_IF_SAME [MT_NHND]
+    jmp htF
+    dzm htI
+htE, lio htI
+    jsp hSel
+    lac i [outOpen:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp htP1
+    lac i [outHnd:1]
+    SKIP_NEXT_IF_DIFFERENT htI
+    jmp htNx
+htP1, lac inOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp htP0
+    lac inHnd
+    SKIP_NEXT_IF_DIFFERENT htI
+    jmp htNx
+htP0, jsp pendAny
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp htUse
+htNx, idx htI
+    SKIP_NEXT_IF_SAME [MT_NHND]
+    jmp htE
+    jmp i [err:0]
+htUse, lio htI
+    jsp hSel
+    jsp hForget
+    lac htI
+    add [hUnit:.]
+    dac htP
+    lac htU
+    dac i htP
+    jmp i htX
+
+// hSel -- select handle IO, setting hIdx, its address hAdr and its pending deletions
+// hPend.
+// IO is the handle's index.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+hSel, dac hsX
+    dio hIdx
+    lac hIdx
+    add [mtHAdrT:.]
+    dac hsP
+    lac i hsP
+    dac hAdr
+    lac hIdx
+    ral 5s
+    add [MT_PEND]
+    dac hPend
+    jmp i hsX
+
+// hForget -- set the selected handle as when TECO is loaded, with no pending deletions
+// or renames and no unit.
+// Its descriptors are then not valid.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+hForget, dac hzX
+    jsp trClr
+    lac hAdr
+    dac zP
+    lac [FS_HANDLEW]
+    dac zN
+    jsp zeroW
+    lac hPend
+    dac zP
+    law MT_PENDW
+    dac zN
+    jsp zeroW
+    lac hIdx
+    add [hUnit:.]
+    dac hzP
+    dzm i hzP
+    jmp i hzX
+
+// pendAny -- tell whether the selected handle has a deletion or a rename pending.
+// Has no arguments.
+// AC is not 0 when one is pending, else 0.
+// AC is the result, IO is preserved.
+// Called via jsp.
+pendAny, dac paX
+    lac hPend
+    dac paP
+    law FS_NENT
+    dac paK
+paL, lac i paP
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i paX
+    idx paP
+    lac paK
+    sub [1]
+    dac paK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp paL
+    lac [MT_REN]
+    dac paP
+    law MT_NREN
+    dac paK
+    lac hIdx
+    add [1]
+    dac paH
+paR, lac i paP
+    SKIP_NEXT_IF_DIFFERENT paH
+    jmp i paX
+    lac paP
+    add [MT_RENW]
+    dac paP
+    lac paK
+    sub [1]
+    dac paK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp paR
+    cla
+    jmp i paX
+
+// zeroW -- set zN words from the 16-bit address zP to 0.
+// Reads zN and zP, and leaves zP past the words and zN 0.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+zeroW, dac zwX
+zwL, lac zN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i zwX
+    dzm i zP
+    idx zP
+    lac zN
+    sub [1]
+    dac zN
+    jmp zwL
+
+// cp400 -- copy 0400 words, a directory block, from cpS to cpD, both advanced.
+// Reads cpS and cpD.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+cp400, dac cwX
+    law MTWDS
+    dac cwK
+cwL, lac i cpS
+    dac i cpD
+    idx cpS
+    idx cpD
+    lac cwK
+    sub [1]
+    dac cwK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cwL
+    jmp i cwX
+
+// mtFail -- take the library's status in AC as an error, its message typed in place of
+// ? (errTxt), or ? for a status with none.
+// AC is the status.
+// Keeps the status in mfS and clears fnSoft.
+// Does not preserve AC or IO.
+// Reached by jmp from any bank with the extend window open, and ends by jmp err; it
+// does not return.
+mtFail, dac mfS
+    dzm fnSoft
+    sub [FS_EXFER+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp mfQ
+    lac mfS
+    add [mtMsgT:EX_BANK]
+    dac mfP
+    lac i mfP
+    dac errTxt
+    jmp i [err:0]
+mfQ, dzm errTxt
+    jmp i [err:0]
+
+// mtStart -- mark the start of a page read from the tape (rdStart) as the place a full
+// buffer gives back to.
+// It is an error when no file is open.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtStart, dac msX
+    lac inOpen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    lio [mtCpL:.]
+    jsp cpSave
+    jmp i msX
+
+// mtGet -- give the tape's next character, as rdGet gives it.
+// CR comes as CR LF, and an LF after a CR on the tape is dropped.
+// NUL and DEL are passed over.
+// Where a line ends is kept for mtBack.
+// Has no arguments.
+// AC is 0 with IO the character, or 1 at the file's end.
+// AC is the result, IO is not preserved at the file's end.
+// A failure leaves by mtFail with the library's message, and a break leaves through
+// tmErr.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtGet, dac mgX
+    lio [mtCpP:.]
+    jsp cpSave
+mgLoop, lac rbLF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mgTape
+    dzm rbLF
+    law 1
+    dac rbCR
+    law CH_LF
+    dac mgC
+    jmp mgLf
+mgTape, jsp mtCh
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i mgX
+    dio mgC
+    lac mgC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mgLoop
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp mgLoop
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp mgIsLf
+    dzm rbCR
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp mgCr
+    jmp mgOut
+mgIsLf, lac rbCR
+    dzm rbCR
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mgLoop
+    jmp mgLf
+mgCr, law 1
+    dac rbLF
+    jmp mgOut
+mgLf, lio [mtCpL:.]
+    jsp cpSave
+mgOut, lio mgC
+    cla
+    jmp i mgX
+
+// mtCh -- give the next character of the file, its eighth bit dropped.
+// Whole buffers are read, MT_RDW words at a time.
+// Has no arguments.
+// AC is 0 with IO the character, or 1 at the file's end.
+// AC is the result, IO is not preserved at the file's end.
+// A failure leaves by mtFail, and a break leaves through tmErr (brkChk).
+// Called via jsp.
+mtCh, dac mcX
+mcAgain, lac rbIdx
+    sub rbLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp mcFill
+    lac rbIdx
+    add [RDBUF]
+    dac mcP
+    lac i mcP
+    dac mcW
+    lac rbHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mcLo
+    law 1
+    dac rbHalf
+    lac mcW
+    rar 9s
+    jmp mcOut
+mcLo, dzm rbHalf
+    idx rbIdx
+    lac mcW
+mcOut, and [0177]
+    lia
+    cla
+    jmp i mcX
+    // the buffer is used up, so read the next words from where it ended
+mcFill, jsp i [brkChk:1]
+    jsp i [clkTick:0]
+    lac rbStart
+    add rbLen
+    dac rbStart
+    dzm rbIdx
+    dzm rbLen
+    lac [FD_IN]
+    dac mtPb+FS_PFDESC
+    lac [RDBUF]
+    dac mtPb+FS_PBUF
+    lac [MT_RDW]
+    dac mtPb+FS_PCOUNT
+    lac [mtPb:.]
+    mtcall(fsRead:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    dio rbLen
+    lac rbLen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mcAgain
+    law 1
+    jmp i mcX
+
+// mtBack -- give back to the tape what a full buffer did not take.
+// With IO not 0, the line cut short and the character go back, to the line's start.
+// With IO 0, the character alone goes back.
+// The reader's place moves back, within its buffer or by a seek.
+// IO chooses, as above.
+// No return value.
+// Does not preserve AC or IO.
+// A failure leaves by mtFail with the library's message.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtBack, dac mkX
+    lac [mtCpP:.]
+    SKIP_NEXT_IF_IO_IS_ZERO
+    lac [mtCpL:.]
+    dac mkP
+    lac i mkP
+    dac mkPos
+    idx mkP
+    lac i mkP
+    dac rbHalf
+    idx mkP
+    lac i mkP
+    dac rbLF
+    idx mkP
+    lac i mkP
+    dac rbCR
+    lac mkPos
+    sub rbStart
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp mkSeek
+    dac mkI
+    sub rbLen
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp mkSeek
+    lac mkI
+    dac rbIdx
+    jmp i mkX
+mkSeek, lac [FD_IN]
+    dac mtPb+FS_PFDESC
+    lac mkPos
+    dac mtPb+FS_PPOS
+    lac [mtPb:.]
+    farjda(fsSeek:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mtFail
+    lac mkPos
+    dac rbStart
+    dzm rbLen
+    dzm rbIdx
+    jmp i mkX
+
+// cpSave -- save the reader's place to the four words at the 16-bit address in IO.
+// The words are the word in the file, the half, a line feed owed, and a CR just read.
+// IO is the address.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+cpSave, dac csX
+    dio csP
+    lac rbStart
+    add rbIdx
+    dac i csP
+    idx csP
+    lac rbHalf
+    dac i csP
+    idx csP
+    lac rbLF
+    dac i csP
+    idx csP
+    lac rbCR
+    dac i csP
+    jmp i csX
+
+miX, 0                      // the return addresses
+erX, 0
+edX, 0
+elX, 0
+uoX, 0
+uuX, 0
+ucX, 0
+nrX, 0
+naX, 0
+hfX, 0
+hgX, 0
+htX, 0
+hsX, 0
+hzX, 0
+paX, 0
+zwX, 0
+onX, 0
+icX, 0
+udX, 0
+cwX, 0
+mcX, 0
+mgX, 0
+msX, 0
+mkX, 0
+csX, 0
+egX, 0
+nuX, 0
+n3X, 0
+npX, 0
+ceC, 0                      // E's letter
+erU, 0                      // ER's unit, and the pending word of its file
+erP, 0
+edU, 0                      // ED's unit, the file's slot and information word
+edS, 0
+edI, 0
+edP, 0
+ecS, 0                      // EC's slot and its pending word
+ecP, 0
+ecU, 0                      //   u,vEC's u and v
+ecV, 0
+ecE, 0
+elS, 0                      // EL's slot, files shown, blocks pending deletion
+elN, 0
+elPB, 0
+elK, 0
+elT, 0                      //   the file's type
+egPend, 0
+nrN, 0                      // for nmRead, characters, the one read, blanks since one
+nrC, 0
+nrSp, 0
+nrTwo, 0                    //   the second subname begun
+nrI, 0
+nrQ, 0
+nrW, 0
+naP, 0
+nuI, 0                      // nmUnp's
+nuC, 0
+nuT, 0
+npP, 0
+n3W, 0
+nmLen, 0
+nmSp, 0
+hfU, 0
+hfI, 0
+hfP, 0
+hgU, 0
+hgE, 0
+htU, 0
+htI, 0
+htP, 0
+hsP, 0
+hzP, 0
+paP, 0
+paK, 0
+paH, 0
+pkX, 0                      // mtPackN's return
+pwX, 0                      // mtPendW's
+fnX, 0                      // for mtFindN, the slot, the status, a pointer
+fnK, 0
+fnS, 0
+enmX, 0                     // mtEntNm's
+enmI, 0
+enmP, 0
+egT, 0                      // entGet's
+trfX, 0                     // for trFind, the entry, the slot, the handle, the count
+trfP, 0
+trfK, 0
+trfH, 0
+trfN, 0
+trfQ, 0
+trsX, 0                     // trSix's
+trsP, 0
+trsH, 0
+trsN, 0
+trsQ, 0
+trcX, 0                     // trClr's
+trcP, 0
+trcH, 0
+trcN, 0
+zP, 0                       // zeroW's address and count
+zN, 0
+udU, 0
+udP, 0
+cpS, 0                      // cp400's source and destination
+cpD, 0
+cwK, 0
+mfS, 0                      // the last failure's status, for the second set's code
+mfP, 0
+mcP, 0
+mcW, 0
+mgC, 0
+mkP, 0
+mkPos, 0
+mkI, 0
+csP, 0
+mtCpL,  // the reader's place after the last line feed given
+    table 4, 0
+mtCpP,  // and before the last character given
+    table 4, 0
+mtNmRaw,  // the name typed, one character a word
+    table MT_NAMEC, 0
+mtNmStr,  // as an am1 ascii string for the library
+    table MT_NSTRW, 0
+mtSix,  // and in sixbit, as fsLookup packs it (mtFindN)
+    table FS_DENAMEW, 0
+mtNmCh,  // a directory entry's name, one character a word
+    table MT_NAMEC, 0
+mtEnt,  // the directory entry EL is typing
+    table FS_ENTW, 0
+mtPb,  // the library's parameter block
+    table MT_PBW, 0
+
+// The handles' addresses in bank 13 (teco.ah).
+mtHAdrT,
+    HND0
+    HND0+FS_HANDLEW
+    HND0+(2*FS_HANDLEW)
+    HND0+(3*FS_HANDLEW)
+    assert . - mtHAdrT == MT_NHND, "an address for each handle"
+endloc
+
+inMt, 0                     // not 0 while input is from the tape (ER, /Q, /S)
+errTxt, 0                   // a message to type in place of ?, a 16-bit address
+hIdx, 0                     // the selected handle, its index, address, pending words
+hAdr, 0
+hPend, 0
+hUnit,  // each handle's unit, 0 when free
+    table MT_NHND, 0
+inOpen, 0                   // not 0 while an input file is open in FD_IN
+inHnd, 0                    //   its handle
+mtUnit, 0                   // the unit last named, 0 for none
+fnSoft, 0                   // not 0 while mtFindN answers -0 for a name it does not find
+rbStart, 0                  // the reader, the file's word at RDBUF's first,
+rbLen, 0                    //   the words in RDBUF, the next one's index,
+rbIdx, 0
+rbHalf, 0                   //   1 when its low half is next,
+rbLF, 0                     //   1 when a line feed is owed after a CR,
+rbCR, 0                     //   1 when an LF on the tape is to be dropped

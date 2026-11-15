@@ -1,0 +1,208 @@
+// tapemsg.ac -- the Microtape's words in bank 15 (EX_BANK).
+// They are the messages a library failure types in place of ?, with mtMsg,
+// which types one, and EL's type-out, elPut, elTab, elStr, elNum and elRng, with EL's
+// two headings.
+// They are here because tapefile.ac's bank 12 has no room for them.
+//
+// tapefile.ac's mtFail puts a message's 16-bit address from mtMsgT in errTxt (bank 12).
+// errIdle (teco.am1) calls mtMsg to type it.
+// cEL (tapefile.ac) sets elCol, erA and erB and calls the type-out through full
+// addresses.
+// The routines' data words follow the code.
+// Needs teco.ah, <AIDS/skipmacros.ah> and <MICROTAPE/microtape.ah>.
+// Needs fromInt, fmtNum, numLen and numBuf in bank 0, putc in bank 1, and errTxt and
+// mtNmCh in bank 12.
+
+local epX, etX, etL, esX, esL, esP, esW, enX, enL, enK, enP, erX, erL, erQ, \
+    mmX, mmL, mmP, mmW
+
+// mtMsg -- type errTxt's message and clear errTxt.
+// For errIdle (teco.am1) and e1Arg (interp11.ac).
+// Reads errTxt (bank 12), the message's 16-bit address.
+// No return value.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+mtMsg, dac mmX
+    lac i [errTxt:MT_BANK]
+    dac mmP
+    dzm i [errTxt:MT_BANK]
+mmL, lac i mmP
+    dac mmW
+    rar 9s
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i mmX
+    lia
+    jsp i [putc:1]
+    lac mmW
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i mmX
+    lia
+    jsp i [putc:1]
+    idx mmP
+    jmp mmL
+
+// elPut -- type the character in IO, counting the column in elCol.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+elPut, dac epX
+    jsp i [putc:1]
+    idx elCol
+    jmp i epX
+
+// elTab -- type blanks to the next column a multiple of 8, at least one.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+elTab, dac etX
+etL, lio [040]
+    jsp elPut
+    lac elCol
+    and [TAB_STOP-1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp etL
+    jmp i etX
+
+// elStr -- type the am1 ascii string whose 16-bit address is in IO.
+// IO is the string's address.
+// No return value.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+elStr, dac esX
+    dio esP
+esL, lac i esP
+    dac esW
+    rar 9s
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i esX
+    lia
+    jsp elPut
+    lac esW
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i esX
+    lia
+    jsp elPut
+    idx esP
+    jmp esL
+
+// elNum -- type the count in IO, 0 or more, in decimal.
+// IO is the count.
+// No return value.
+// Does not preserve AC or IO.
+// Changes ra, numBuf and numLen (bank 0).
+// Reached from any bank with the extend window open.
+// Called via jsp.
+elNum, dac enX
+    jsp i [fromInt:0]
+    jsp i [fmtNum:0]
+    lac i [numLen:0]
+    dac enK
+    lac [numBuf:0]
+    dac enP
+enL, lac enK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i enX
+    lio i enP
+    jsp elPut
+    idx enP
+    lac enK
+    sub [1]
+    dac enK
+    jmp enL
+
+// elRng -- type mtNmCh (bank 12) from erA up to erB.
+// Reads erA and erB.
+// No return value.
+// Does not preserve AC or IO.
+// Advances erA up to erB.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+elRng, dac erX
+erL, lac erA
+    sub erB
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i erX
+    lac erA
+    add [mtNmCh:MT_BANK]
+    dac erQ
+    lio i erQ
+    jsp elPut
+    idx erA
+    jmp erL
+
+mmX, 0
+mmP, 0
+mmW, 0
+epX, 0
+etX, 0
+esX, 0
+esP, 0
+esW, 0
+enX, 0
+enK, 0
+enP, 0
+erX, 0
+erQ, 0
+endloc
+
+elCol, 0                    // EL's column typed to
+erA, 0                      // elRng's range, from erA up to erB
+erB, 0
+
+// The library's statuses' messages, by status; 0 types ? instead.
+mtMsgT,
+    0                       // FS_OK
+    mtMUn:.                 // FS_ENOUNIT
+    mtMUn:.                 // FS_ENOMEDIUM
+    mtMLk:.                 // FS_ELOCKED
+    mtMUn:.                 // FS_EHALTED
+    mtMUn:.                 // FS_EBADBLOCK
+    mtMUn:.                 // FS_EENDZONE
+    mtMBd:.                 // FS_ENOFS
+    mtMFg:.                 // FS_EFOREIGN
+    0                       // FS_ENAME
+    mtMEx:.                 // FS_EEXISTS
+    mtMNf:.                 // FS_ENOTFOUND
+    mtMDf:.                 // FS_EDIRFULL
+    mtMTf:.                 // FS_ENOSPACE
+    0                       // FS_ERANGE
+    mtMRo:.                 // FS_EREADONLY
+    0                       // FS_EBADFD
+    0                       // FS_ESMALLBUF
+    mtMUn:.                 // FS_ETIMEOUT
+    mtMDr:.                 // FS_EXFER, the drum's
+    assert . - mtMsgT == FS_EXFER+1, "a message for each of the library's statuses"
+
+mtMNf, ascii "FILE NOT FOUND"
+    0
+mtMBd, ascii "BAD DIRECTORY"
+    0
+mtMUn, ascii "UNIT UNABLE"
+    0
+mtMLk, ascii "UNIT LOCKED"
+    0
+mtMFg, ascii "FOREIGN TAPE"
+    0
+mtMEx, ascii "FILE EXISTS"
+    0
+mtMDf, ascii "DIRECTORY FULL"
+    0
+mtMTf, ascii "TAPE FULL"
+    0
+mtMRo, ascii "FILE READ ONLY"
+    0
+mtMDr, ascii "DRUM FAILED"
+    0
+mtHdrF, ascii "FREE FILES"
+    0
+mtHdrB, ascii "FREE BLOCKS"
+    0

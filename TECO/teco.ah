@@ -1,0 +1,446 @@
+// teco.ah -- TECO's constants, which are the bank layout, the console's sizes and
+// characters, and the build choices.
+// Every bare number is octal unless written 0d.
+
+// The banks, as full 16-bit addresses of their first words.
+// A smaller machine is a change here, not a redesign.
+#define BUF_BASE     020000               // banks 2-7, the text buffer
+#define QR_BASE      0100000              // banks 8-9, q-register text
+#define TY_A         0120000              // bank 10, the first typing area,
+#define TY_B         0122000              //   the second; they change roles (cmdread.ac)
+#define PDL_BASE     0124000              // bank 10, the push-down list, to PDL_END
+#define VT_BASE      0126000              // bank 10's top, vt11.ac, at PDL_END
+#define VT_BANK      012                  // VT_BASE's bank
+#define DPY_BASE     0130000              // bank 11, the display list
+#define MT_BASE      0140000              // bank 12, the Microtape library, tapefile.ac
+#define MT_DATA      0150000              // bank 13, the Microtape's data, below
+#define MT_BANK      014                  // MT_BASE's bank (teco.am1 asserts it)
+
+// Bank 13, the Microtape's data (tapefile.ac, tapeout.ac), in this order.
+// tapefile.ac asserts the library's sizes, and MT_PENDW against FS_NENT.
+#define MT_NHND      4                    // tape handles, 01047 words each (FS_HANDLEW)
+#define HND0         0150000              // the handles, to 0154233
+#define FD_IN        0154234              // the input's descriptor, 012 words (FS_FILEW)
+#define FD_X         0154246              // EC's and ED's descriptor
+#define FD_OUT       0154260              // the output's descriptor
+#define MT_PEND      0154272              // pending deletions, MT_NHND of MT_PENDW words
+#define MT_PENDW     040                  // a handle's pending deletions, a word a slot
+#define MT_REN       0154472              // pending renames, MT_NREN of MT_RENW words
+#define MT_NREN      010                  // the pending renames' entries
+#define MT_RENW      014                  // a pending rename's words (RN_HND on)
+#define MT_DEND      0154632              // the end of what mtInit clears
+#define RDBUF        0154632              // the reader's buffer
+#define MT_RDW       01000                // the reader's buffer's words, two blocks
+// A scratch buffer of two blocks for u,vEC and EI, then the output's block.
+#define SCRBUF       0155632              // 01000 words, to 0156631
+#define WRBUF        0156632              // 0400 words, a block, to 0157231
+// Bank 13's free end holds the display's resume points (display.ac's dRec), DPY_RINGN of
+// two words, then its two tables, dgTab and dsTab (dpytab.ac), assembled there in bank
+// DT_BANK.
+#define DPY_RING     0157240              // to 0157437
+#define DPY_RINGN    0100                 // a power of 2, more than size 1's rows
+#define DPY_TABS     0157440              // to 0157673
+#define DT_BANK      015                  // DPY_TABS's bank
+// Above them, the second set's indirect command file's descriptor (EI, files11.ac),
+// FS_FILEW words, to 0157705.
+// Its blocks are read into SCRBUF, which otherwise only the 1965 set's u,vEC uses.
+#define FD_EI        0157674
+
+// Bank 15 holds the Microtape's messages and EL's type-out (tapemsg.ac), the
+// greeting, the PDP-1 additions (additions.ac) with the drum's layer of the library, then
+// the second set's q-registers (qreg11.ac) and files (files11.ac), below its local
+// q-registers at LQ_BASE.
+#define EX_BANK      017                  // bank 15
+
+// Bank 14 holds the second command set, PDP-11 TECO's, which sense switch SW_P11 on at
+// the greeting selects, with its reader, skip, errors and commands
+// (interp11.ac, cmdread11.ac, edit11.ac, control11.ac).
+#define P11_BANK     016                  // bank 14
+
+// Bank 9's top 1,024 words, taken from q-register text (QR_END), hold the second set's
+// data (data11.ac), read only through full addresses ([name:D11_BANK]).
+// It is its dispatch, its error messages, its search string and the ^E constructs'
+// table, kept out of bank 14 for room.
+#define D11_DATA     0116000              // the second set's data
+#define D11_BANK     011                  // D11_DATA's bank
+
+// The drum is a file system volume, above the tracks loaders and overlays
+// take from 0.
+#define DR_UNIT      0d9                  // the drum's unit in the E commands
+#define DR_TRK0      020                  // the volume's first track
+#define DR_NTRK      020                  // the volume's tracks
+
+// A pending rename's words (tapeout.ac), as offsets in its entry.
+#define RN_HND       0                    // the handle's index plus 1, 0 for a free entry
+#define RN_SLOT      1                    // the directory slot
+#define RN_MODE      2                    // the mode plus 1, 0 to leave it
+#define RN_SIX       3                    // the new name in sixbit, as in the directory
+#define RN_STR       6                    // the new name as an ascii string, for fsRename
+
+// A file's name (tapefile.ac, tapeout.ac).
+// tapefile.ac asserts MT_NAMEC and MT_NSTRW against the library.
+#define MT_NAMEC     0d9                  // its characters at most, in FS_DENAMEW words
+// The name as an am1 ascii string for the library, two characters a word and a zero word.
+#define MT_NSTRW     6                    // the string's words
+#define MT_PBW       6                    // a library call's parameter block, its longest
+
+// The display (display.ac).
+#define DPY_END      0140000              // the end of the list in bank 11
+#define DPY_ROOM     020                  // the list's words kept for closing a full list
+// /U's block map, a word a block, in bank 11's top; /U's list ends below it.
+#define DPY_MAP      0136000
+#define DPY_MAPW     01100                // the most blocks the map holds
+#define DPY_LINES    0d20                 // lines each side of the pointer at the start
+#define DPY_BARH     0d9                  // the pointer's bar's height, in 340 units
+#define DPY_INTEN    5                    // the list's intensity
+#define DPY_INTEN0   3                    // size 0's intensity, lower, as it is denser
+#define DPY_UCELLS   0d72                 // /U's blocks in a row, at size 1
+#define DPY_UDIR     052                  // *, /U's character for the directory
+#define DPY_UCHART   0d10                 // the row /U's chart starts at
+#define DH_V         1                    // dpyHeld, the string ended with V
+#define DH_U         2                    // dpyHeld, the string ended with /U
+
+// The pointer's bar flashes on and off with this bit of the clock's running total, so
+// for DPY_FLASH milliseconds each.
+#define DPY_FLASH    01000
+// WAIT, drawn at scale 2 while a library call keeps the CPU, starts at (DPY_WAITX,
+// DPY_WAITY), in the 340's units, its four characters about the screen's center.
+#define DPY_WAITX    0d456
+#define DPY_WAITY    0d500
+
+// The display's geometry (dgTab in dpytab.ac), in the 340's units at scale factor 1.
+#define DPY_W        0d1024               // the screen's width
+#define DPY_H        0d1024               // the screen's height
+#define DPY_PITCH    0d12                 // a row's pitch, the 340's line feed
+#define DPY_CHW      7                    // a character's width
+#define DPY_SUB      4                    // room under the bottom row, for a subscript
+// The left margin, so the pointer's bar, one scale step left of its character, is in a
+// gap at every size.
+#define DPY_LEFT     0d12
+// DG_COLS, DG_ROWS and DG_TOP are a size's columns, rows and top row's baseline, f the
+// size's scale factor, a single number.
+#define DG_COLS(f)   ((DPY_W-DPY_LEFT)/(DPY_CHW*f))
+#define DG_ROWS(f)   ((DPY_H-DPY_SUB*f)/(DPY_PITCH*f))
+#define DG_TOP(f)    (DPY_SUB*f+(DG_ROWS(f)-1)*DPY_PITCH*f)
+
+// mtcall -- a library call that may move the tape, made through mtCall (display.ac),
+// which shows WAIT meanwhile; it is used instead of farjda.
+// AC is the argument, a the routine.
+// IO is clobbered before the call, and AC and IO are the routine's after it.
+#define mtcall(a) dac i [tcArg:1]; lio [a]; jsp i [mtCall:1]
+
+// The paper tape reader's buffer (ptape.ac), in the last 512 words of bank 1, for the
+// line a full buffer gives back.
+// Bank 1's code must end below it (teco.am1 asserts it).
+#define RDB_BASE     017000               // the buffer's first word
+#define RDB_CHARS    0d1024               // its characters, two to a word
+
+// The text buffer holds its characters two to a word, the first in the high 9 bits, a
+// character's place p in word BUF_BASE + p/2.
+#define BUF_CHARS    0140000              // 49,152, banks 2-7's
+#define QR_END       D11_DATA             // q-register text ends below it
+// The push-down list, 1,024 words, ends below PDL_END, which is VT_BASE (teco.am1
+// asserts it).
+#define PDL_END      0126000
+
+// The second set's video terminal (vt11.ac).
+#define VT_COLS      0d80                 // the screen's columns until m,1:W
+#define VT_ROWS      0d24                 // the screen's rows until m,2:W
+#define VT_CUR       0d16                 // the cursor line at the start and for 0W
+#define VT_COLMIN    0d20                 // m,1:W's least columns
+#define VT_COLMAX    0d132                // m,1:W's most columns
+#define VT_ROWMIN    0d12                 // m,2:W's least rows
+#define VT_RMAX      0d66                 // m,2:W's most rows, a checksum word each
+#define VT_SPLMIN    2                    // the least dialogue m,7:W leaves
+#define VT_WINMIN    0d10                 // the least window m,7:W leaves
+#define VT_TYPE      4                    // 0:W of a VT100 in ANSI mode
+#define VT_TYPE2     0d8                  //   and of a VT102
+#define VT_ET        01000                // ET&512, set while a type is
+#define VT_FORGET    0776027              // -1000, -1000W's argument
+#define VT_DPYNO     2                    // dpyNo's bit while split; 0W's is 1
+#define VT_SWNO      4                    // dpyNo's bit for switch 2's session
+#define VT_SWDLG     5                    // switch 2's split, 5,7:W, its dialogue rows
+
+// The packed arrays' words (buffer.ac, cmdread.ac, search.ac, qreg.ac), two characters
+// a word.
+// A place's word is the place shifted right by rar 1s and kept to PK_WORD, which drops
+// the bit rotated into the sign.
+#define PK_HI        0777000              // a word's first character
+#define PK_LO        0777                 // a word's second character
+#define PK_WORD      0377777              // a place's word, after rar 1s
+
+// The q-registers are records of QR_WORDS words in qTab (qreg.ac).
+// A record holds the kind, a number's three 12-bit parts, high first, and in word QR_BLK
+// a text block's address.
+// The 1965 set's register holds one of the two, as the kind says.
+// The second set's holds both.
+// Its number words are always its number, and the kind QK_TEXT says it has a text too.
+// A text block is a header of two words, the record it belongs to (QR_FREE once it is
+// freed) and its length in characters, then the characters two to a word.
+#define NQREG        0d36                 // the q-registers, 0-9 and A-Z
+#define QR_WORDS     5                    // a record's words
+#define QR_BLK       4                    // the word with a text block's address
+#define QK_NONE      0                    // the kind, nothing
+#define QK_NUM       1                    // the kind, a number
+#define QK_TEXT      2                    // the kind, a text
+#define QR_FREE      0777                 // a freed block's owner
+
+// The second set's local q-registers and its push-down list of q-registers
+// (qreg11.ac) are records as qTab's, from LQ_BASE in bank 15.
+// A block's owner is its record's number, 0 to 35 qTab's, then LQ_BASE's from NQREG on.
+// The pool, LQ_RECS*QR_WORDS words, ends at the bank's end (teco.am1 asserts it).
+#define LQ_BASE      0176220              // the pool's first word
+#define LQ_NSET      4                    // the sets of NQREG local registers
+#define LQ_NPDL      0d32                 // the push-down list's records
+// The records in all.
+#define LQ_RECS      (LQ_NSET*NQREG+LQ_NPDL)
+// A macro that starts a new set (Mq, not :Mq or M.q) marks the iteration count it
+// pushes with LQ_MARK.
+#define LQ_MARK      0400000
+
+// A block's first header word also counts the running macros reading it, QR_HOLD1 each,
+// above the owner in QR_OWNER's bits.
+// A held block whose register is given something else has the owner QR_ORPHAN.
+// It is kept until the last macro reading it ends, then freed.
+#define QR_OWNER     0777                 // the owner's bits
+#define QR_HOLDS     0777000              // the count's bits
+#define QR_HOLD1     01000                // one macro reading it
+#define QR_ORPHAN    0776                 // the owner of an orphaned block
+
+// A frame on the push-down list ends with its kind.
+// An open parenthesis keeps the argument state of the expression around it, which is
+// have, op, comma, the value's three words and the first argument's three.
+#define FR_PAREN     1                    // an open parenthesis's frame
+#define PAREN_WORDS  0d10                 // its words
+
+// An iteration keeps the index of the character after its < and the passes left, a
+// value's three words.
+// With no count, the first is ITER_NONE (control.ac).
+// A macro keeps its caller's source, which is the block (0 for the command string), the
+// position and the length, and the caller's open iterations.
+#define FR_ITER      2                    // an iteration's frame
+#define ITER_WORDS   5                    // its words
+#define ITER_NONE    04000                // the passes' first word with no count
+#define FR_MACRO     3                    // a macro's frame
+#define MACRO_WORDS  5                    // its words
+
+// A typing area holds TY_MAX characters, two to a word, the first in the high 9 bits.
+// Text stops 2 short of it, a RETURN's CR LF 3 short, so the two ALT MODEs that end a
+// string always fit.
+#define TY_WORDS     0d1024               // a typing area's words
+#define TY_MAX       0d2048               // a typing area's characters
+#define TY_TEXT      (TY_MAX-0d2)         // the most characters of text
+#define TY_RET       (TY_MAX-0d3)         // the most before a RETURN's CR LF
+
+// The BBN clock (teco.am1's clkTick, ptape.ac).
+#define CLK_HZ       0d1000               // its counts a second, milliseconds
+#define CLK_WRAP     0d60000              // where its count wraps to 0
+#define AT_HZ        0d60                 // /@'s counts a second
+
+// RUBOUTs closer than this, in milliseconds, are "no pause", and the whole string
+// goes.
+#define RUB_MS       0d120
+
+// /G waits this long, in milliseconds, before it drops a DCS2 caller, so what was sent
+// last leaves first.
+#define BYE_MS       0d200
+
+// The paper tape's end is this long, in milliseconds, with no character (FOCAL's rule).
+#define RD_MS        0d2000
+
+// The eighth hole, punched with every ASCII character (FOCAL's format).
+// The check character after a FORM has none (additions.ac).
+#define PT_HOLE8     0200
+// The reader waits up to PK_MS, in milliseconds, for the frame after a FORM, to check it.
+#define PK_MS        0d100
+
+// TAB moves to the next column a multiple of TAB_STOP, on the printer, the display and
+// EL's listing.
+// It is a power of two, as each tests the column's low bits.
+#define TAB_STOP     0d8
+
+// The line printer (lpt.ac) is the Type 62 unless built with -DLPT_TYPE64=1, which must
+// agree with lptType64 in pidp1.config.
+#ifndef LPT_TYPE64
+#define LPT_TYPE64   0                    // 1 for the Type 64
+#endif
+#define LPT_COLS     0d120                // the printer's line, in columns
+
+// The console.
+#define PORTNO       0d2030               // the TCP port of DCS2 channel 0
+#define TA_SIZE      0d128                // the type-ahead ring's characters
+
+// tmDev's values.
+#define DEV_NONE     0                    // no device yet
+#define DEV_DCS      1                    // DCS2
+#define DEV_TTY      2                    // the typewriter (sense switch 6)
+
+// The sense switches (termio.ac, display.ac), by number.
+// szs takes a switch as its number times 010.
+#define SW_TTY       6                    // on puts the console on the typewriter
+#define SW_DPY       5                    // on turns the Type 340 off
+#define SW_P11       4                    // on at the greeting, the second set
+#define SW_BREAK     3                    // turned on is a break
+// SW_VT on is VT100 mode.
+// The console is then DCS2 alone, whatever SW_TTY says, and each caller is greeted in the
+// second set, whatever SW_P11 says, with the screen split and the Type 340 off for the
+// session, whatever SW_DPY says.
+// SW_BREAK still breaks.
+#define SW_VT        2
+
+// What tmErr is entered with in AC.
+#define ERR_LOST     0                    // a lost DCS2 caller, which types nothing
+#define ERR_BREAK    1                    // a break, which is an error
+// A command's error (err, interp.ac), which is one too, told apart from a break only by
+// the second set.
+#define ERR_CMD      2
+
+// The second set's errors, as numbers in eCode (interp.ac).
+// Each EC_ define is the code of TECO-11's error of its name, which
+// interp11.ac's err11 types with its message.
+// 0 is none, and err11 then names the error from the command that ran.
+#define EC_ILL       1
+#define EC_UTC       2
+#define EC_POP       3
+#define EC_DTB       4
+#define EC_SRH       5
+#define EC_NAC       6
+#define EC_NAE       7
+#define EC_NAU       0d8
+#define EC_IQN       0d9
+#define EC_IIA       0d10
+#define EC_ILN       0d11
+#define EC_IRA       0d12
+#define EC_IEC       0d13
+#define EC_IFC       0d14
+#define EC_IUC       0d15
+#define EC_NAB       0d16
+#define EC_MEM       0d17
+#define EC_PDO       0d18
+#define EC_XAB       0d19
+#define EC_BNI       0d20
+#define EC_SNI       0d21
+#define EC_NAS       0d22
+#define EC_NAQ       0d23
+#define EC_IQC       0d24
+#define EC_TAG       0d25
+#define EC_MAP       0d26
+#define EC_UTM       0d27
+#define EC_NAP       0d28
+#define EC_PES       0d29
+#define EC_ISA       0d30
+#define EC_ICE       0d31
+#define EC_ISS       0d32
+#define EC_STL       0d33
+// The files' errors (files11.ac).
+// NFI to NPA are TECO-11's.
+// FNF to UNA name a failure of the file system library, its message as the argument.
+// UNA is DEV for the library's UNIT UNABLE, beside DEV for a device name TECO does not
+// know.
+#define EC_NFI       0d34
+#define EC_NFO       0d35
+#define EC_OFO       0d36
+#define EC_YCA       0d37
+#define EC_NYA       0d38
+#define EC_IFN       0d39
+#define EC_DEV       0d40
+#define EC_NPA       0d41
+#define EC_FNF       0d42
+#define EC_FUL       0d43
+#define EC_WLO       0d44
+#define EC_FER       0d45
+#define EC_UNA       0d46
+#define EC_LAST      0d46                 // the highest code
+
+// ERR0 -- the second set's error c from bank 0, which sets eCode, then jumps to err.
+// ERR11 -- the same from bank 14.
+// Each is three instructions, so never write one after a skip.
+#define ERR0(c)      law c; dac eCode; jmp err
+#define ERR11(c)     law c; dac i [eCode:0]; jmp i [err:0]
+
+// The second set's flags at each greeting that reads switch 4 on.
+// EU starts at -1 and the flags not named here at 0.
+// FL_ET0 is ET's, 4 (lower case kept) and 1024 (the 340 present, which no command
+// clears).
+#define FL_ET0       02004
+#define FL_EO0       050                  // EO's, 40
+#define FL_EJ1       7                    // -1EJ's value
+
+// The flags' words (interp11.ac), ED EH ES ET EU EV EO ^X, three each.
+#define FL_WORDS     0d24
+
+// The second set's devices (files11.ac).
+// The input and the output are each one of them, or 0 for none, as TECO-11 starts.
+#define FK_FILE      1                    // a file on a volume, DTn: or DR:
+#define FK_PC        2                    // paper tape, PC:
+#define FK_LP        3                    // the line printer, LP:
+
+// The second set's search string (search11.ac), a character a word.
+// A character built from the text carries SB_LIT, a match construct does not.
+#define SB_MAX       0d100                // its characters at most
+#define SB_LIT       0400
+
+// The typewriter (ttytab.ac).
+// An entry of ttyOut is the concise code with the case it needs, TTLOWER or TTUPPER,
+// neither for no case.
+// ttShift is 0 for lower case, 1 for upper, TTUNKNOWN until one is known.
+#define TTLOWER      0100                 // needs lower case
+#define TTUPPER      0200                 // needs upper case
+#define TTNONE       0400                 // no key
+#define TTPFX        01000                // the center dot typed first
+#define TTUNKNOWN    2                    // ttShift, no case known
+#define TTLC         072                  // the lower case shift code
+#define TTUC         074                  // the upper case shift code
+#define TTCR         077                  // the carriage return, which feeds the line
+
+// ASCII, each CH_ define the code of the character its name says.
+#define CH_NUL       000
+#define CH_CTLA      001                  // ^A, the second set's message delimiter
+#define CH_CTLE      005                  // ^E, ^N, ^S, ^X, the second set's match
+#define CH_CTLN      016                  //   constructs (search11.ac)
+#define CH_CTLS      023
+#define CH_CTLX      030
+#define CH_CTLQ      021                  // ^Q, ^R, ^V, ^W, its string building
+#define CH_CTLR      022
+#define CH_CTLV      026
+#define CH_CTLU      025                  // ^U, the second set's line erase
+#define CH_CTLW      027                  // ^W, the second set's display repaint
+#define CH_STAR      052
+#define CH_PLUS      053
+#define CH_MINUS     055
+#define CH_EQ        075
+#define CH_BSL       0134
+#define CH_BREAK     003                  // Ctrl-C
+#define CH_BELL      007
+#define CH_BS        010                  // RUBOUT beside DEL
+#define CH_TAB       011
+#define CH_LF        012
+#define CH_VT        013
+#define CH_FF        014
+#define CH_CR        015
+#define CH_ESC       033                  // ALT MODE
+#define CH_DOLLAR    044                  // ALT MODE's echo
+#define CH_AMP       046
+#define CH_LPAR      050
+#define CH_RPAR      051
+#define CH_ZERO      060
+#define CH_COLON     072
+#define CH_SEMI      073
+#define CH_QMARK     077
+#define CH_AT        0100                 // the typewriter's prefix
+#define CH_UPARROW   0136                 // a control character's echo
+#define CH_LARROW    0137                 // left arrow, 1965 ASCII's 0137
+#define CH_GRAVE     0140
+#define CH_LBRACE    0173
+#define CH_VBAR      0174
+#define CH_RBRACE    0175
+#define CH_TILDE     0176
+#define CH_DEL       0177                 // RUBOUT
+#define CH_PCT       045
+#define CH_HASH      043
+#define CH_EXCL      041
+#define CH_QUOTE     042
+#define CH_APOS      047
+#define CH_DOT       056
+#define CH_LT        074
+#define CH_GT        076

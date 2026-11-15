@@ -1,0 +1,399 @@
+// additions.ac -- the PDP-1 additions in bank 15.
+// They are the drum as unit 9 of the E commands, /X and n/X for the test
+// word and the sense switches, and n/P with the paper tape's check character.
+//
+// The drum is a volume of the file system library (Am1Includes/DRUM/) on tracks DR_TRK0
+// to DR_TRK0+DR_NTRK-1.
+// Every E command is the same on it as on a tape.
+// tapefile.ac mounts and formats a unit through drvMount and drvFormat, which choose the
+// drum's calls or the Microtape's by the unit, and the rest is the file system's calls
+// through the handle.
+//
+// The check character follows Murphy's A and E.
+// With 1/P, after each FORM the punch gets the XOR of the page's characters, 7 bits each,
+// NUL and DEL not counted, as a frame without the eighth hole.
+// Every text frame has that hole (FOCAL's format), so its absence marks the check
+// character, as Murphy's delete bit did.
+// An XOR of 0 is not punched, since a blank frame is no mark.
+// Reading always checks.
+// When the reader meets a FORM it looks at the next frame at once, for up to PK_MS.
+// A frame without the eighth hole is compared with the XOR of the page read, a
+// difference types PARITY ERROR, and either way it is not text.
+// A text frame looked at is held for the next read (pckHeld).
+// One that comes late is checked when it is read.
+//
+// The data words follow the code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, <MICROTAPE/microtape.ah>, <DRUM/drum.ah>, the
+// library's mtmount.ac, mtformat.ac, drmount.ac and drformat.ac, and tapemsg.ac's elStr.
+// Needs the argument state, argOr, fromInt, opnd, ra and err in bank 0, and newline,
+// mtCall, rdReq and rdT0 in bank 1.
+
+local dmX, dmDr, dfX, dfDr, dvSet, dsX, dsDr, dvU, \
+    sxN, sxP, sxW, sxI, sxOn, sxV, sxTw, spOff, \
+    ppRet, ppC, ppFF, ppClr, pfRet, pfF, pfTxt, pfNo, hdX, \
+    ptxt, ptX, ptF, ptGo, ptNo, ptFF, ptWait, ptCk, ptLate, ptHold, ptT0, \
+    ckFrm, ckX, ckF, ckYes, ckNo
+
+// drvMount -- mount unit IO's volume on the handle whose 16-bit address is drvHnd, the
+// drum's tracks for unit DR_UNIT, else the Microtape's drive.
+// IO is the unit; drvHnd is read.
+// AC is the library's status, IO is not preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+drvMount, dac dmX
+    jsp dvSet
+    lac dvU
+    SKIP_NEXT_IF_DIFFERENT [DR_UNIT]
+    jmp dmDr
+    lac [drvPb:.]
+    mtcall(mtMount:*)
+    jmp i dmX
+dmDr, lac [drvPb:.]
+    mtcall(drMount:*)
+    jmp i dmX
+
+// drvFormat -- write an empty directory on unit IO's volume and mount it on the handle
+// at drvHnd, choosing the device as drvMount does.
+// A volume holding another program's data is refused (FS_EFOREIGN).
+// IO is the unit; drvHnd is read.
+// AC is the library's status, IO is not preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+drvFormat, dac dfX
+    jsp dvSet
+    lac dvU
+    SKIP_NEXT_IF_DIFFERENT [DR_UNIT]
+    jmp dfDr
+    lac [drvPb:.]
+    mtcall(mtFormat:*)
+    jmp i dfX
+dfDr, lac [drvPb:.]
+    mtcall(drFormat:*)
+    jmp i dfX
+
+// dvSet -- set drvPb for unit IO on the handle at drvHnd, never forcing a format.
+// It sets the drive, or the drum's first track and its tracks.
+// IO is the unit; drvHnd is read.
+// No return value; sets drvPb and dvU.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+dvSet, dac dsX
+    dio dvU
+    lac drvHnd
+    dac drvPb+FS_PHANDLE
+    lac dvU
+    SKIP_NEXT_IF_DIFFERENT [DR_UNIT]
+    jmp dsDr
+    dac drvPb+MT_PDRIVE
+    dzm drvPb+MT_PFORCE
+    jmp i dsX
+dsDr, law DR_TRK0
+    dac drvPb+DR_PFIRST
+    law DR_NTRK
+    dac drvPb+DR_PTRACKS
+    dzm drvPb+DR_PFORCE
+    jmp i dsX
+
+// cSlX -- /X, the test word's 18 bits as a value, 0 to 262,143, and n/X, -1 if
+// sense switch n is on, 0 if it is off.
+// An n not 1 to 6 is an error.
+// Reads the argument state (have, argOr).
+// The value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSlX, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sxTw
+    cli
+    jsp i [argOr:0]
+    dac sxN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp sxP
+    jmp i [err:0]
+sxP, sub [7]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i [err:0]
+    // switch n's szs, from slxTab, runs in sxI
+    lac sxN
+    add [slxTab:.]
+    sub [1]
+    dac sxW
+    lac i sxW
+    dac sxI
+sxI, 0                      // szs n*010, skips while switch n is off
+    jmp sxOn
+    cli
+    jmp sxV
+sxOn, law 1
+    cma
+    lia
+sxV, jsp i [fromInt:0]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+    // the test word, unsigned, as ra's three 12-bit parts, high first
+sxTw, lat
+    dac sxW
+    and [07777]
+    dac i [ra:0+2]
+    lac sxW
+    rar 9s
+    rar 3s
+    and [077]
+    dac i [ra:0+1]
+    dzm i [ra:0]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+
+// cSlP -- 1/P punches the check character after each FORM from then on, and 0/P stops
+// it.
+// Any other n, or none, is an error.
+// Reads the argument state (have, argOr).
+// No return value; sets pkOn.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSlP, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [err:0]
+    cli
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp spOff
+    SKIP_NEXT_IF_SAME [1]
+    jmp i [err:0]
+    law 1
+    dac pkOn
+    jmp i [rsLoop:0]
+spOff, dzm pkOn
+    jmp i [rsLoop:0]
+
+// pckInit -- turn the check character off, keep no page's XOR and hold nothing, as at
+// the start.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+pckInit, dac hdX
+    dzm pkOn
+    dzm pkPx
+    dzm pkRx
+    dzm pkRc
+    dzm pkAft
+    dzm pkHold
+    jmp i hdX
+
+// pckPut -- do ptPut's work (ptape.ac), punching the ASCII character in IO with its
+// eighth hole, then adding it to the page's XOR.
+// At a FORM, with 1/P, the XOR is punched without the hole, unless it is 0, and the XOR
+// is begun again.
+// Waits for the punch.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from ptPut, with ptPut's caller's return address in AC, and returns
+// there.
+pckPut, dac ppRet
+    dio ppC
+    lai
+    ior [PT_HOLE8]
+    lia
+    ppa
+    lac ppC
+    and [0177]
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp ppFF
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp i ppRet
+    xor pkPx
+    dac pkPx
+    jmp i ppRet
+ppFF, lac pkOn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppClr
+    lio pkPx
+    lac pkPx
+    SKIP_NEXT_IF_AC_ZERO
+    ppa
+ppClr, dzm pkPx
+    jmp i ppRet
+
+// pckFrm -- take the reader's frame as text, or as no text.
+// IO is the frame, as rrb read it (rdGet, ptape.ac).
+// AC 0 is text, with IO its character, the eighth bit dropped.
+// AC 1 is a frame that is no text, which is blank tape (NUL), a rubbed-out frame (DEL),
+// or the check character after a FORM, which is checked here.
+// AC is the result, IO is not preserved when AC is 1.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+pckFrm, dac pfRet
+    dio pfF
+    lac pkAft
+    dzm pkAft
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pfTxt
+    // the frame after a FORM, come late, is the check character if it has no eighth hole
+    lio pfF
+    jsp ckFrm
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pfNo
+pfTxt, lio pfF
+    jsp ptxt
+    jmp i pfRet
+pfNo, law 1
+    jmp i pfRet
+
+// pckHeld -- give the frame looked at after a FORM and held, if any, and hold nothing.
+// For rdGet before it reads the tape.
+// Has no arguments.
+// AC 0 is a held text frame, with IO its character, as pckFrm gives it.
+// AC 1 is no held frame, or a held frame that is no text.
+// AC is the result, IO is not preserved when AC is 1.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+pckHeld, dac pfRet
+    lac pkHold
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pfNo
+    and [0377]
+    dzm pkHold
+    lia
+    jsp ptxt
+    jmp i pfRet
+
+// ptxt -- take the frame in IO as text.
+// IO is the frame.
+// AC 1 is NUL or DEL.
+// AC 0 is text, with IO the character, the eighth bit dropped, added to the page's XOR.
+// A FORM ends the page, its XOR kept for the check and the frame after it looked at at
+// once (ptWait).
+// AC is the result, IO is not preserved when AC is 1.
+// Called via jsp.
+ptxt, dac ptX
+    lai
+    and [0177]
+    dac ptF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ptNo
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp ptNo
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp ptFF
+    xor pkRx
+    dac pkRx
+ptGo, lio ptF
+    cla
+    jmp i ptX
+ptNo, law 1
+    jmp i ptX
+ptFF, lac pkRx
+    dac pkRc
+    dzm pkRx
+    jsp ptWait
+    jmp ptGo
+
+// ptWait -- read the frame after a FORM at once, waiting up to PK_MS.
+// The check character is checked (ckFrm).
+// A text frame is held for the next read (pckHeld).
+// With none in that time, the request is left to rdGet (rdReq, rdT0), and the frame,
+// when it comes, is checked as it is read (pkAft).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+ptWait, dac ptCk
+    rpa-i
+    rck
+    dio ptT0
+ptLate, cks
+    ril 1s
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp ptHold
+    rrb
+    dio ptT0
+    jsp ckFrm
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i ptCk              // the check character, taken
+    lac ptT0
+    ior [0400000]           // held, whatever the frame
+    dac pkHold
+    jmp i ptCk
+    // nothing in yet, and past the limit the request is rdGet's
+ptHold, rck
+    lai
+    sub ptT0
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    add [CLK_WRAP]
+    sub [PK_MS]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ptLate
+    law 1
+    dac i [rdReq:1]
+    dac pkAft
+    lio ptT0
+    dio i [rdT0:1]
+    jmp i ptCk
+
+// ckFrm -- check the frame in IO if it is the check character, nonzero and without the
+// eighth hole.
+// When it is not the page's XOR (pkRc), PARITY ERROR and a new line are typed.
+// IO is the frame.
+// AC is 1 for the check character, else 0.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+ckFrm, dac ckX
+    dio ckF
+    lai
+    and [PT_HOLE8]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ckNo
+    lac ckF
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ckNo
+    SKIP_NEXT_IF_DIFFERENT pkRc
+    jmp ckYes
+    lio [pckMsg:.]
+    jsp elStr
+    jsp i [newline:1]
+ckYes, law 1
+    jmp i ckX
+ckNo, cla
+    jmp i ckX
+
+pckMsg, ascii "PARITY ERROR"
+    0
+
+// The szs instructions of switches 1 to 6, for n/X.
+slxTab, szs 010
+    szs 020
+    szs 030
+    szs 040
+    szs 050
+    szs 060
+
+dmX, 0                      // the return addresses
+dfX, 0
+dsX, 0
+hdX, 0
+ppRet, 0
+pfRet, 0
+ptX, 0
+ptCk, 0
+ckX, 0
+dvU, 0                      // dvSet's unit
+drvPb,                       // the mount's and format's parameter block
+    table 4, 0
+sxN, 0                      // n/X's n
+sxW, 0                      // the test word; a pointer into slxTab
+ppC, 0                      // pckPut's character
+pfF, 0                      // pckFrm's frame
+ptF, 0                      // ptxt's character
+ptT0, 0                     // ptWait's clock at the request, then the frame
+ckF, 0                      // ckFrm's frame
+endloc
+
+drvHnd, 0                   // drvMount's and drvFormat's handle, its 16-bit address
+pkOn, 0                     // not 0 while 1/P punches the check character
+pkPx, 0                     // the XOR of the page punched so far
+pkRx, 0                     // the XOR of the page read so far
+pkRc, 0                     // the XOR of the last page read, for its check character
+pkAft, 0                    // not 0 while the frame after a FORM is still to come
+pkHold, 0                   // the frame after a FORM, held, with the sign; 0 for none

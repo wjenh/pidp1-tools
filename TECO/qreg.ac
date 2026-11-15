@@ -1,0 +1,524 @@
+// qreg.ac -- the 36 q-registers.
+// Each is undefined, a number, or a text block in banks 8-9.
+// Storing anything frees a register's old block, unless a running macro
+// reads it, in which case it is kept until the last such macro ends.
+// Blocks are taken from the top of the used part; when the top is reached,
+// the blocks in use are compacted downward and the store tried again, and
+// still full is an error.
+//
+// A register's record in qTab is QR_WORDS words (teco.ah), holding the kind,
+// a number's three parts, and in word QR_BLK its block's address.
+// A block's first word is its owner and its holds (teco.ah).
+// The records point at blocks, and so do the sources of the macros running
+// (control.ac), so compaction updates both.
+// The second set's local registers and push-down list are records in bank
+// 15 (qreg11.ac), which own blocks here too; qRec may be one of them, a full
+// address.
+//
+// Every routine is entered by jsp from bank 0 with the extend window open
+// and returns by jmp i.
+// The file goes in bank 0; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, expr.ac's COPY3, nextCh and
+// err (interp.ac), srcMoved (control.ac), and in bank 15 lqInit and qRecOf.
+
+local qiX, qiP, qiK, qnX, qnC, qnD, gnX, gnZ, snX, qfX, qfB, qaX, qaN, \
+    qaS, qaTry, qaOk, qaC, qcX, qcS, qcD, qcN, qcO, qcL, qcK, qcR, qcCp, \
+    qcNext, qcDone, qnL, qnBad, qnRec, qtX, qcP, qaOld, qaL, qfHeld, qaB, \
+    qcH, qcMv, qcW, qhX, quX, qhB, quFree, qrX, qrP, qrL, qrNext, qaMem
+
+// qInit -- make every register undefined, its number 0 (the second set's
+// start), with no text stored, and empty the second set's local registers
+// and push-down list.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qInit, dac qiX
+    lac [qTab]
+    dac qiP
+    law i NQREG*QR_WORDS    // QK_NONE is 0
+    dac qiK
+    dzm i qiP
+    idx qiP
+    isp qiK
+    jmp .-3
+    lac [QR_BASE]
+    dac qTop
+    jsp i [lqInit:EX_BANK]
+    jmp i qiX
+
+// qName -- read a register's name, the next character of the command, 0-9,
+// A-Z or a-z.
+// Any other character is an error (err).
+// Has no arguments.
+// qIdx is the register's number, 0 to 35, qRec and AC its record's address.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+qName, dac qnX
+    jsp nextCh
+    dio qnC
+    lac qnC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qnL
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp qnL
+    lac qnC
+    sub [040]               // lower case as upper
+    dac qnC
+qnL, lac qnC
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qnBad
+    dac qnD
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qnRec               // a digit, 0-9
+    lac qnC
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qnBad
+    dac qnD
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp qnBad
+    lac qnD
+    add [0d10]              // a letter, 10-35
+    dac qnD
+qnRec, lac qnD
+    dac qIdx
+    ral 2s                  // QR_WORDS, 5, a record
+    add qIdx
+    add [qTab]
+    dac qRec
+    jmp i qnX
+// the second set's IQN names the character; its MEM is qAlloc's
+qnBad, lac qnC
+    dac eArg
+    ERR0(EC_IQN)
+qaMem, ERR0(EC_MEM)
+
+// qGetNum -- get a register's number, 0 if it is undefined, an error (err)
+// if it holds text.
+// qRec is the register's record.
+// ra is the number.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qGetNum, dac gnX
+    lac i qRec
+    SKIP_NEXT_IF_DIFFERENT [QK_TEXT]
+    jmp err
+    SKIP_NEXT_IF_DIFFERENT [QK_NONE]
+    jmp gnZ
+    lac qRec
+    add [1]
+    dac qiP
+    lac i qiP
+    dac ra
+    idx qiP
+    lac i qiP
+    dac ra+1
+    idx qiP
+    lac i qiP
+    dac ra+2
+    jmp i gnX
+gnZ, dzm ra
+    dzm ra+1
+    dzm ra+2
+    jmp i gnX
+
+// qSetNum -- store a number in a register, its text, if any, freed.
+// ra is the number, qRec the register's record.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qSetNum, dac snX
+    jsp qFree
+    lac [QK_NUM]
+    dac i qRec
+    lac qRec
+    add [1]
+    dac qiP
+    lac ra
+    dac i qiP
+    idx qiP
+    lac ra+1
+    dac i qiP
+    idx qiP
+    lac ra+2
+    dac i qiP
+    jmp i snX
+
+// qFree -- free a register's text block, if it has one; the top block gives
+// its words back at once.
+// A block a running macro reads is not freed but let go, marked QR_ORPHAN,
+// and freed when the last such macro ends (qUnhold).
+// qRec is the register's record.
+// No return value.
+// The record is left for the caller to set.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qFree, dac qfX
+    lac i qRec
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp i qfX
+    lac qRec
+    add [QR_BLK]
+    dac qiP
+    lac i qiP
+    dac qfB
+    lac i qfB
+    and [QR_HOLDS]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qfHeld
+    law QR_FREE
+    dac i qfB
+    // the block's end, past two header words and the characters, two a word
+    lac qfB
+    add [1]
+    dac qiP
+    lac i qiP
+    add [1]
+    rar 1s
+    and [PK_WORD]
+    add [2]
+    add qfB
+    sub qTop
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i qfX
+    lac qfB
+    dac qTop
+    jmp i qfX
+qfHeld, ior [QR_ORPHAN]
+    dac i qfB
+    jmp i qfX
+
+// qHold -- count one more running macro reading a block.
+// IO is the block's address.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qHold, dac qhX
+    dio qhB
+    lac i qhB
+    add [QR_HOLD1]
+    dac i qhB
+    jmp i qhX
+
+// qUnhold -- count one fewer running macro reading a block; when the last
+// one ends and its register has let the block go, it is freed.
+// Its words come back at the next compaction.
+// IO is the block's address.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qUnhold, dac quX
+    dio qhB
+    lac i qhB
+    sub [QR_HOLD1]
+    dac i qhB
+    SKIP_NEXT_IF_DIFFERENT [QR_ORPHAN]
+    jmp quFree
+    jmp i quX
+quFree, law QR_FREE
+    dac i qhB
+    jmp i quX
+
+// qRelAll -- leave no block held, before each command string.
+// What a string an error ended left held is let go, and what was let go is
+// freed.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qRelAll, dac qrX
+    lac [QR_BASE]
+    dac qrP
+qrNext, lac qrP
+    sub qTop
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i qrX
+    lac i qrP
+    and [QR_OWNER]
+    SKIP_NEXT_IF_DIFFERENT [QR_ORPHAN]
+    law QR_FREE
+    dac i qrP
+    // the next block, past two header words and the characters, two a word
+    lac qrP
+    add [1]
+    dac qrL
+    lac i qrL
+    add [1]
+    rar 1s
+    and [PK_WORD]
+    add [2]
+    add qrP
+    dac qrP
+    jmp qrNext
+
+// qSetText -- give a register the text block qAlloc made for it, its old
+// text freed.
+// qRec is the register's record, qBlk the block.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+qSetText, dac qtX
+    jsp qFree
+    lac [QK_TEXT]
+    dac i qRec
+    lac qRec
+    add [QR_BLK]
+    dac qiP
+    lac qBlk
+    dac i qiP
+    jmp i qtX
+
+// qAlloc -- make a block for a register's characters, its header set.
+// It compacts when the top is reached.
+// Still full, the register's old text, which storing frees anyway, is given
+// up and storage compacted again, but only if that makes room, so a store
+// that cannot fit changes nothing and is an error (err).
+// The new text must not come from that old block.
+// IO is the count of characters, qIdx the register's number, qRec its record.
+// AC and qBlk are the block's address.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+qAlloc, dac qaX
+    dio qaC
+    lac qaC
+    add [1]
+    rar 1s
+    and [PK_WORD]
+    add [2]
+    dac qaS                 // the block's words
+    dzm qaTry
+qaN, lac [QR_END]
+    sub qTop
+    sub qaS
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp qaOk
+    lac qaTry
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qaOld               // full, compacted
+    idx qaTry
+    jsp qCompact
+    jmp qaN
+qaOld, sub [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qaMem               // full with the old text given up too
+    lac i qRec
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp qaMem
+    // the old block's words, two header words and the characters.
+    // A block a running macro reads stays where it is, so giving it up makes
+    // no room.
+    lac qRec
+    add [QR_BLK]
+    dac qiP
+    lac i qiP
+    dac qaB
+    lac i qaB
+    and [QR_HOLDS]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp err
+    lac qaB
+    add [1]
+    dac qiP
+    lac i qiP
+    add [1]
+    rar 1s
+    and [PK_WORD]
+    add [2]
+    dac qaL
+    lac [QR_END]
+    sub qTop
+    sub qaS
+    add qaL
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp err
+    jsp qFree
+    lac [QK_NONE]
+    dac i qRec
+    idx qaTry
+    jsp qCompact
+    jmp qaN
+qaOk, lac qTop
+    dac qBlk
+    lac qIdx
+    dac i qBlk
+    lac qBlk
+    add [1]
+    dac qiP
+    lac qaC
+    dac i qiP
+    lac qTop
+    add qaS
+    dac qTop
+    lac qBlk
+    jmp i qaX
+
+// qCompact -- move the blocks in use down over the free ones, each
+// register's record following its block, and each running macro's source
+// following a held one (srcMoved).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+qCompact, dac qcX
+    lac [QR_BASE]
+    dac qcS
+    dac qcD
+qcNext, lac qcS
+    sub qTop
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp qcDone
+    lac i qcS
+    dac qcH
+    and [QR_OWNER]
+    dac qcO                 // the owner, QR_ORPHAN or QR_FREE
+    lac qcS
+    add [1]
+    dac qiP
+    lac i qiP
+    add [1]
+    rar 1s
+    and [PK_WORD]
+    add [2]
+    dac qcL                 // the block's words
+    lac qcO
+    SKIP_NEXT_IF_DIFFERENT [QR_FREE]
+    jmp qcK
+    // a block in use has its record, in qTab or the second set's records in
+    // bank 15, and the sources reading it pointed at its new place, then its
+    // words move
+    SKIP_NEXT_IF_DIFFERENT [QR_ORPHAN]
+    jmp qcMv
+    lio qcO
+    jsp i [qRecOf:EX_BANK]
+    add [QR_BLK]
+    dac qcR
+    lac qcD
+    dac i qcR
+qcMv, lac qcH
+    and [QR_HOLDS]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp qcW
+    lac qcS
+    dac mvFrom
+    lac qcD
+    dac mvTo
+    jsp srcMoved
+qcW, lac qcL
+    cma
+    dac qcN
+    lac qcS
+    dac qiP
+    lac qcD
+    dac qcP
+qcCp, lac i qiP
+    dac i qcP
+    idx qiP
+    idx qcP
+    isp qcN
+    jmp qcCp
+    lac qcD
+    add qcL
+    dac qcD
+qcK, lac qcS
+    add qcL
+    dac qcS
+    jmp qcNext
+qcDone, lac qcD
+    dac qTop
+    jmp i qcX
+
+qiX, 0                      // the return addresses
+qnX, 0
+gnX, 0
+snX, 0
+qfX, 0
+qtX, 0
+qaX, 0
+qcX, 0
+qiP, 0
+qiK, 0
+qnC, 0
+qnD, 0
+qfB, 0
+qaC, 0
+qaS, 0
+qaTry, 0
+qaL, 0
+qcS, 0
+qcD, 0
+qcN, 0
+qcO, 0
+qcL, 0
+qcR, 0
+qcP, 0
+qcH, 0
+qaB, 0
+qhX, 0
+quX, 0
+qhB, 0
+qrX, 0
+qrP, 0
+qrL, 0
+endloc
+
+// The commands that store and read numbers.
+
+local cpR, cuNau
+
+// cU -- nUi, store n in register i.
+// With no argument it is an error, the second set's NAU.
+// Reads n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cU, lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cuNau
+    COPY3(val, cpR)
+    jsp clrArgs
+    jsp qName
+    COPY3(cpR, ra)
+    jsp qSetNum
+    jmp rsLoop
+cuNau, ERR0(EC_NAU)
+
+// cQ -- Qi, register i's number, 0 when undefined; text is an error.
+// Has no arguments.
+// The number is passed on as an operand (opnd).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cQ, jsp qName
+    jsp qGetNum
+    jsp opnd
+    jmp rsLoop
+
+// cPct -- %i, add one to register i's number and store it.
+// Has no arguments.
+// The sum is passed on as an operand (opnd).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cPct, jsp qName
+    jsp qGetNum
+    dzm rb
+    dzm rb+1
+    law 1
+    dac rb+2
+    jsp add36
+    jsp qSetNum
+    jsp opnd
+    jmp rsLoop
+
+cpR, 0
+    0
+    0
+endloc
+
+qIdx, 0                     // qName's register, 0 to 35
+qRec, 0                     //   and its record
+qBlk, 0                     // qAlloc's block
+qTop, 0                     // the first word above the blocks
+qTab,
+    table NQREG*QR_WORDS

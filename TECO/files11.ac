@@ -1,0 +1,1749 @@
+// files11.ac -- the second command set's files and devices.
+// It holds RT-11's file specification over the PDP-1's devices, and TECO-11's commands
+// on it, which are ER EW EB EC EF EK EX EI EN, :EGDIR and :EGDEL, and G*.
+// It holds the pages, Y :Y EY :EY, A :A n:A, P :P nP n:P PW nPW m,nP, with yank
+// protection and ^E's rule for the FORM, the flags ^N and ^E, and the paging N, _ and E_
+// ask for (search11.ac).
+//
+// A specification is DTn: (Microtape unit n, 1 to 8), DR: (the drum's volume, unit
+// DR_UNIT), PC: (paper tape) or LP: (the printer), then name.ext.
+// name.ext is the memo's two subnames, so a file is the same in both sets.
+// FOO.BAR is the library's "FOO BAR", and FOO alone a one-name file.
+// Then /P may follow, the check character on PC:.
+// With no device, it is the device last named, and with none yet, DEV.
+// Letters are taken as upper case.
+//
+// There is one input and one output, each a device or none, none at the start,
+// fiIn and fiOut.
+// The 1965 set's code does the work.
+// ER and EB open a file through erOpn (tapefile.ac) and read as its Y does, through
+// ptape.ac's rdStart and rdGet.
+// EW and EB turn the tape's output on as its EI does (tapeout.ac), the punch or the
+// printer as /R and /E do.
+// Closing files the output through efNm, as its EF does.
+// EB keeps the old file as name.BAK, renamed at the close in place of an older one.
+// The first subname is cut to 5 characters there, the library's names holding 9 in all.
+//
+// The second set's pages are read here (fiRd), not by pageio.ac's pgRead, so a read can
+// count lines (n:A) and tell ^E whether it ended at a FORM and ^N whether it reached the
+// input's end.
+// A full buffer gives back as pgRead does.
+//
+// EI's file feeds the command reader (cmdread11.ac's rdKey) through fiEiG, a block at a
+// time into SCRBUF, on its own descriptor, FD_EI (teco.ah).
+// Its end and any error close it.
+//
+// An error is ERR11, and a library failure jmp i [mtFail:MT_BANK] with its status in AC.
+// The file goes in bank 15 (EX_BANK), and its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah> and <FILESYSTEM/fs.ah>.
+// Needs, in bank 0, the argument state, argOr, arg2, fromInt, opnd, srcPos, srcGet,
+// peekCh, lsLen, the buffer's dot, zz, gs and ge, bufInit, bIns1, bDelL, bRoom, cBell,
+// rsLoop, err, eCode and eArg.
+// Needs, in bank 1, rdStart, rdGet, rdBack, rbFrom, rdClear, outRange, orM, orN, outCh,
+// outBuf, lpEnd, outPt, outMt, outLp, outUnit, outHnd, toDrop, efNm, putc, newline and
+// mtCall.
+// Needs, in bank 12, erOpn, edGo, elGo, mtPendW, hGet, hSel, hAdr, inClose, inOpen,
+// inHnd, inMt, mtFindN, fnSoft, mtNmRaw, mtNmStr, nrN, mtPackN, opnName, entGet, elS,
+// nmUnp, mtNmCh, nmLen, nmSp, mtBack and mtFail.
+// Needs txSv, txArg and flED in bank 14, and elStr (tapemsg.ac) and pkOn (additions.ac)
+// in bank 15.
+
+local f0X, f1X, fsl1, fiM1C, fiZrC, fiZr, fiVal, fiCol, faX, fiArg, fiSpec, fsX, fsC, \
+    fsNoD, fsDev, fsDR, fsDP, fsDL, fsDK, fsBadD, fsNm, fsStar, fsBadC, fsAdd, fsDot, \
+    fsSwt, fsNE, fsOne, fsPk, fsPut, fpX, fpP, fiUp, fuX, fuC, fuO, fiPack, fpkX, fpkN, \
+    fiStr, ftX, ftDR, ftPC, ftLP, ftCo, ftL, ftI, ftP, ftPut, fpuX, fpuP, fiCopy, cyX, \
+    cyS, cyD, cyN, cyL, fiLook, flX, flS, fiName, fmX, fiNfi, fniX, fiNfo, fnoX, fiOfo, \
+    fofX, fiYca, fyX, fiRd, frX, frL, frFF, frFull, frCut2, frMt, frMtL, frDel, frEof, \
+    frDone, frRet, frDot, frCut, frN, frC, frE, fiWr, fwX, fiNx, nxX, nxNo, fiPg, fgX, \
+    ppOne, ppN, ppL, ppEnd, ppW, ppW1, ppWL, ppK, ppV, fyGo, fyA, fyRd, fyEnd, fyPr, \
+    faHv, faLn, faEnd, faBad, erPC, fiOpR, foX, foGo, fiOpW, owX, owNm, owPC, owLP, \
+    owSet, owSup, fiEnd, fcX, fcL, fcIn, fcI2, fiCls, fkX, fkO, fiOff, ffX, fiBkR, fbX, \
+    fbN, fbN1, fbCp, fbT, exGo, egX, egA, egLo, egCh, egOk, egSk, \
+    egF, egE, egP, egW, egC, egS, esX, enL, enNo, enSet, enMat, emX, emCmp, emL, \
+    emYes, emNo, emA, emB, emPa, emPb, emN, emP, emC, eg2, eg3, egGo, egDl, gsCol, gsI, \
+    gsP, gsL, gsT, gsN, gsE, pnX, puX, fsK, fsU, fsSw, fsN, fsP, fsI, fsE, fsCh, fsTwo, \
+    fsDn, fsD1, fsD2, fsL, fsWild, fiRN, fiRSp, fiORN, fiOSp, fiOU, fiSpN, fiBak, \
+    fiUnit, fiLim, fxCol, egFn, egK, enU, enS, enN, enSp, eiLen, eiIdx, eiHalf, eiLF, eiSkp
+
+// fiInit -- set no input, no output, no indirect file and nothing named, as TECO starts
+// and restarts (teco.am1's restart).
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+fiInit, dac f0X
+    dzm fiIn
+    dzm fiOut
+    dzm fiEof
+    dzm fiFF
+    dzm fiBak
+    dzm fiUnit
+    dzm fiEiOn
+    dzm enU
+    dzm fiSpN
+    jmp i f0X
+
+// fiSel -- at a greeting that chose the second set (p11Init), select no device but what
+// this set's open files hold, so the 1965 set's punch and paper tape are not its output
+// and input.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+fiSel, dac f1X
+    lac fiOut
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fsl1
+    dzm i [outPt:1]
+    dzm i [outMt:1]
+    dzm i [outLp:1]
+fsl1, lac fiIn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dzm i [inMt:MT_BANK]
+    jmp i f1X
+
+// fiM1C, fiZrC -- end a command that answers with a colon, -1 or 0, as its value with
+// the colon (fxCol), nothing without (fiCol).
+// fiZr, fiVal -- end one with the value 0, or the count in IO.
+// fiVal's IO is the count; the others have no arguments.
+// The value goes to opnd.
+// Does not preserve AC or IO.
+// Reached by jmp from this file's handlers, and ends by jmp rsLoop.
+fiM1C, lio [-1]
+    jmp fiCol
+fiZrC, cli
+fiCol, lac fxCol
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiVal
+    jmp i [rsLoop:0]
+fiZr, cli
+fiVal, jsp i [fromInt:0]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+
+// fiArg -- start a file command, keeping the colon (fxCol), dropping the arguments
+// before the command, and reading the text argument (txArg, after @ too) and parsing it
+// (fiSpec).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+fiArg, dac faX
+    lac i [colon11:0]
+    dac fxCol
+    jsp i [txSv:P11_BANK]
+    cli
+    jsp i [argOr:0]
+    lio [CH_ESC]
+    jsp i [txArg:P11_BANK]
+    dac fsN
+    lac i [srcPos:0]
+    sub fsN
+    sub [1]
+    dac fsP
+    jsp fiSpec
+    jmp i faX
+
+// fiSpec -- parse the specification of fsN characters from the source's index fsP.
+// Reads fsN, fsP and fsWild.
+// It sets fsK, the device's kind (FK_FILE, FK_PC, FK_LP, or 0 for an empty one), fsU, a
+// file's unit, fiRaw, the name's fiRN characters, fiRSp, the blank between its subnames
+// (fiRN with one), and fsSw, 1 for /P.
+// A file's name is packed into mtNmStr (bank 12), and the specification for G* goes in
+// fiSpB.
+// A name with no device is a file on the unit last named (fiUnit).
+// With fsWild, * may be a name's character (EN).
+// It is DEV for a device TECO does not know, or no device named yet, and IFN for a
+// character no name holds, or a tenth.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+fiSpec, dac fsX
+    dzm fsK
+    dzm fsSw
+    dzm fiRN
+    dzm fsTwo
+    lac fsN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fsPk
+    lac fsP
+    dac fsI
+    add fsN
+    dac fsE
+    // a device is the text before a colon, if there is one
+fsC, lac fsI
+    sub fsE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp fsNoD
+    lio fsI
+    jsp fiUp
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    jmp fsDev
+    idx fsI
+    jmp fsC
+fsNoD, lac fiUnit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fsBadD
+    dac fsU
+    law FK_FILE
+    dac fsK
+    lac fsP
+    dac fsI
+    jmp fsNm
+fsDev, lac fsI
+    sub fsP
+    dac fsDn
+    lio fsP
+    jsp fiUp
+    dac fsD1
+    lac fsP
+    add [1]
+    lia
+    jsp fiUp
+    dac fsD2
+    law 2
+    dac fsL
+    lac fsD1
+    SKIP_NEXT_IF_DIFFERENT [0120]
+    jmp fsDP
+    SKIP_NEXT_IF_DIFFERENT [0114]
+    jmp fsDL
+    SKIP_NEXT_IF_SAME [0104]
+    jmp fsBadD
+    lac fsD2
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp fsDR
+    SKIP_NEXT_IF_SAME [0124]
+    jmp fsBadD
+    // DTn, n 1 to 8
+    law 3
+    dac fsL
+    lac fsP
+    add [2]
+    lia
+    jsp fiUp
+    sub [061]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp fsBadD
+    dac fsU
+    sub [010]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp fsBadD
+    idx fsU
+    law FK_FILE
+    jmp fsDK
+fsDR, law DR_UNIT
+    dac fsU
+    law FK_FILE
+    jmp fsDK
+fsDP, lac fsD2
+    SKIP_NEXT_IF_SAME [0103]
+    jmp fsBadD
+    law FK_PC
+    jmp fsDK
+fsDL, lac fsD2
+    SKIP_NEXT_IF_SAME [0120]
+    jmp fsBadD
+    law FK_LP
+fsDK, dac fsK
+    lac fsDn
+    SKIP_NEXT_IF_SAME fsL
+    jmp fsBadD
+    lac fsK
+    SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp .+3
+    lac fsU
+    dac fiUnit
+    idx fsI                 // past the colon
+    // the name, to the end or a /
+fsNm, lac fsI
+    sub fsE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp fsNE
+    lio fsI
+    jsp fiUp
+    dac fsCh
+    idx fsI
+    lac fsCh
+    SKIP_NEXT_IF_DIFFERENT [057]
+    jmp fsSwt
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp fsDot
+    SKIP_NEXT_IF_DIFFERENT [CH_STAR]
+    jmp fsStar
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    jmp fsBadC
+    SKIP_NEXT_IF_DIFFERENT [054]
+    jmp fsBadC
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp fsBadC
+    sub [041]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp fsBadC
+fsAdd, jsp fsPut
+    jmp fsNm
+fsStar, lac fsWild
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fsAdd
+fsBadC, lac fsCh
+    dac i [eArg:0]
+    ERR11(EC_IFN)
+fsBadD, ERR11(EC_DEV)
+    // at the dot, the second subname follows a blank, as the library keeps the two
+fsDot, lac fsTwo
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fsBadC
+    lac fiRN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fsBadC
+    dac fiRSp
+    law 1
+    dac fsTwo
+    law 040
+    dac fsCh
+    jmp fsAdd
+    // /P, the one switch, is the last character but one, then P
+fsSwt, lac fsI
+    add [1]
+    SKIP_NEXT_IF_SAME fsE
+    jmp fsBadC
+    lio fsI
+    jsp fiUp
+    dac fsCh
+    SKIP_NEXT_IF_SAME [0120]
+    jmp fsBadC
+    law 1
+    dac fsSw
+    // a dot with nothing after it leaves one subname
+fsNE, lac fsTwo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fsOne
+    lac fiRSp
+    add [1]
+    SKIP_NEXT_IF_SAME fiRN
+    jmp fsPk
+    lac fiRSp
+    dac fiRN
+fsOne, lac fiRN
+    dac fiRSp
+fsPk, lac fsK
+    SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp .+5
+    lac fiRN
+    dac fpkN
+    lio [fiRaw:.]
+    jsp fiPack
+    jsp fiStr
+    jmp i fsX
+
+// fsPut -- add fsCh to the name.
+// A tenth character is IFN.
+// Reads fsCh.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fsPut, dac fpX
+    lac fiRN
+    SKIP_NEXT_IF_DIFFERENT [MT_NAMEC]
+    jmp fsBadC
+    add [fiRaw:.]
+    dac fpP
+    lac fsCh
+    dac i fpP
+    idx fiRN
+    jmp i fpX
+
+// fiUp -- give the source's character at index IO, a lower-case letter as its upper
+// case.
+// IO is the index.
+// AC is the character, IO is not preserved.
+// Called via jsp.
+fiUp, dac fuX
+    jsp i [srcGet:0]
+    lai
+    and [0177]
+    dac fuC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp fuO
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp fuO
+    lac fuC
+    sub [040]
+    jmp i fuX
+fuO, lac fuC
+    jmp i fuX
+
+// fiPack -- pack fpkN characters from the 16-bit address in IO, one a word, into
+// mtNmStr as the library takes a name (tapefile.ac's mtPackN).
+// IO is the address; fpkN is read.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fiPack, dac fpkX
+    dio cyS
+    lac [mtNmRaw:MT_BANK]
+    dac cyD
+    lac fpkN
+    dac cyN
+    dac i [nrN:MT_BANK]
+    jsp fiCopy
+    jsp i [mtPackN:MT_BANK]
+    jmp i fpkX
+
+// fiCopy -- copy cyN words from the 16-bit address cyS to cyD, both advanced, none for
+// 0.
+// Reads cyN, cyS and cyD.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fiCopy, dac cyX
+    lac cyN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i cyX
+    cma
+    dac cyN
+cyL, lac i cyS
+    dac i cyD
+    idx cyS
+    idx cyD
+    isp cyN
+    jmp cyL
+    jmp i cyX
+
+// fiStr -- put in fiSpB its fiSpN characters, the specification as G* gives it, fsK's
+// device and unit, a colon, then the name, its blank as the dot.
+// Nothing goes in for no device.
+// Reads fsK, fsU, fiRaw, fiRN and fiRSp.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+fiStr, dac ftX
+    dzm fiSpN
+    lac fsK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ftX
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp ftPC
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp ftLP
+    lac fsU
+    SKIP_NEXT_IF_DIFFERENT [DR_UNIT]
+    jmp ftDR
+    lio [0104]
+    jsp ftPut
+    lio [0124]
+    jsp ftPut
+    lac fsU
+    add [060]
+    lia
+    jsp ftPut
+    jmp ftCo
+ftDR, lio [0104]
+    jsp ftPut
+    lio [0122]
+    jsp ftPut
+    jmp ftCo
+ftPC, lio [0120]
+    jsp ftPut
+    lio [0103]
+    jsp ftPut
+    jmp ftCo
+ftLP, lio [0114]
+    jsp ftPut
+    lio [0120]
+    jsp ftPut
+ftCo, lio [CH_COLON]
+    jsp ftPut
+    dzm ftI
+ftL, lac ftI
+    SKIP_NEXT_IF_DIFFERENT fiRN
+    jmp i ftX
+    add [fiRaw:.]
+    dac ftP
+    lio i ftP
+    lac ftI
+    SKIP_NEXT_IF_DIFFERENT fiRSp
+    lio [CH_DOT]
+    jsp ftPut
+    idx ftI
+    jmp ftL
+
+// ftPut -- put the character in IO to fiSpB.
+// IO is the character.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+ftPut, dac fpuX
+    lac fiSpN
+    add [fiSpB:.]
+    dac fpuP
+    dio i fpuP
+    idx fiSpN
+    jmp i fpuX
+
+// fiLook -- find the slot of mtNmStr on unit fsU, as TECO shows the directory (mtFindN).
+// Reads mtNmStr and fsU.
+// AC is the slot, negative when it is not there.
+// AC is the result, IO is not preserved.
+// The unit's handle is left selected.
+// Called via jsp.
+fiLook, dac flX
+    lio fsU
+    jsp i [hGet:MT_BANK]
+    law 1
+    dac i [fnSoft:MT_BANK]
+    jsp i [mtFindN:MT_BANK]
+    dac flS
+    dzm i [fnSoft:MT_BANK]
+    lac flS
+    jmp i flX
+
+// fiName -- an error, IFN, unless the specification named a file.
+// Reads fiRN.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fiName, dac fmX
+    lac fiRN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i fmX
+    law CH_ESC
+    dac i [eArg:0]
+    ERR11(EC_IFN)
+
+// fiNfi, fiNfo, fiOfo -- errors, NFI with no input, NFO with no output, OFO with one.
+// They have no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fiNfi, dac fniX
+    lac fiIn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i fniX
+    ERR11(EC_NFI)
+fiNfo, dac fnoX
+    lac fiOut
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i fnoX
+    ERR11(EC_NFO)
+fiOfo, dac fofX
+    lac fiOut
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i fofX
+    ERR11(EC_OFO)
+
+// fiYca -- yank protection, YCA when an output is open and the buffer holds
+// text, unless ED&2.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fiYca, dac fyX
+    lac i [flED:P11_BANK+2]
+    and [2]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i fyX
+    lac fiOut
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i fyX
+    lac i [zz:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i fyX
+    ERR11(EC_YCA)
+
+// fiRd -- append the input's next page at the end of the buffer, through the next FORM,
+// which is not kept, or, with fiLim not 0, fiLim lines.
+// The pointer is left where it was.
+// A full buffer gives back the line cut short and the character, as pageio.ac's pgRead
+// does.
+// Reads fiLim, which is left the lines still wanted.
+// ^E (fiFF) is set -1 when the reading ended at a FORM, else 0, and ^N (fiEof) -1 once
+// it reached the input's end.
+// AC is 1 when the end came with nothing read, else 0.
+// AC is the result, IO is not preserved.
+// A break leaves through tmErr.
+// Called via jsp.
+fiRd, dac frX
+    dzm fiFF
+    lac i [dot:0]
+    dac frDot
+    lac i [zz:0]
+    dac i [dot:0]
+    dac frCut
+    dzm frN
+    jsp i [rdStart:1]
+frL, jsp i [rdGet:1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp frEof
+    dio frC
+    idx frN
+    lac frC
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp frFF
+    lac i [ge:0]
+    sub i [gs:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp frFull
+    lio frC
+    jsp i [bIns1:0]
+    lac frC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp frL
+    lac i [zz:0]
+    dac frCut
+    // for n:A, a line is counted
+    lac fiLim
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp frL
+    sub [1]
+    dac fiLim
+    SKIP_NEXT_IF_AC_ZERO
+    jmp frL
+    jmp frDone
+frFF, law i 1
+    dac fiFF
+    jmp frDone
+    // the buffer is full, handled as pgRead does
+frFull, lac i [inMt:MT_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp frMt
+    lac frCut
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp frCut2
+    dac i [rbFrom:1]
+    lio frC
+    jsp i [rdBack:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp frDel
+frCut2, lac i [zz:0]
+    dac frCut
+    dac i [rbFrom:1]
+    lio frC
+    jsp i [rdBack:1]
+    jmp frDel
+frMt, lac frCut
+    SKIP_NEXT_IF_AC_ZERO
+    jmp frMtL
+    lac i [zz:0]
+    dac frCut
+    cli
+    jsp i [mtBack:MT_BANK]
+    jmp frDel
+frMtL, law 1
+    lia
+    jsp i [mtBack:MT_BANK]
+frDel, lac i [zz:0]
+    sub frCut
+    lia
+    jsp i [bDelL:0]
+    jmp frDone
+frEof, law i 1
+    dac fiEof
+    lac frN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp frDone
+    law 1
+    jmp frRet
+frDone, cla
+frRet, dac frE
+    lac frDot
+    dac i [dot:0]
+    lac frE
+    jmp i frX
+
+// fiWr -- write P's output, the buffer, and a FORM after it when ^E is set.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+fiWr, dac fwX
+    dzm i [orM:1]
+    lac i [zz:0]
+    dac i [orN:1]
+    jsp i [outRange:1]
+    lac fiFF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i fwX
+    lio [CH_FF]
+    jsp i [outCh:1]
+    jmp i fwX
+
+// fiNx -- empty the buffer and read the next page.
+// Has no arguments.
+// AC is 1, and ^E 0, when none can be read, with no input or its end reached before.
+// Otherwise AC is as fiRd gives it.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+fiNx, dac nxX
+    jsp i [bufInit:0]
+    lac fiIn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nxNo
+    lac fiEof
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nxNo
+    dzm fiLim
+    jsp fiRd
+    jmp i nxX
+nxNo, dzm fiFF
+    law 1
+    jmp i nxX
+
+// fiPg -- do P once, the buffer out (fiWr), then the next page (fiNx).
+// Has no arguments.
+// AC is as fiNx gives it, IO is not preserved.
+// Called via jsp.
+fiPg, dac fgX
+    jsp fiWr
+    jsp fiNx
+    jmp i fgX
+
+// fiPgN -- do N's paging (search11.ac), P once, or NFO with no output.
+// Has no arguments.
+// AC is as fiNx gives it, IO is not preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+fiPgN, dac pnX
+    jsp fiNfo
+    jsp fiPg
+    jmp i pnX
+
+// fiPgU -- do _'s and E_'s paging (search11.ac), reading the next page and giving up the
+// buffer's text.
+// With IO 0 (_, F_), yank protection comes first (fiYca), and with IO not 0 (E_), none.
+// IO chooses, as above.
+// AC is as fiNx gives it, IO is not preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+fiPgU, dac puX
+    lai
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp fiYca
+    jsp fiNx
+    jmp i puX
+
+// fiP -- P.
+// P, nP, :P and n:P put the buffer out, a FORM after it by ^E, and read the next page,
+// n times, stopping once the input's end is reached.
+// :P is 0 when its end was reached before.
+// PW and nPW put out the buffer and a FORM, n times.
+// m,nP and m,nPW put out the text from m up to n, with no FORM.
+// It is NFO with no output, and NPA for n below 1.
+// Reads the argument state.
+// The colon's value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch (dTab11), ends by jmp rsLoop.
+fiP, lac i [colon11:0]
+    dac fxCol
+    law i 1
+    dac ppV
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppOne
+    jsp fiNfo
+    jsp i [arg2:0]
+    lac i [a2M:0]
+    dac i [orM:1]
+    lac i [a2N:0]
+    dac i [orN:1]
+    jsp i [outRange:1]
+    jsp i [peekCh:0]
+    and [0137]              // w as W
+    SKIP_NEXT_IF_DIFFERENT [0127]
+    idx i [srcPos:0]
+    jmp ppEnd
+ppOne, jsp i [peekCh:0]
+    and [0137]
+    SKIP_NEXT_IF_DIFFERENT [0127]
+    jmp ppW
+    law 1
+    lia
+    jsp i [argOr:0]
+    dac ppK
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ppN
+    ERR11(EC_NPA)
+ppN, jsp fiNfo
+ppL, lac fiEof
+    SKIP_NEXT_IF_AC_ZERO
+    dzm ppV
+    jsp fiPg
+    lac fiEof
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ppEnd
+    lac ppK
+    sub [1]
+    dac ppK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ppL
+ppEnd, jsp i [lpEnd:1]
+    lio ppV
+    jmp fiCol
+ppW, idx i [srcPos:0]
+    law 1
+    lia
+    jsp i [argOr:0]
+    dac ppK
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ppW1
+    ERR11(EC_NPA)
+ppW1, jsp fiNfo
+ppWL, jsp i [outBuf:1]
+    lac ppK
+    sub [1]
+    dac ppK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ppWL
+    jmp ppEnd
+
+// fiY, fiEY -- Y and :Y, EY and :EY, empty the buffer and read the next page.
+// :Y is -1, or 0 when the input's end was reached before, the buffer then kept.
+// Y is refused by yank protection (fiYca), and EY always yanks.
+// It is NYA with an argument, and NFI with no input.
+// Reads the argument state.
+// The colon's value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch (dTab11 for Y, c11E for EY), ends by jmp rsLoop.
+fiEY, dzm fyPr
+    jmp fyGo
+fiY, law 1
+    dac fyPr
+fyGo, lac i [colon11:0]
+    dac fxCol
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fyA
+    ERR11(EC_NYA)
+fyA, cli
+    jsp i [argOr:0]
+    jsp fiNfi
+    lac fyPr
+    SKIP_NEXT_IF_AC_ZERO
+    jsp fiYca
+fyRd, lac fiEof
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fyEnd
+    jsp fiNx
+    jmp fiM1C
+fyEnd, lac fxCol
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiZr
+    jsp fiNx
+    jmp i [rsLoop:0]
+
+// fiA -- A and :A, n:A, for c11A (edit11.ac) when A has no argument or a colon.
+// A appends the next page, nothing once the input's end is reached.
+// :A is -1, or 0 when its end was reached before.
+// n:A appends n lines and is -1, or 0 when the end came first.
+// It is NFI with no input.
+// Reads the argument state.
+// The colon's value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from c11A, ends by jmp rsLoop.
+fiA, lac i [colon11:0]
+    dac fxCol
+    lac i [have:0]
+    dac faHv
+    cli
+    jsp i [argOr:0]
+    dac fiLim
+    jsp fiNfi
+    lac fiEof
+    SKIP_NEXT_IF_AC_ZERO
+    jmp faEnd
+    lac faHv
+    SKIP_NEXT_IF_AC_ZERO
+    jmp faLn
+    dzm fiLim
+    jsp fiRd
+    jmp fiM1C
+faLn, lac fiLim
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp faBad
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fiM1C
+    jsp fiRd
+    lac fiLim
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fiM1C
+    lac fiEof
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fiM1C
+faEnd, cli
+    jmp fiCol
+faBad, ERR11(EC_ILN)
+
+// fiER -- ERspec$ makes the file, or paper tape (PC:), the input, from its start.
+// ER$ changes nothing.
+// :ER is -1, or 0 when the file is not found.
+// LP: is DEV.
+// Reads the argument state and the specification (fiArg).
+// The colon's value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiER, jsp fiArg
+    lac fsK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fiM1C
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp fsBadD
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp erPC
+    jsp fiName
+    jsp fiOpR
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiZrC
+    jmp fiM1C
+erPC, jsp i [inClose:MT_BANK]
+    dzm i [inMt:MT_BANK]
+    jsp i [rdClear:1]
+    law FK_PC
+    dac fiIn
+    dzm fiEof
+    dzm fiFF
+    jmp fiM1C
+
+// fiOpR -- make file mtNmStr on unit fsU the input, from its start (erOpn).
+// Reads mtNmStr, fsU and fxCol.
+// With the colon (fxCol), AC is 1 and nothing is changed when the file is not there.
+// Otherwise AC is 0.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+fiOpR, dac foX
+    lac fxCol
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp foGo
+    jsp fiLook
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp foGo
+    law 1
+    jmp i foX
+foGo, lio fsU
+    jsp i [erOpn:MT_BANK]
+    law FK_FILE
+    dac fiIn
+    dzm fiEof
+    dzm fiFF
+    cla
+    jmp i foX
+
+// fiEW -- EWspec$ makes the file the output, filed when it is closed, a file of
+// that name then replaced ("%Superseding existing file" typed at the EW, as TECO-11
+// warns), or the punch (PC:, /P its check character), or the printer (LP:).
+// EW$ changes nothing.
+// It is OFO while an output is open.
+// Reads the argument state and the specification (fiArg).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEW, jsp fiArg
+    lac fsK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    jsp fiOfo
+    law 1
+    dac owSup
+    jsp fiOpW
+    jmp i [rsLoop:0]
+
+// fiEB -- EBspec$ makes the file the input, and the output, filed under its name
+// when closed, the old file kept as name.BAK (fiBkR).
+// :EB is -1, or 0 when it is not found.
+// It is DEV for a device not a file's, and OFO while an output is open.
+// Reads the argument state and the specification (fiArg).
+// The colon's value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEB, jsp fiArg
+    lac fsK
+    SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp fsBadD
+    jsp fiName
+    jsp fiOfo
+    jsp fiOpR
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiZrC
+    dzm owSup
+    jsp fiOpW
+    law 1
+    dac fiBak
+    jmp fiM1C
+
+// fiOpW -- open the output on fsK's device (EW, EB).
+// For a file, its name is kept for the close (fiORaw), and the tape's output turned on
+// as the 1965 set's EI turns it on (tapeout.ac), with owSup set the warning typed when
+// the name is there.
+// The punch, with /P's choice, or the printer is turned on alone.
+// Reads fsK, fsU, fsSw, fiRaw, fiRN, fiRSp and owSup.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+fiOpW, dac owX
+    lac fsK
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp owPC
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp owLP
+    jsp fiName
+    lac owSup
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp owNm
+    jsp fiLook
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp owNm
+    lio [mSup:.]
+    jsp elStr
+    jsp i [newline:1]
+owNm, lac fiRN
+    dac fiORN
+    dac cyN
+    lac fiRSp
+    dac fiOSp
+    lac fsU
+    dac fiOU
+    lac [fiRaw:.]
+    dac cyS
+    lac [fiORaw:.]
+    dac cyD
+    jsp fiCopy
+    jsp i [toDrop:1]
+    lio fsU
+    jsp i [hGet:MT_BANK]
+    lac fsU
+    dac i [outUnit:1]
+    law 1
+    dac i [outMt:1]
+    dzm i [outPt:1]
+    dzm i [outLp:1]
+    law FK_FILE
+    jmp owSet
+owPC, law 1
+    dac i [outPt:1]
+    dzm i [outMt:1]
+    dzm i [outLp:1]
+    lac fsSw
+    dac pkOn
+    law FK_PC
+    jmp owSet
+owLP, law 1
+    dac i [outLp:1]
+    dzm i [outPt:1]
+    dzm i [outMt:1]
+    law FK_LP
+owSet, dac fiOut
+    jmp i owX
+
+// fiEnd -- do EC's work.
+// With an output, the buffer and the rest of the input are written to it page by page
+// by P's rule, the buffer left empty.
+// The input is closed, then the output (fiCls).
+// With no output the buffer is kept, as TECO C keeps it.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+fiEnd, dac fcX
+    lac fiOut
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fcIn
+fcL, jsp fiPg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fcL
+fcIn, lac fiIn
+    SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp fcI2
+    jsp i [inClose:MT_BANK]
+    dzm i [inMt:MT_BANK]
+fcI2, dzm fiIn
+    jsp fiCls
+    jmp i fcX
+
+// fiCls -- close the output (EC, EF, EX).
+// A file is filed under its name (efNm, tapeout.ac), EB's old file first renamed
+// name.BAK (fiBkR).
+// The printer's line is ended.
+// Then there is no output.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+fiCls, dac fkX
+    lac fiOut
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jsp i [lpEnd:1]
+    lac fiOut
+    SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp fkO
+    lac fiBak
+    SKIP_NEXT_IF_AC_ZERO
+    jsp fiBkR
+    lac fiORN
+    dac fpkN
+    lio [fiORaw:.]
+    jsp fiPack
+    jsp i [efNm:1]
+fkO, jsp fiOff
+    jmp i fkX
+
+// fiOff -- set no output, the punch, the tape's output and the printer off, as EK leaves
+// them.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fiOff, dac ffX
+    dzm i [outPt:1]
+    dzm i [outMt:1]
+    dzm i [outLp:1]
+    dzm fiOut
+    dzm fiBak
+    jmp i ffX
+
+// fiBkR -- rename EB's old file name.BAK, replacing an older one.
+// The name is the first subname, cut to 5 characters, a blank and BAK.
+// The input is closed first when it is on the output's unit, since it is that file.
+// Reads fiORaw, fiORN and fiOSp.
+// No return value.
+// Does not preserve AC or IO.
+// A library failure leaves by mtFail, but a file not found is no error.
+// Called via jsp.
+fiBkR, dac fbX
+    lac i [inOpen:MT_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fbN
+    lac i [outHnd:1]
+    dac fbT
+    lac i [inHnd:MT_BANK]
+    SKIP_NEXT_IF_SAME fbT
+    jmp fbN
+    jsp i [inClose:MT_BANK]
+    dzm i [inMt:MT_BANK]
+    dzm fiIn
+    // the old name, as the library takes it, kept in fbOld
+fbN, lac fiORN
+    dac fpkN
+    lio [fiORaw:.]
+    jsp fiPack
+    lac [mtNmStr:MT_BANK]
+    dac cyS
+    lac [fbOld:.]
+    dac cyD
+    law MT_NSTRW
+    dac cyN
+    jsp fiCopy
+    // the .BAK name
+    lac fiOSp
+    dac fbN1
+    sub [6]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp .+2
+    jmp fbCp
+    law 5
+    dac fbN1
+fbCp, lac [fiORaw:.]
+    dac cyS
+    lac [fbRaw:.]
+    dac cyD
+    lac fbN1
+    dac cyN
+    jsp fiCopy
+    lac [fbBak:.]
+    dac cyS
+    law 4
+    dac cyN
+    jsp fiCopy
+    lac fbN1
+    add [4]
+    dac fpkN
+    lio [fbRaw:.]
+    jsp fiPack
+    lio i [outHnd:1]
+    jsp i [hSel:MT_BANK]
+    lac i [hAdr:MT_BANK]
+    dac fbPb+FS_PHANDLE
+    lac [fbOld:.]
+    dac fbPb+FS_PNAME
+    lac [mtNmStr:MT_BANK]
+    dac fbPb+FS_PNEWNAME
+    law 1
+    dac fbPb+FS_PREPLACE
+    lac [fbPb:.]
+    mtcall(fsRename:*)
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i fbX
+    SKIP_NEXT_IF_SAME [FS_ENOTFOUND]
+    jmp i [mtFail:MT_BANK]
+    jmp i fbX
+
+// fiEC -- EC does fiEnd.
+// Reads the argument state.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEC, cli
+    jsp i [argOr:0]
+    jsp fiEnd
+    jmp i [rsLoop:0]
+
+// fiEF -- EF closes the output, the buffer not written.
+// Reads the argument state.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEF, cli
+    jsp i [argOr:0]
+    jsp fiCls
+    jmp i [rsLoop:0]
+
+// fiEK -- EK forgets the output since EW or EB, deleting a file's scratch file
+// (toDrop, tapeout.ac), so a file EW would have replaced, or EB's, is as it was.
+// Reads the argument state.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEK, cli
+    jsp i [argOr:0]
+    lac fiOut
+    SKIP_NEXT_IF_DIFFERENT [FK_FILE]
+    jsp i [toDrop:1]
+    jsp fiOff
+    jmp i [rsLoop:0]
+
+// fiEX -- EX does EC, then leaves TECO as /G leaves it.
+// With text in the buffer and no output, it is NFO and nothing is done.
+// Reads the argument state.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp cBell, /G's handler.
+fiEX, cli
+    jsp i [argOr:0]
+    lac fiOut
+    SKIP_NEXT_IF_AC_ZERO
+    jmp exGo
+    lac i [zz:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jsp fiNfo
+exGo, jsp fiEnd
+    jmp i [cBell:0]
+
+// fiEI -- EIspec$ makes the file feed the command reader (fiEiG) from the
+// next key read on, until its end or an error.
+// EI$ only stops one.
+// It is DEV for a device not a file's.
+// Reads the argument state and the specification (fiArg).
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEI, jsp fiArg
+    jsp fiEiS
+    lac fsK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp fsBadD
+    jsp fiName
+    lio fsU
+    jsp i [hGet:MT_BANK]
+    lio [FD_EI]
+    jsp i [opnName:MT_BANK]
+    law 1
+    dac fiEiOn
+    dzm eiLen
+    dzm eiIdx
+    dzm eiHalf
+    dzm eiLF
+    dzm eiSkp
+    jmp i [rsLoop:0]
+
+// fiEiG -- give the indirect file's next character, for rdKey (cmdread11.ac).
+// It reads as the tape's text reads.
+// A CR comes as CR LF, an LF just after a CR is dropped, and NUL and DEL are passed
+// over.
+// Has no arguments.
+// AC is 0 with IO the character, or 1 at the file's end, the file then closed.
+// AC is the result, IO is not preserved at the file's end.
+// A library failure closes the file and leaves by mtFail.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+fiEiG, dac egX
+    lac eiLF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp egA
+    dzm eiLF
+    law 1
+    dac eiSkp
+    lio [CH_LF]
+    cla
+    jmp i egX
+egA, lac eiIdx
+    sub eiLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp egF
+    lac eiIdx
+    add [SCRBUF]
+    dac egP
+    lac i egP
+    dac egW
+    lac eiHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp egLo
+    law 1
+    dac eiHalf
+    lac egW
+    rar 9s
+    jmp egCh
+egLo, dzm eiHalf
+    idx eiIdx
+    lac egW
+egCh, and [0177]
+    dac egC
+    lac eiSkp
+    dzm eiSkp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp egSk
+egOk, lac egC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp egA
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp egA
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    dac eiLF
+    lio egC
+    cla
+    jmp i egX
+egSk, lac egC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp egOk
+    jmp egA
+    // read the block, the file's next words, none at its end
+egF, dzm eiIdx
+    dzm eiHalf
+    lac [FD_EI]
+    dac egPb+FS_PFDESC
+    lac [SCRBUF]
+    dac egPb+FS_PBUF
+    law MTWDS
+    dac egPb+FS_PCOUNT
+    lac [egPb:.]
+    mtcall(fsRead:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp egE
+    dio eiLen
+    lac eiLen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp egA
+    jsp fiEiS
+    law 1
+    jmp i egX
+egE, dac egS
+    jsp fiEiS
+    lac egS
+    jmp i [mtFail:MT_BANK]
+
+// fiEiS -- close the indirect file, if one is open.
+// For EI, its end, and every error (err11).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+fiEiS, dac esX
+    lac fiEiOn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i esX
+    dzm fiEiOn
+    lac [FD_EI]
+    mtcall(fsClose:*)
+    jmp i esX
+
+// fiEN -- ENspec$ presets the wild card lookup, * standing for a whole subname.
+// EN$ finds the next file on its unit that matches, its specification for G*.
+// It is FNF when none is left, :EN then 0, and -1 for a match.
+// It is DEV for a device not a file's.
+// Reads the argument state and the specification (fiArg).
+// The colon's value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEN, law 1
+    dac fsWild
+    jsp fiArg
+    dzm fsWild
+    lac fsK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp enSet
+    lac enU
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp enNo
+    lio enU
+    jsp i [hGet:MT_BANK]
+enL, lac enS
+    SKIP_NEXT_IF_DIFFERENT [FS_NENT]
+    jmp enNo
+    dac i [elS:MT_BANK]
+    idx enS
+    jsp i [entGet:MT_BANK]
+    SKIP_NEXT_IF_SAME [1]
+    jmp enL
+    jsp i [nmUnp:MT_BANK]
+    // the first subname, then the second, each against the pattern's
+    dzm emA
+    lac i [nmSp:MT_BANK]
+    dac emB
+    dzm emPa
+    lac enSp
+    dac emPb
+    jsp enMat
+    SKIP_NEXT_IF_AC_ZERO
+    jmp enL
+    lac i [nmLen:MT_BANK]
+    dac emB
+    lac i [nmSp:MT_BANK]
+    SKIP_NEXT_IF_SAME emB
+    add [1]
+    dac emA
+    lac enN
+    dac emPb
+    lac enSp
+    SKIP_NEXT_IF_SAME emPb
+    add [1]
+    dac emPa
+    jsp enMat
+    SKIP_NEXT_IF_AC_ZERO
+    jmp enL
+    // a match gives its name, and its specification for G*
+    lac i [nmLen:MT_BANK]
+    dac fiRN
+    dac cyN
+    lac i [nmSp:MT_BANK]
+    dac fiRSp
+    lac [mtNmCh:MT_BANK]
+    dac cyS
+    lac [fiRaw:.]
+    dac cyD
+    jsp fiCopy
+    law FK_FILE
+    dac fsK
+    lac enU
+    dac fsU
+    jsp fiStr
+    jmp fiM1C
+enNo, lac fxCol
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiZr
+    law FS_ENOTFOUND
+    jmp i [mtFail:MT_BANK]
+enSet, SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp fsBadD
+    jsp fiName
+    lac fsU
+    dac enU
+    dzm enS
+    lac fiRSp
+    dac enSp
+    lac fiRN
+    dac enN
+    dac cyN
+    lac [fiRaw:.]
+    dac cyS
+    lac [enRaw:.]
+    dac cyD
+    jsp fiCopy
+    jmp fiM1C
+
+// enMat -- match mtNmCh's characters emA up to emB against enRaw's emPa up to emPb.
+// A lone * matches any, else the same characters match.
+// Reads emA, emB, emPa and emPb.
+// AC is 0 for a match, else 1.
+// AC is the result, IO is preserved.
+// Called via jsp.
+enMat, dac emX
+    lac emPb
+    sub emPa
+    dac emN
+    SKIP_NEXT_IF_SAME [1]
+    jmp emCmp
+    lac emPa
+    add [enRaw:.]
+    dac emP
+    lac i emP
+    SKIP_NEXT_IF_DIFFERENT [CH_STAR]
+    jmp emYes
+emCmp, lac emB
+    sub emA
+    SKIP_NEXT_IF_SAME emN
+    jmp emNo
+    lac emN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp emYes
+emL, lac emA
+    add [mtNmCh:MT_BANK]
+    dac emP
+    lac i emP
+    dac emC
+    lac emPa
+    add [enRaw:.]
+    dac emP
+    lac i emP
+    SKIP_NEXT_IF_SAME emC
+    jmp emNo
+    idx emA
+    idx emPa
+    lac emN
+    sub [1]
+    dac emN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp emL
+emYes, cla
+    jmp i emX
+emNo, law 1
+    jmp i emX
+
+// fiEG -- :EGcmd args$, TECO-11's hook for the system.
+// :EGDIR dev:$ types the unit's directory as EL does, and :EGDEL spec$ deletes the file
+// at once (ED, then the writing EC does), each -1.
+// Any other function is 0.
+// EG without the colon, which leaves for the system, is IEC.
+// Reads the argument state and the text argument.
+// The value goes to opnd.
+// Does not preserve AC or IO.
+// Entered by jmp from c11E, ends by jmp rsLoop.
+fiEG, lac i [colon11:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp egGo
+    law 0107
+    dac i [eArg:0]
+    ERR11(EC_IEC)
+egGo, dac fxCol
+    jsp i [txSv:P11_BANK]
+    cli
+    jsp i [argOr:0]
+    lio [CH_ESC]
+    jsp i [txArg:P11_BANK]
+    dac fsN
+    lac i [srcPos:0]
+    sub fsN
+    sub [1]
+    dac fsP
+    // the function, three letters, then a blank before its argument
+    lac fsN
+    sub [3]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp fiZrC
+    dac fsN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp egFn
+    sub [1]
+    dac fsN
+    lac fsP
+    add [3]
+    lia
+    jsp fiUp
+    SKIP_NEXT_IF_SAME [040]
+    jmp fiZrC
+egFn, lio fsP
+    jsp fiUp
+    SKIP_NEXT_IF_SAME [0104]
+    jmp fiZrC
+    lac fsP
+    add [1]
+    lia
+    jsp fiUp
+    dac eg2
+    lac fsP
+    add [2]
+    lia
+    jsp fiUp
+    dac eg3
+    lac fsP
+    add [4]
+    dac fsP
+    jsp fiSpec
+    lac fsK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp egK
+    lac fiUnit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fsBadD
+    dac fsU
+    law FK_FILE
+    dac fsK
+egK, SKIP_NEXT_IF_SAME [FK_FILE]
+    jmp fsBadD
+    lac eg2
+    SKIP_NEXT_IF_SAME [0111]
+    jmp egDl
+    lac eg3
+    SKIP_NEXT_IF_SAME [0122]
+    jmp fiZrC
+    lio fsU
+    jsp i [elGo:MT_BANK]
+    jmp fiM1C
+egDl, SKIP_NEXT_IF_SAME [0105]
+    jmp fiZrC
+    lac eg3
+    SKIP_NEXT_IF_SAME [0114]
+    jmp fiZrC
+    jsp fiName
+    lio fsU
+    jsp i [edGo:MT_BANK]
+    jsp i [mtPendW:MT_BANK]
+    jmp fiM1C
+
+// fiGSt -- G* and :G* insert at the pointer the specification of the last
+// file command (ER, EW, EB, EI, EN), ^S its length, or, with the colon, type it.
+// AC is the colon, the * passed.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from c11G (qreg11.ac), ends by jmp rsLoop.
+fiGSt, dac gsCol
+    dzm gsI
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gsL
+    lio fiSpN
+    jsp i [bRoom:0]
+gsL, lac gsI
+    SKIP_NEXT_IF_DIFFERENT fiSpN
+    jmp gsE
+    add [fiSpB:.]
+    dac gsP
+    lio i gsP
+    lac gsCol
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gsT
+    jsp i [bIns1:0]
+    jmp gsN
+gsT, jsp i [putc:1]
+gsN, idx gsI
+    jmp gsL
+gsE, lac gsCol
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [rsLoop:0]
+    lac fiSpN
+    dac i [lsLen:0]
+    jmp i [rsLoop:0]
+
+f0X, 0                      // the return addresses
+f1X, 0
+faX, 0
+fsX, 0
+fpX, 0
+fuX, 0
+fpkX, 0
+cyX, 0
+ftX, 0
+fpuX, 0
+flX, 0
+fmX, 0
+fniX, 0
+fnoX, 0
+fofX, 0
+fyX, 0
+frX, 0
+fwX, 0
+nxX, 0
+fgX, 0
+pnX, 0
+puX, 0
+foX, 0
+owX, 0
+fcX, 0
+fkX, 0
+ffX, 0
+fbX, 0
+egX, 0
+esX, 0
+emX, 0
+fxCol, 0                    // the command's colon
+fsK, 0                      // for fiSpec, the device's kind, a file's unit, /P
+fsU, 0
+fsSw, 0
+fsN, 0                      //   the text, its length, first index, the next, the end
+fsP, 0
+fsI, 0
+fsE, 0
+fsCh, 0
+fsTwo, 0                    //   not 0 once past the dot
+fsDn, 0                     //   the device, its characters, the first two, how many
+fsD1, 0
+fsD2, 0
+fsL, 0
+fsWild, 0                   //   not 0 while * is a name's character (EN)
+fpP, 0
+fuC, 0
+fpkN, 0
+cyS, 0
+cyD, 0
+cyN, 0
+ftI, 0
+ftP, 0
+fpuP, 0
+flS, 0
+frDot, 0                    // for fiRd, the pointer, the last whole line's end, the
+frCut, 0                    //   characters read, the last, the answer
+frN, 0
+frC, 0
+frE, 0
+ppK, 0                      // for fiP, the count, the value
+ppV, 0
+fyPr, 0                     // for fiY, not 0 for yank protection (Y, not EY)
+faHv, 0
+owSup, 0                    // for fiOpW, not 0 for the superseding warning (EW, not EB)
+fbT, 0
+fbN1, 0
+egP, 0
+egW, 0
+egC, 0
+egS, 0
+emA, 0                      // for enMat, the name's range, the pattern's, the length,
+emB, 0                      //   a pointer, a character
+emPa, 0
+emPb, 0
+emN, 0
+emP, 0
+emC, 0
+eg2, 0                      // for fiEG, the function's second and third letters
+eg3, 0
+gsCol, 0
+gsI, 0
+gsP, 0
+fiRaw,  // fiSpec's name, one character a word, as the library takes it
+    table MT_NAMEC, 0
+fiRN, 0                     //   its characters, and the blank's index
+fiRSp, 0
+fiORaw,  // the output file's name, for its close (fiOpW, fiCls)
+    table MT_NAMEC, 0
+fiORN, 0
+fiOSp, 0
+fiOU, 0
+fiSpB,  // the last file command's specification, for G*
+    table 020, 0
+fiSpN, 0
+fiBak, 0                    // not 0 while the output is EB's, and keeps a .BAK
+fiUnit, 0                   // the file unit last named, 0 for none yet
+fiLim, 0                    // for fiRd, the lines wanted, 0 for a page
+enU, 0                      // EN's preset, the unit, 0 for none; the next slot; the
+enS, 0                      //   pattern's characters and its blank's index
+enN, 0
+enSp, 0
+enRaw,
+    table MT_NAMEC, 0
+eiLen, 0                    // EI's file, the words in SCRBUF, the next one's index,
+eiIdx, 0                    //   1 when its low half is next, an LF owed after a CR,
+eiHalf, 0                   //   an LF on the file to be dropped
+eiLF, 0
+eiSkp, 0
+fbOld,  // fiBkR's names, the old, and the .BAK name's characters
+    table MT_NSTRW, 0
+fbRaw,
+    table MT_NAMEC, 0
+fbBak, 040
+    0102
+    0101
+    0113
+fbPb,  // the library's parameter blocks, fiBkR's and fiEiG's
+    table MT_PBW, 0
+egPb,
+    table MT_PBW, 0
+mSup, ascii "%Superseding existing file"
+    0
+endloc
+
+fiIn, 0                     // the input, 0 none, FK_FILE, FK_PC
+fiOut, 0                    // the output, 0 none, FK_FILE, FK_PC, FK_LP
+fiEof, 0                    // ^N, -1 once a read reached the input's end
+fiFF, 0                     // ^E, -1 when the last page read ended at a FORM
+fiEiOn, 0                   // not 0 while EI's file feeds the reader

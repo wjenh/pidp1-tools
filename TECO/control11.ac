@@ -1,0 +1,818 @@
+// control11.ac -- the second command set's control.
+// It holds the skip that conditionals, iterations and O use in it; the conditionals
+// with every test and the else, F> F< F' F|, n< with n of 0 or less not run, ; alone
+// and :;, O with @ and nO, $$ and n$$ leaving a macro, ^C, and the trace.
+//
+// The trace types each character nextCh reads (trNx), and what a text argument passed
+// over before it, as TECO C does.
+// It does not type what a skip passes, but does type the character the skip stops at.
+//
+// Handlers are entered by jmp from the dispatch (dTab11, data11.ac) and end by jmp i
+// [rsLoop:0].
+// The file goes in bank 14 (P11_BANK).
+// Needs teco.ah, <AIDS/skipmacros.ah>; in bank 0 interp.ac, expr.ac, edit.ac
+// (scanTo), search.ac (srFail), control.ac; in bank 1 cmdread.ac's echoCh;
+// interp11.ac (clr11, up11), edit11.ac (txSv, txArg); in bank 15 qreg11.ac (lqDrop).
+
+// A false test skips to the | or ' of its conditional.
+#define MD_EL        5
+
+// A test's kind in qtTab.
+// QT_CLS's bits are classes of the character n is the code of (1 an upper-case
+// letter, 2 a lower-case one, 4 a digit, 010 . or $); the rest test n.
+#define QT_CLS       017
+#define QT_ZERO      020
+#define QT_NZ        040
+#define QT_POS       0100
+#define QT_NEG       0200
+
+local k1QD, k1At, k1C, k1TL, k1TP, k1K, k1A, k1B, k1C1, k1L, k1Rd, k1Dis, k1Car, k1Ctl, \
+    k1AtF, k1CtA, k1Tab, k1CtU, k1Pass, k1Txt, k1Del, k1Go, k1Tag, k1Tg, k1Cmp, k1E, \
+    k1F, k1F1, k1F2, k1Nm, k1Nm2, k1NX, k1Q, k1Ap, k1ApE, k1Lt, k1Gt, k1GtE, k1Done, \
+    k1To, k1End, k1E2, k1E3, k1Txt2, k1Bar, k1Map, k1Tr
+
+// skip11 -- the second set's skip, passing over commands as the 1965 set's skip does
+// (control.ac), but with TECO-11's arguments.
+// Every I, S, N, _ and O has text, to ALT MODE or after @ between two of its first
+// character; ^A's runs to ^A, TAB's to ALT MODE, ^U's after its register; E and its
+// letter, and F and its letter, take TECO-11's texts; a register's name may be .q.
+// The caret form ^x is the control character x.
+// MD_EL, a false test's, stops at the | or the ' of its conditional.
+// The source's end is TAG for O, MAP for a conditional, else UTC.
+// Takes skMode, skEnd, skWant and skOpen as skip has them, and skip's return address
+// in skX.
+// srcPos ends past what skMode names, and skLD is the iterations open there.
+// Does not preserve AC or IO.
+// Entered by jmp from control.ac's skip, ends by jmp i [skOut:0].
+skip11, dzm i [skLD:0]
+    dzm k1QD
+    dzm k1At
+    // no trace while passing over
+    lac i [trOn:0]
+    dac k1Tr
+    dzm i [trOn:0]
+k1L, lac i [skMode:0]
+    SKIP_NEXT_IF_DIFFERENT [MD_TO]
+    jmp k1To
+k1Rd, lac i [srcPos:0]
+    sub i [srcLen:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp k1End
+    jsp i [skNext:0]
+k1Dis, SKIP_NEXT_IF_DIFFERENT [CH_AT]
+    jmp k1AtF
+    SKIP_NEXT_IF_DIFFERENT [CH_UPARROW]
+    jmp k1Car
+    SKIP_NEXT_IF_DIFFERENT [0111]
+    jmp k1Txt               // I
+    SKIP_NEXT_IF_DIFFERENT [0123]
+    jmp k1Txt               // S
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp k1Txt               // N
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp k1Txt               // _
+    SKIP_NEXT_IF_DIFFERENT [0117]
+    jmp k1Txt               // O
+    SKIP_NEXT_IF_DIFFERENT [CH_EXCL]
+    jmp k1Tag
+    SKIP_NEXT_IF_DIFFERENT [0105]
+    jmp k1E
+    SKIP_NEXT_IF_DIFFERENT [0106]
+    jmp k1F
+    SKIP_NEXT_IF_DIFFERENT [0121]
+    jmp k1Nm                // Q
+    SKIP_NEXT_IF_DIFFERENT [0125]
+    jmp k1Nm                // U
+    SKIP_NEXT_IF_DIFFERENT [0130]
+    jmp k1Nm                // X
+    SKIP_NEXT_IF_DIFFERENT [0107]
+    jmp k1Nm                // G
+    SKIP_NEXT_IF_DIFFERENT [0115]
+    jmp k1Nm                // M
+    SKIP_NEXT_IF_DIFFERENT [CH_PCT]
+    jmp k1Nm
+    SKIP_NEXT_IF_DIFFERENT [0133]
+    jmp k1Nm                // [
+    SKIP_NEXT_IF_DIFFERENT [0135]
+    jmp k1Nm                // ]
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp k1Q
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp k1Ap
+    SKIP_NEXT_IF_DIFFERENT [CH_LT]
+    jmp k1Lt
+    SKIP_NEXT_IF_DIFFERENT [CH_GT]
+    jmp k1Gt
+    SKIP_NEXT_IF_DIFFERENT [CH_VBAR]
+    jmp k1Bar
+    // the control characters with text, typed as themselves or in the caret form
+k1Ctl, SKIP_NEXT_IF_DIFFERENT [CH_CTLA]
+    jmp k1CtA
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp k1Tab
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLU]
+    jmp k1CtU
+    SKIP_NEXT_IF_DIFFERENT [036]
+    jmp k1Pass              // ^^x, its x passed
+    jmp k1L
+
+    // @ puts the next text between two of its first character
+k1AtF, law 1
+    dac k1At
+    jmp k1L
+    // ^ and a character are that control character, passed as one
+k1Car, jsp i [nextCh:0]
+    lai
+    and [037]
+    jmp k1Ctl
+k1CtA, lio [CH_CTLA]
+    jmp k1Go
+k1Tab, dzm k1At
+    jmp k1Txt
+k1CtU, jsp k1Nm2
+    jmp k1Txt
+k1Pass, jsp i [nextCh:0]
+    jmp k1L
+    // a text to ALT MODE, or with @ to the next of its first character
+k1Txt, lio [CH_ESC]
+k1Go, lac k1At
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp k1Del
+    dzm k1At
+    jsp i [nextCh:0]
+k1Del, jsp i [scanTo:0]
+    add i [srcPos:0]
+    add [1]
+    dac i [srcPos:0]
+    jmp k1L
+    // two texts, as FS has, the first by k1Txt2
+k1Txt2, lio [CH_ESC]
+    lac k1At
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp k1F2
+    dzm k1At
+    jsp i [nextCh:0]        // with @, its delimiter stays for the second text
+    dio k1C
+    lio k1C
+    jsp i [scanTo:0]
+    add i [srcPos:0]
+    add [1]
+    dac i [srcPos:0]
+    lio k1C
+    jmp k1Del
+k1F2, jsp i [scanTo:0]
+    add i [srcPos:0]
+    add [1]
+    dac i [srcPos:0]
+    jmp k1Txt
+    // a tag is passed, or for O compared with O's (otP, otL)
+k1Tag, lac i [skMode:0]
+    SKIP_NEXT_IF_DIFFERENT [MD_TAG]
+    jmp k1Tg
+    lio [CH_EXCL]
+    jmp k1Del
+k1Tg, lio [CH_EXCL]
+    jsp i [scanTo:0]
+    dac k1TL
+    lac i [srcPos:0]
+    dac k1TP
+    add k1TL
+    add [1]
+    dac i [srcPos:0]
+    lac k1TL
+    sub i [otL:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp k1L
+    lac k1TL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp k1Done              // both empty
+    cma
+    dac k1K
+    lac k1TP
+    dac k1A
+    lac i [otP:0]
+    dac k1B
+k1Cmp, lio k1A
+    jsp i [srcGet:0]
+    dio k1C1
+    lio k1B
+    jsp i [srcGet:0]
+    lai
+    SKIP_NEXT_IF_SAME k1C1
+    jmp k1L
+    idx k1A
+    idx k1B
+    isp k1K
+    jmp k1Cmp
+    jmp k1Done
+    // E and its letter, where ER EW EB EI EN EG and E_ have a text
+k1E, jsp i [skNext:0]
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [0127]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [0102]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [0111]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [0107]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp k1Txt
+    jmp k1L
+    // F and its letter, where FR and FB have one text, FS FN FC and F_ two, any other
+    // just the letter (F' is no end of a conditional)
+k1F, jsp i [skNext:0]
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [0102]
+    jmp k1Txt
+    SKIP_NEXT_IF_DIFFERENT [0123]
+    jmp k1Txt2
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp k1Txt2
+    SKIP_NEXT_IF_DIFFERENT [0103]
+    jmp k1Txt2
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp k1Txt2
+k1F1, jmp k1L
+    // a register's name, .q two characters
+k1Nm, jsp k1Nm2
+    jmp k1L
+    // " and its letter open a conditional; ' ends one
+k1Q, jsp i [nextCh:0]
+    idx k1QD
+    jmp k1L
+k1Ap, lac k1QD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp k1ApE
+    sub [1]
+    dac k1QD
+    jmp k1L
+k1ApE, lac i [skMode:0]
+    SKIP_NEXT_IF_DIFFERENT [MD_QT]
+    jmp k1Done
+    SKIP_NEXT_IF_DIFFERENT [MD_EL]
+    jmp k1Done
+    jmp k1L
+    // | ends a false test's skip, in its conditional, not a nested one
+k1Bar, lac k1QD
+    SKIP_NEXT_IF_AC_ZERO
+    jmp k1L
+    lac i [skMode:0]
+    SKIP_NEXT_IF_DIFFERENT [MD_EL]
+    jmp k1Done
+    jmp k1L
+    // < and > open and end iterations; for O's check, the < at depth skWant noted
+k1Lt, lac i [skLD:0]
+    add [1]
+    dac i [skLD:0]
+    lac i [skMode:0]
+    SKIP_NEXT_IF_SAME [MD_TO]
+    jmp k1L
+    lac i [skLD:0]
+    SKIP_NEXT_IF_SAME i [skWant:0]
+    jmp k1L
+    lac i [srcPos:0]
+    dac i [skOpen:0]
+    jmp k1L
+k1Gt, lac i [skLD:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp k1GtE
+    sub [1]
+    dac i [skLD:0]
+    jmp k1L
+k1GtE, lac i [skMode:0]
+    SKIP_NEXT_IF_DIFFERENT [MD_GT]
+    jmp k1Done
+    jmp k1L
+    // O's check goes up to the position after its tag
+k1To, lac i [srcPos:0]
+    sub i [skEnd:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp k1Done
+    jmp k1Rd
+    // the trace again, from the character the skip stopped after
+k1Done, lac k1Tr
+    dac i [trOn:0]
+    lac i [srcPos:0]
+    sub [1]
+    dac trPos
+    jmp i [skOut:0]
+    // the source's end
+k1End, lac i [skMode:0]
+    SKIP_NEXT_IF_SAME [MD_TAG]
+    jmp k1E2
+    lac i [otEnd:0]         // O's error is at the O, as the 1965 set's (coErr)
+    dac i [srcPos:0]
+    ERR11(EC_TAG)
+k1E2, SKIP_NEXT_IF_DIFFERENT [MD_QT]
+    jmp k1Map
+    SKIP_NEXT_IF_DIFFERENT [MD_EL]
+    jmp k1Map
+k1E3, ERR11(EC_UTC)
+k1Map, ERR11(EC_MAP)
+
+// k1Nm2 -- pass a register's name, one character, or . and one.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+k1Nm2, dac k1NX
+    jsp i [nextCh:0]
+    lai
+    and [0177]
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jsp i [nextCh:0]
+    jmp i k1NX
+
+k1NX, 0                     // the return address
+k1QD, 0                     // conditionals open
+k1At, 0                     // @ before the next text
+k1C, 0
+k1TL, 0
+k1TP, 0
+k1K, 0
+k1A, 0
+k1B, 0
+k1C1, 0
+k1Tr, 0                     // the trace, while the skip runs
+endloc
+
+
+local qtA, qtB, qtC, qtZ, qtN, qtK, qtL, qtT, qtP, qtSym, qtDg, qtUp, qtSet, qtDis, \
+    qtNx, qtGo, qtSgn, qtSgZ, qtSgN, qtSgL, qtTru, qtFal, qtNaq, qtIqc, smC, smGo, smG, \
+    smAl, smF, smSni, faE, flT, flP, esEx, esOne, esEnd, ccT, ccBye, oN, oP, oS, oI, oE, \
+    oK, oL, oNx, oEnd, oGot, oAll, oNone, trOff, tnX, tnC, tnNew, tnBack, tnL, tnOut
+
+// c11Qt -- n"x, go on past the | or ' that ends this conditional's first
+// part unless n passes test x.
+// E F U = test n is 0; N not 0; G > above 0; L S T < below 0; A a letter, C a
+// letter, digit, . or $ (RT-11's symbol constituents), D a digit, R a letter or
+// digit, V lower case, W upper case.
+// With no n it is NAQ, with another x IQC.
+// Reads n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Qt, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp qtNaq
+    lac i [val:0]
+    dac qtA
+    lac i [val:0+1]
+    dac qtB
+    lac i [val:0+2]
+    dac qtC
+    jsp clr11
+    jsp up11
+    dac qtL
+    // qtZ is 0 when n is 0; qtN not 0 when n is below 0
+    lac qtA
+    ior qtB
+    ior qtC
+    dac qtZ
+    lac qtA
+    and [04000]
+    dac qtN
+    // qtK is the class of the character n is the code of, 0 for none
+    dzm qtK
+    lac qtC
+    and [07600]
+    ior qtA
+    ior qtB
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qtDis
+    lac qtC
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp qtSym
+    SKIP_NEXT_IF_DIFFERENT [CH_DOLLAR]
+    jmp qtSym
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qtDis
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qtDg
+    lac qtC
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qtDis
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qtUp
+    lac qtC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp qtDis
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp qtDis
+    law 2                   // lower case
+    jmp qtSet
+qtUp, law 1
+    jmp qtSet
+qtDg, law 4
+    jmp qtSet
+qtSym, law 010
+qtSet, dac qtK
+    // the test's kind, from qtTab
+qtDis, lac [qtTab:.]
+    dac qtP
+qtNx, lac i qtP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp qtIqc
+    SKIP_NEXT_IF_DIFFERENT qtL
+    jmp qtGo
+    idx qtP
+    idx qtP
+    jmp qtNx
+qtGo, idx qtP
+    lac i qtP
+    dac qtT
+    and [QT_CLS]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp qtSgn
+    and qtK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qtTru
+    jmp qtFal
+qtSgn, lac qtT
+    SKIP_NEXT_IF_DIFFERENT [QT_ZERO]
+    jmp qtSgZ
+    SKIP_NEXT_IF_DIFFERENT [QT_NZ]
+    jmp qtSgN
+    SKIP_NEXT_IF_DIFFERENT [QT_NEG]
+    jmp qtSgL
+    // QT_POS holds when n is not below 0, and not 0
+    lac qtN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qtFal
+qtSgN, lac qtZ
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qtTru
+    jmp qtFal
+qtSgZ, lac qtZ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp qtTru
+    jmp qtFal
+qtSgL, lac qtN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp qtTru
+qtFal, law MD_EL
+    dac i [skMode:0]
+    jsp i [skip:0]
+qtTru, jmp i [rsLoop:0]
+qtNaq, ERR11(EC_NAQ)
+qtIqc, ERR11(EC_IQC)
+
+// c11Bar -- |, the first part of a conditional having run, go on past its '.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Bar, law MD_QT
+    dac i [skMode:0]
+    jsp i [skip:0]
+    jmp i [rsLoop:0]
+
+// c11Lt -- n<, run the iteration n times, not at all when n is 0 or less,
+// as the 1965 set's cLt runs a count of 0.
+// Reads n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends through cLt.
+c11Lt, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [cLt:0]
+    lac i [val:0]
+    and [04000]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [cLt:0]
+    dzm i [val:0]
+    dzm i [val:0+1]
+    dzm i [val:0+2]
+    jmp i [cLt:0]
+
+// c11Sm -- n; ; :; n:;, leave the iteration, past its >, when n is 0 or more,
+// or with no n when the last search failed; : reverses either.
+// Outside an iteration it is SNI.
+// The 1965 set's cSemi leaves it, given 0.
+// Reads n from have and val, and colon11.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop or through cSemi.
+c11Sm, lac i [colon11:0]
+    dac smC
+    dzm i [colon11:0]
+    lac i [itDepth:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smSni
+    // smGo is 1 when n is below 0, or with no n when the last search succeeded
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smAl
+    lac i [val:0]
+    and [04000]
+    jmp smG
+smAl, lac i [srFail:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp smF
+    law 1
+    jmp smG
+smF, cla
+smG, SKIP_NEXT_IF_AC_ZERO
+    law 1
+    dac smGo
+    jsp clr11
+    // out when smGo and the colon agree
+    lac smC
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    xor smGo
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [rsLoop:0]
+    law 1
+    dac i [have:0]
+    dzm i [val:0]
+    dzm i [val:0+1]
+    dzm i [val:0+2]
+    jmp i [cSemi:0]
+smSni, ERR11(EC_SNI)
+
+// c11FAp, c11FBr -- F' and F|, go on past this conditional's ', or past its
+// |, the arguments dropped.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11FAp, jsp clr11
+    law MD_QT
+    jmp faE
+c11FBr, jsp clr11
+    law MD_EL
+faE, dac i [skMode:0]
+    jsp i [skip:0]
+    jmp i [rsLoop:0]
+
+// c11FGt -- F>, go on to this iteration's >, which runs as ever; outside one,
+// act as $$.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11FGt, jsp clr11
+    lac i [itDepth:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp esEx
+    law MD_GT
+    dac i [skMode:0]
+    jsp i [skip:0]
+    lac i [srcPos:0]
+    sub [1]
+    dac i [srcPos:0]
+    jmp i [rsLoop:0]
+
+// c11FLt -- F<, go back to the character after this iteration's <, its count
+// as it is; outside one, to the source's start.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11FLt, jsp clr11
+    lac i [itDepth:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp flT
+    dzm i [srcPos:0]
+    jmp i [rsLoop:0]
+flT, jsp i [pdlKind:0]
+    SKIP_NEXT_IF_SAME [FR_ITER]
+    jmp i [err:0]
+    lac i [pdlP:0]
+    sub [ITER_WORDS]
+    dac flP
+    lac i flP
+    dac i [srcPos:0]
+    jmp i [rsLoop:0]
+
+// c11Esc -- ALT MODE, alone dropping the arguments; two, $$, leave the
+// macro with the arguments as its value, or end the command string.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Esc, jsp i [peekCh:0]
+    SKIP_NEXT_IF_SAME [CH_ESC]
+    jmp esOne
+    lac i [srcPos:0]
+    add [1]
+    dac i [srcPos:0]
+esEx, lac i [srcBlk:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp esEnd
+    jsp i [mRet:0]
+    jmp i [rsLoop:0]
+esEnd, lac i [srcLen:0]
+    dac i [srcPos:0]
+    jmp i [rsLoop:0]
+esOne, jsp clr11
+    jmp i [rsLoop:0]
+
+// c11CtC -- ^C, in a macro stop the command string, as at its end; at the top
+// level, or for ^C and a real Ctrl-C, leave TECO as /G leaves it.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends through rsX's return or cBell.
+c11CtC, jsp i [peekCh:0]
+    SKIP_NEXT_IF_DIFFERENT [CH_BREAK]
+    jmp ccBye
+    lac i [srcBlk:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ccBye
+    jsp i [lqDrop:EX_BANK]
+    lac i [rsX:0]
+    dac ccT
+    jmp i ccT
+ccBye, jmp i [cBell:0]
+
+// c11O -- Otag$, @O/tag/, go on after !tag! (coRun, control.ac).
+// nOa,b,c$ goes to the tag of the list counted from 0; n out of range, or an empty
+// tag, goes on after the O.
+// Reads n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop or through coRun.
+c11O, jsp txSv
+    lio [CH_ESC]
+    jsp txArg
+    dac oN
+    lac i [srcPos:0]
+    dac i [otEnd:0]
+    sub oN
+    sub [1]
+    dac oP
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp oAll
+    // n from 0 up to 4095, else none
+    lac i [val:0]
+    ior i [val:0+1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp oNone
+    lac i [val:0+2]
+    dac oK
+    lac oP
+    dac oS                  // the start of the tag being passed
+    dac oI
+    add oN
+    dac oE
+oL, lac oI
+    sub oE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp oEnd
+    lio oI
+    jsp i [srcGet:0]
+    lai
+    and [0177]
+    SKIP_NEXT_IF_SAME [054]  // a comma ends a tag
+    jmp oNx
+    lac oK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp oGot
+    sub [1]
+    dac oK
+    lac oI
+    add [1]
+    dac oS
+oNx, idx oI
+    jmp oL
+oEnd, lac oK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp oNone
+oGot, lac oI
+    sub oS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp oNone
+    dac i [otL:0]
+    lac oS
+    dac i [otP:0]
+    jmp i [coRun:0]
+oAll, lac oN
+    dac i [otL:0]
+    lac oP
+    dac i [otP:0]
+    jmp i [coRun:0]
+oNone, jsp clr11
+    jmp i [rsLoop:0]
+
+// c11Trc -- ?, turn the trace on, or off.
+// While it is on, each character read is typed (trNx).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Trc, lac i [trOn:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trOff
+    law 1
+    dac i [trOn:0]
+    lac i [srcBlk:0]
+    dac trBlk
+    lac i [srcPos:0]
+    dac trPos
+    jmp i [rsLoop:0]
+trOff, dzm i [trOn:0]
+    jmp i [rsLoop:0]
+
+// trNx -- type the source from trPos through the character just read, for nextCh
+// with the trace on.
+// A change of source, or a jump back, types that character alone.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Reached from bank 0 with the extend window open.
+// Called via jsp.
+trNx, dac tnX
+    dio tnC
+    lac i [srcBlk:0]
+    SKIP_NEXT_IF_SAME trBlk
+    jmp tnNew
+    lac i [srcPos:0]
+    sub [1]
+    sub trPos
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp tnBack
+    jmp tnL
+tnNew, lac i [srcBlk:0]
+    dac trBlk
+tnBack, lac i [srcPos:0]
+    sub [1]
+    dac trPos
+tnL, lac trPos
+    sub i [srcPos:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp tnOut
+    lio trPos
+    jsp i [srcGet:0]
+    jsp i [echoCh:1]
+    idx trPos
+    jmp tnL
+tnOut, lio tnC
+    jmp i tnX
+
+tnX, 0                      // the return address
+tnC, 0
+qtA, 0                      // c11Qt's n, three words
+qtB, 0
+qtC, 0
+qtZ, 0
+qtN, 0
+qtK, 0
+qtL, 0
+qtT, 0
+qtP, 0
+smC, 0
+smGo, 0
+flP, 0
+ccT, 0
+oN, 0
+oP, 0
+oS, 0
+oI, 0
+oE, 0
+oK, 0
+endloc
+
+trBlk, 0                    // the source the trace last typed from, and where
+trPos, 0
+
+// c11Qt's tests, each the letter and its kind (QT_...).
+qtTab, 0101
+    3                       // A
+    0103
+    017                     // C
+    0104
+    4                       // D
+    0122
+    7                       // R
+    0126
+    2                       // V
+    0127
+    1                       // W
+    0105
+    QT_ZERO                 // E
+    0106
+    QT_ZERO                 // F
+    0125
+    QT_ZERO                 // U
+    CH_EQ
+    QT_ZERO                 // =
+    0116
+    QT_NZ                   // N
+    0107
+    QT_POS                  // G
+    CH_GT
+    QT_POS                  // >
+    0114
+    QT_NEG                  // L
+    0123
+    QT_NEG                  // S
+    0124
+    QT_NEG                  // T
+    CH_LT
+    QT_NEG                  // <
+    0

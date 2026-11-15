@@ -1,0 +1,8 @@
+// termdata.ac -- the console's type-ahead ring for termio.ac, one ASCII
+// character a word.
+// The typing areas are in bank 10 (teco.ah).
+// Include it in bank 1, where it is not executed.
+// Needs teco.ah.
+
+taBuf,
+    table TA_SIZE

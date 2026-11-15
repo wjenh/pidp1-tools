@@ -1,0 +1,181 @@
+// dpy11.ac -- the second command set's display, the Type 340 as a refresh scope,
+// shown at every prompt as the 1965 set's is (display.ac).
+// The W commands set what n/N and n/D set there:
+//   W         the display on again, if 0W turned it off, and built now
+//   nW        n lines each side of the pointer, as n/N, and the display on; 0W off, with
+//             no WAIT during a Microtape call either (display.ac's dpyNo); W, nW and 0W
+//             leave dpyNo's VT_SWNO alone, so in VT100 mode the display stays off
+//   -nW       a video terminal's form, -1W and -1000W among them, which does nothing
+//   :W, 0:W   -1, no video terminal
+//   1:W       the columns at the size, 144, 72, 36 or 18
+//   m,1:W     the size whose columns are nearest m, the wider of two as near; its columns
+//   2:W       the rows at the size, which only the size sets, so m,2:W changes nothing
+//   n:W       any other n, with or without m, is 0, as the manual's 3:W to 7:W start
+// EV's lines are search11.ac's sEv, typed by the reader (cmdread11.ac), and Ctrl-W first
+// repaints the 340 there; /U stays the 1965 set's.
+// Every W goes to vt11.ac's vtW first.
+// While a video terminal's type is set every W is that file's; with none, 4,0:W, 8,0:W
+// and m,7:W are, and the rest come back to c11W0.
+//
+// Handlers are entered by jmp from the dispatch (dTab11, data11.ac) and end by jmp i
+// [rsLoop:0] or through v11Int.
+// Routines are entered by jsp with the extend window open and return by jmp i.
+// The file goes in bank 14 (P11_BANK).
+// Needs teco.ah, <AIDS/skipmacros.ah>; interp11.ac's v11Int; in bank 0 expr.ac (have,
+// comma, mval, ra, toInt, argOr, colon11); in bank 1 display.ac (dpyLines, dpySize,
+// dpyNo, dpyStop, dpyShow); in bank 13 dpytab.ac (dgTab); in bank 10 vt11.ac's vtW.
+
+local wOn, wOff, wSet, wBig, wCol, wNoM, wTyp, wWid, wHt, wVal, wGeo, wGx, wNear, \
+    wNx, wNL, wNN, wH, wN, wC, wM, wT, wS, wD, wP
+
+// c11W -- W, passed first to vt11.ac's vtW, which comes back to c11W0 for the forms
+// it leaves to this file.
+// AC and IO reach vtW unchanged.
+// Entered by jmp from the dispatch.
+c11W, jmp i [vtW:VT_BANK]
+// c11W0 -- W and nW, and :W with its forms (wCol).
+// Reads the argument state (colon11, have, the argument).
+// Does not preserve AC or IO.
+// Sets dpyLines and dpyNo.
+// Entered by jmp i from vt11.ac's vtW, from bank 10; ends by jmp i [rsLoop:0], or by jmp
+// to wCol.
+c11W0, lac i [colon11:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wCol
+    lac i [have:0]
+    dac wH
+    law 1                   // W alone as 1, so a lone minus is -1W
+    lia
+    jsp i [argOr:0]
+    dac wN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [rsLoop:0]        // -nW, a video terminal's
+    lac wH
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wOn
+    lac wN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wOff
+    sub [077777]            // n/N's limit, which no screen reaches anyway
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp wBig
+    lac wN
+    jmp wSet
+wBig, lac [077777]
+wSet, dac i [dpyLines:1]
+    lac i [dpyNo:1]         // on, but switch 2's VT100 mode keeps it off
+    and [VT_SWNO]
+    dac i [dpyNo:1]
+    jmp i [rsLoop:0]
+wOff, lac i [dpyNo:1]
+    ior [1]
+    dac i [dpyNo:1]
+    jsp i [dpyStop:1]
+    jmp i [rsLoop:0]
+    // W, the display built now and again at idle; the display's switch rules it, and
+    // switch 2's VT100 mode keeps it off
+wOn, lac i [dpyNo:1]
+    and [VT_SWNO]
+    dac i [dpyNo:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp i [dpyShow:1]
+    jmp i [rsLoop:0]
+
+// wCol -- n:W and m,n:W, n 0 if none.
+// Reads the argument state (comma, mval, the argument).
+// The value of n:W goes to v11Int.
+// Does not preserve AC or IO.
+// Entered by jmp from c11W0; ends through v11Int.
+wCol, lac i [comma:0]
+    dac wC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wNoM
+    lac i [mval:0]
+    dac i [ra:0]
+    lac i [mval:0+1]
+    dac i [ra:0+1]
+    lac i [mval:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac wM
+wNoM, cli
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_DIFFERENT [0]
+    jmp wTyp
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp wWid
+    SKIP_NEXT_IF_DIFFERENT [2]
+    jmp wHt
+    cli
+    jmp v11Int
+wTyp, lio [-1]
+    jmp v11Int
+wWid, lac wC
+    SKIP_NEXT_IF_AC_ZERO
+    jsp wNear
+    lio i [dpySize:1]
+    jsp wGeo
+    add [1]                 // the columns
+    jmp wVal
+wHt, lio i [dpySize:1]
+    jsp wGeo
+    add [2]                 // the rows
+wVal, dac wP
+    lio i wP
+    jmp v11Int
+
+// wGeo -- find the full address of a size's geometry in dgTab, 7 words a size
+// (dpytab.ac).
+// IO is the size.
+// AC is the address, IO is preserved.
+// Called via jsp.
+wGeo, dac wGx
+    dio wT
+    lac wT
+    ral 3s
+    sub wT
+    add [dgTab:DT_BANK]
+    jmp i wGx
+
+// wNear -- set dpySize to the size whose columns are nearest wM; of two as near, the
+// first in dgTab, the wider.
+// Reads wM.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+wNear, dac wNx
+    dzm wS
+    lac [0377777]
+    dac wD
+wNL, lio wS
+    jsp wGeo
+    add [1]
+    dac wP
+    lac wM
+    sub i wP
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    cma                     // the distance, |m - columns|
+    sub wD
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp wNN
+    add wD
+    dac wD
+    lac wS
+    dac i [dpySize:1]
+wNN, idx wS
+    sub [4]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wNL
+    jmp i wNx
+
+wGx, 0                      // the return addresses
+wNx, 0
+wH, 0                       // c11W0's argument given, and the argument
+wN, 0
+wC, 0                       // wCol's m given, and m
+wM, 0
+wT, 0                       // wGeo's size
+wS, 0                       // wNear's size tried, and the nearest distance so far
+wD, 0
+wP, 0                       // a geometry word's full address
+endloc

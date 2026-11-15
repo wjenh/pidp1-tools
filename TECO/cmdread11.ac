@@ -1,0 +1,518 @@
+// cmdread11.ac -- typing in a command string in the second set, as TECO-11 does.
+// The prompt is *, every key is echoed as the 1965 reader echoes it (ALT MODE as $, a
+// control character as ^ and its letter), RETURN is stored as CR LF, and two ALT MODEs
+// in a row end the string.
+// The editing keys are these.
+//   DEL, and BS but as the first key, erase the last character and echo it (on a scope,
+//     ET&2, rub it out); with nothing typed they give a new prompt.
+//   ^U erases the line being typed and echoes ^U and CR LF, with * again on the first
+//     line.
+//   ^G^G erases everything typed, ^G space retypes the line, and ^G * retypes every
+//     line; ^G and any other key are both stored.
+//   ^C drops the string, echoes ^C and gives a new prompt; ^C at the prompt does what
+//     /G does.
+// The first keys after the prompt are these.
+//   ? after an error types the string through the bad character and ?.
+//   LF or ALT MODE is LT, and BS is -LT.
+//   *q puts the last string into register q.
+//   ^W repaints the 340 and the split screen's window.
+// Before the prompt come EV's lines (search11.ac's sEv), and the split
+// screen's window (vt11.ac's vtPrompt).
+// Lower case is kept with ET&4, else taken as upper case.
+// With ET&8192 ` is ALT MODE and echoes as itself.
+// On the typewriter, which prints what is typed, only what the keys do is typed.
+// While EI's file is open (files11.ac), its characters stand for keys, ALT MODE as
+// ALT MODE and every other one text, none an editing key.
+//
+// The two typing areas are the 1965 reader's (cmdread.ac), and so are its routines
+// for storing, reading and echoing a character; this reader only replaces cmdRead.
+// Every routine is called via jsp, from any bank, with the extend window open, and
+// returns by jmp i.
+// The file goes in bank 14 (P11_BANK).
+// Needs teco.ah, <AIDS/skipmacros.ah>, interp11.ac's flags, search11.ac's sEv; in bank
+// 1 termio.ac, cmdread.ac and display.ac's dpyShow and dpyNo; in bank 0 clkTick,
+// edit.ac's lnTo and tyRange, buffer.ac's dot, qreg.ac's qAlloc and qSetText; in bank
+// 10 vt11.ac's vtPrompt and vtCtlW.
+
+local c1X, c1C, c1T, c1I, c1K, c1P, c1Q, c1Sur, c1Any, c1G, c1PV, c1Pr, c1Lp, c1Dis0, c1Dis, c1NoW, \
+    c1Fst, c1Mid, c1Txt, c1Put, c1Full, c1Ret, c1Alt, c1Alt1, c1End, c1Rub, c1RbS, \
+    c1RbE, c1RbN, c1CU, c1CC, c1Quit, c1CG, c1AfG, c1GG, c1GSp, c1GSt, c1Rty, c1Shw, \
+    c1ShL, c1ShE, c1MLT, c1LT, c1LTg, c1Sq, c1SqL, c1SqS, c1SqN, c1SqW, c1SqT, c1Ech, \
+    ceX, ceSur, c1Ln, clX, c1LL, c1LE, rkX, rkL, rkEi, c1Ei
+
+// cmdRd11 -- read a command string, and return once two ALT MODEs in a row have
+// ended it.
+// A string longer than TY_TEXT characters rings the bell and takes no more but the
+// editing keys and ALT MODE.
+// A lost DCS2 caller leaves through tmErr.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// The string read becomes the command string (cmdread.ac), csBase, csLen characters
+// with the two ALT MODEs included, and csPos 0.
+// Called via jsp.
+cmdRd11, dac c1X
+c1PV, jsp sEv               // EV's lines, as TECO C types them, before a string's
+                            // prompt, after LF, ALT MODE or BS first, and a RUBOUT
+                            // on nothing
+c1Pr, jsp i [vtPrompt:VT_BANK] // the split screen's window brought up to date
+    dzm i [tyLen:1]
+    dzm c1Any
+    dzm c1G
+    lio [CH_STAR]
+    jsp i [putc:1]
+c1Lp, jsp rdKey
+    dio c1C
+    lac c1C
+    and [0177]
+    dac c1C
+    dzm c1Sur
+    lac rkEi
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1Ei
+    // the ALT MODE surrogate, ` with ET&8192
+    lac c1C
+    SKIP_NEXT_IF_SAME [CH_GRAVE]
+    jmp c1Dis0
+    lac flET+1
+    and [2]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp c1Dis0
+    law CH_ESC
+    dac c1C
+    law 1
+    dac c1Sur
+c1Dis0, lac c1G
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1AfG
+c1Dis, lac i [tyLen:1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1Mid
+    // the first key after the prompt; ^W repaints the 340, unless 0W or the split
+    // turned it off (dpy11.ac), and the split screen's window (vt11.ac), echoes nothing
+    // and is not the first key
+    lac c1C
+    SKIP_NEXT_IF_SAME [CH_CTLW]
+    jmp c1NoW
+    jsp i [vtCtlW:VT_BANK]
+    lac i [dpyNo:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp i [dpyShow:1]
+    jmp c1Lp
+c1NoW, lac i [errPend:1]
+    dzm i [errPend:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp c1Fst
+    lac c1C
+    SKIP_NEXT_IF_DIFFERENT [CH_QMARK]
+    jmp c1Shw
+c1Fst, lac c1C
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp c1LT
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp c1LT
+    SKIP_NEXT_IF_DIFFERENT [CH_BS]
+    jmp c1MLT
+    SKIP_NEXT_IF_DIFFERENT [CH_STAR]
+    jmp c1Sq
+    SKIP_NEXT_IF_DIFFERENT [CH_BREAK]
+    jmp c1Quit
+c1Mid, dzm i [errPend:1]
+    lac c1C
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp c1Rub
+    SKIP_NEXT_IF_DIFFERENT [CH_BS]
+    jmp c1Rub
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLU]
+    jmp c1CU
+    SKIP_NEXT_IF_DIFFERENT [CH_BELL]
+    jmp c1CG
+    SKIP_NEXT_IF_DIFFERENT [CH_BREAK]
+    jmp c1CC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp c1Ret
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp c1Ret
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp c1Alt
+    // lower case as upper, unless ET&4
+    lac flET+2
+    and [4]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1Txt
+    lac c1C
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp c1Txt
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1Txt
+    lac c1C
+    sub [040]
+    dac c1C
+c1Txt, lac i [tyLen:1]
+    sub [TY_TEXT]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1Full
+c1Put, lio c1C
+    jsp i [tyStore:1]
+    law 1
+    dac c1Any
+    jsp c1Ech
+    jmp c1Lp
+c1Full, jsp i [ringBell:1]
+    jmp c1Lp
+
+// a character of EI's file is text as it is, but ALT MODE; no editing key
+c1Ei, lac c1C
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp c1Alt
+    jmp c1Txt
+
+// RETURN, which reads as LF over DCS2 and from the typewriter, or a bare CR, stores CR
+// and LF
+c1Ret, lac i [tyLen:1]
+    sub [TY_RET]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1Full
+    lio [CH_CR]
+    jsp i [tyStore:1]
+    lio [CH_LF]
+    jsp i [tyStore:1]
+    law 1
+    dac c1Any
+    lac i [useTty:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp i [newline:1]
+    jmp c1Lp
+
+// ALT MODE, the second in a row ending the string; a first needs room for both
+c1Alt, lac i [tyLen:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp c1Alt1
+    sub [1]
+    lia
+    jsp i [tyGet:1]
+    dio c1T
+    lac c1T
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp c1End
+c1Alt1, lac i [tyLen:1]
+    sub [TY_MAX-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1Full
+    jmp c1Put
+c1End, lio c1C
+    jsp i [tyStore:1]
+    jsp c1Ech
+    jsp i [newline:1]
+    lac i [tyBase:1]
+    lio i [csBase:1]
+    dac i [csBase:1]
+    dio i [tyBase:1]
+    lac i [tyLen:1]
+    dac i [csLen:1]
+    dzm i [csPos:1]
+    jmp i c1X
+
+// DEL, or BS after the first key, erases the last character and echoes it, or on a
+// scope (ET&2) rubs it out; with nothing typed it gives a new prompt, after CR LF once
+// something was typed and erased, as TECO C does
+c1Rub, lac i [tyLen:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp c1RbE
+    sub [1]
+    dac i [tyLen:1]
+    lia
+    jsp i [tyGet:1]
+    dio c1T
+    lac flET+2
+    and [2]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1RbS
+    lio c1T
+    jsp i [echoCh:1]
+    jmp c1Lp
+c1RbS, lio [CH_BS]
+    jsp i [putc:1]
+    lio [040]
+    jsp i [putc:1]
+    lio [CH_BS]
+    jsp i [putc:1]
+    jmp c1Lp
+c1RbE, lac c1Any
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1RbN
+    lio [CH_CR]
+    jsp i [putc:1]
+    jmp c1PV
+c1RbN, jsp i [newline:1]
+    jmp c1PV
+
+// ^U goes back to the line's start, echoing ^U and CR LF; on the first line it gives a
+// new prompt
+c1CU, jsp c1Ech
+    jsp i [newline:1]
+    jsp c1Ln
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp c1Pr
+    dac i [tyLen:1]
+    jmp c1Lp
+
+// ^C with something typed drops it and gives a new prompt; at the prompt it is /G
+c1CC, jsp c1Ech
+    jsp i [newline:1]
+    jmp c1Pr
+c1Quit, jsp i [tmQuit:1]
+    jmp c1Pr
+
+// ^G is stored, with the bell and ^G echoed, and the next key decides
+c1CG, lac i [tyLen:1]
+    sub [TY_TEXT]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1Full
+    jsp i [ringBell:1]
+    jsp c1Ech
+    lio c1C
+    jsp i [tyStore:1]
+    law 1
+    dac c1Any
+    dac c1G
+    jmp c1Lp
+c1AfG, dzm c1G
+    lac c1C
+    SKIP_NEXT_IF_DIFFERENT [CH_BELL]
+    jmp c1GG
+    SKIP_NEXT_IF_DIFFERENT [040]
+    jmp c1GSp
+    SKIP_NEXT_IF_DIFFERENT [CH_STAR]
+    jmp c1GSt
+    jmp c1Dis
+c1GG, jsp i [ringBell:1]
+    jsp c1Ech
+    jsp i [newline:1]
+    jmp c1Pr
+    // ^G space drops the stored ^G and retypes the line, after * on the first
+c1GSp, lac i [tyLen:1]
+    sub [1]
+    dac i [tyLen:1]
+    jsp i [newline:1]
+    jsp c1Ln
+    dac c1I
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1Rty
+    lio [CH_STAR]
+    jsp i [putc:1]
+    jmp c1Rty
+    // ^G * retypes every line, after the * echoed, CR LF and *
+c1GSt, lac i [tyLen:1]
+    sub [1]
+    dac i [tyLen:1]
+    jsp c1Ech
+    jsp i [newline:1]
+    lio [CH_STAR]
+    jsp i [putc:1]
+    dzm c1I
+c1Rty, lac c1I
+    sub i [tyLen:1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1Lp
+    lio c1I
+    jsp i [tyGet:1]
+    jsp i [echoCh:1]
+    idx c1I
+    jmp c1Rty
+
+// ? first after an error types ?, the command string through the bad character, ?,
+// and CR LF
+c1Shw, jsp c1Ech
+    dzm c1I
+c1ShL, lac c1I
+    sub i [errPos:1]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp c1ShE
+    lac c1I
+    sub i [csLen:1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1ShE
+    lio c1I
+    jsp i [csGet:1]
+    jsp i [echoCh:1]
+    idx c1I
+    jmp c1ShL
+c1ShE, lio [CH_QMARK]
+    jsp i [putc:1]
+    jsp i [newline:1]
+    jmp c1Pr
+
+// LF or ALT MODE first, LT; BS first, -LT; the T left out while EV is not 0, whose
+// lines are typed instead
+c1MLT, lio [-1]
+    jmp c1LTg
+c1LT, lio [1]
+c1LTg, jsp i [lnTo:0]
+    dac i [dot:0]
+    lac flEV
+    ior flEV+1
+    ior flEV+2
+    SKIP_NEXT_IF_AC_ZERO
+    jmp c1PV
+    lio [1]
+    jsp i [lnTo:0]
+    dac i [a2N:0]
+    lac i [dot:0]
+    dac i [a2M:0]
+    jsp i [tyRange:0]
+    jmp c1Pr
+
+// * first and a register's name, 0-9 or a letter, puts the last command string, its
+// two ALT MODEs included, into the register, then CR LF and a new prompt.
+// With any other key after the *, the * is stored and the key taken as typed.
+c1Sq, jsp c1Ech
+    jsp rdKey
+    dio c1T
+    lac c1T
+    and [0177]
+    dac c1T
+    sub [CH_ZERO]
+    dac c1I
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp c1SqL
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp c1SqS               // a digit, c1I 0-9
+c1SqL, lac c1T
+    and [0137]
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp c1SqN
+    dac c1I
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c1SqN
+    lac c1I
+    add [0d10]              // a letter, 10-35
+    dac c1I
+c1SqS, lac c1I
+    dac i [qIdx:0]
+    ral 2s                  // QR_WORDS, 5, a record
+    add c1I
+    add [qTab:0]
+    dac i [qRec:0]
+    lac c1T
+    dac c1C
+    jsp c1Ech
+    lio i [csLen:1]
+    jsp i [qAlloc:0]
+    add [2]
+    dac c1P                 // the block's characters, two a word as the string's
+    lac i [csBase:1]
+    dac c1Q
+    lac i [csLen:1]
+    add [1]
+    rar 1s
+    and [PK_WORD]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp c1SqT
+    cma
+    dac c1K
+c1SqW, lac i c1Q
+    dac i c1P
+    idx c1Q
+    idx c1P
+    isp c1K
+    jmp c1SqW
+c1SqT, jsp i [qSetText:0]
+    jsp i [newline:1]
+    jmp c1Pr
+c1SqN, lio [CH_STAR]
+    jsp i [tyStore:1]
+    law 1
+    dac c1Any
+    lac c1T
+    dac c1C
+    jmp c1Dis
+
+// c1Ech -- echo the key in c1C as typing echoes it (echoCh), ` for the surrogate; on
+// the typewriter, nothing.
+// Its argument is c1C, with c1Sur.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+c1Ech, dac ceX
+    lac i [useTty:1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i ceX
+    lac c1Sur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ceSur
+    lio c1C
+    jsp i [echoCh:1]
+    jmp i ceX
+ceSur, lio [CH_GRAVE]
+    jsp i [putc:1]
+    jmp i ceX
+
+// c1Ln -- find the index of the typed line's first character, after the last LF
+// typed, or 0.
+// Has no arguments.
+// AC is the index, IO is not preserved.
+// Called via jsp.
+c1Ln, dac clX
+    lac i [tyLen:1]
+    dac c1K
+c1LL, lac c1K
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i clX
+    sub [1]
+    lia
+    jsp i [tyGet:1]
+    dio c1T
+    lac c1T
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp c1LE
+    lac c1K
+    sub [1]
+    dac c1K
+    jmp c1LL
+c1LE, lac c1K
+    jmp i clX
+
+// rdKey -- read the next key.
+// While EI's file is open it is the file's next character (files11.ac's fiEiG), and
+// rkEi is 1; else it is the next typed, waiting for one with the clock read (clkTick)
+// and the display refreshed (pollc) meanwhile, and rkEi is 0.
+// Has no arguments.
+// AC is not preserved, IO is the key.
+// Called via jsp.
+rdKey, dac rkX
+    dzm rkEi
+    lac i [fiEiOn:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rkL
+    jsp i [fiEiG:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rkL
+    law 1
+    dac rkEi
+    jmp i rkX
+rkL, jsp i [clkTick:0]
+    jsp i [pollc:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rkL
+    jmp i rkX
+
+c1X, 0                      // the return addresses
+ceX, 0
+clX, 0
+rkX, 0
+c1C, 0                      // the key
+c1T, 0
+c1I, 0
+c1K, 0
+c1P, 0
+c1Q, 0
+c1Sur, 0                    // 1 when the key was ` as ALT MODE
+c1Any, 0                    // 1 once a character was stored since the prompt
+c1G, 0                      // 1 after a ^G, when the next key decides
+rkEi, 0                     // 1 when the key came from EI's file
+endloc

@@ -1,0 +1,751 @@
+// edit11.ac -- commands of the second command set.
+// They are the values TECO-11 adds, which are = == ===, the radix
+// ^O ^D ^R, backslash, ^_, ^^x, ^S ^Y ^Z ^N ^E ^B; moving and typing out with nA, V,
+// ^A, ^T; and inserting and deleting with nI$, TAB and its text, m,nD, FR.
+// Values are the 1965 set's, 36 bits in three 12-bit words (expr.ac).
+// A text argument runs to its ALT MODE, or after @ between two of its first character
+// (txArg).
+//
+// Handlers are entered by jmp from the dispatch (dTab11, interp11.ac) and end by jmp i
+// [rsLoop:0].
+// The routines are called via jsp with the extend window open and return by jmp i.
+// The file goes in bank 14 (P11_BANK).
+// Needs teco.ah, <AIDS/skipmacros.ah>; interp11.ac (clr11, v11Int, flET); in bank 0
+// interp.ac, expr.ac, buffer.ac, edit.ac and qreg.ac; in bank 1 termio.ac and
+// cmdread.ac; in bank 15 files11.ac (fiEof, fiFF, fiA); cmdread11.ac's rdKey.
+
+local eqN, eqC, eqMore, eqGo, eqDec, eqTyp, eqL, eqK, eqP, eqNae, nrX, nrB, nrQ, nrW, \
+    nrPK, nrDP, nrDK, nrD, nrBK, nrPart, nrH, nrS, nrDig, nrBit, nrPut, nrAF, nrSt, \
+    nrNext, nrEnd, crSet, crN, bsDig, bsIns, bsOct, bsHex, bsDec, bsL, bsK, bsP, bsI, bsNeg, bsRd, \
+    bsSg, bsPl, bsDL, bsD, bsHx, bsAcc, bsEnd, bsVal, bsNo, cuNab, czS, czR, czK, czP, \
+    czL, czN, czW, czE, aI, aOut, ceGet, vM, vN, vMN, vGo, vTy, vT, iN, iTxt, iEnd, iBad, txX, txD, txP, \
+    txN, txAt, txGo, tsX, tiX, frK, frN, frMN, frLs, frL, frR, frTx, frDtb, caK, caL, \
+    caEnd, ctC, ctIn, ctImg, ctEnd, ctWait, ctGot, ctVal, ctEcho
+
+// c11Eq -- n= n== n=== type n in decimal, signed, or in octal or hex, unsigned
+// (36 bits), then CR LF, none after :.
+// With no n it is NAE.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Eq, law 1
+    dac eqN
+eqMore, jsp i [peekCh:0]
+    SKIP_NEXT_IF_SAME [CH_EQ]
+    jmp eqGo
+    lac i [srcPos:0]
+    add [1]
+    dac i [srcPos:0]
+    idx eqN
+    SKIP_NEXT_IF_SAME [3]
+    jmp eqMore
+eqGo, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp eqNae
+    lac i [val:0]
+    dac i [ra:0]
+    lac i [val:0+1]
+    dac i [ra:0+1]
+    lac i [val:0+2]
+    dac i [ra:0+2]
+    lac i [colon11:0]
+    dac eqC
+    jsp clr11
+    lac eqN
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp eqDec
+    add [1]                 // == 3 bits a digit, === 4
+    lia
+    jsp numRad
+    jmp eqTyp
+eqDec, jsp i [fmtNum:0]
+eqTyp, lac i [numLen:0]
+    cma
+    dac eqK
+    lac [numBuf:0]
+    dac eqP
+eqL, lio i eqP
+    jsp i [putc:1]
+    idx eqP
+    isp eqK
+    jmp eqL
+    lac eqC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp i [newline:1]
+    jmp i [rsLoop:0]
+eqNae, ERR11(EC_NAE)
+
+// numRad -- format ra unsigned in octal or hex, its leading zeros dropped, into
+// numBuf, numLen characters (expr.ac), 12 or 9 digits at most.
+// IO is the bits a digit, 3 for octal or 4 for hex.
+// No return value; ra is unchanged.
+// Does not preserve AC or IO.
+// Called via jsp.
+numRad, dac nrX
+    dio nrB
+    dzm i [numLen:0]
+    lac [numBuf:0]
+    dac nrQ
+    lac [ra:0]
+    dac nrW
+    law i 3
+    dac nrPK
+    lac nrB
+    SKIP_NEXT_IF_SAME [3]
+    jmp nrH
+    law i 4                 // octal, four digits a 12-bit part
+    jmp nrS
+nrH, law i 3                // hex, three
+nrS, dac nrDP
+    // each part's 12 bits to IO's top, then a digit at a time into nrD
+nrPart, lio i nrW
+    ril 6s
+    lac nrDP
+    dac nrDK
+nrDig, dzm nrD
+    lac nrB
+    cma
+    dac nrBK
+nrBit, lac nrD
+    rcl 1s
+    dac nrD
+    isp nrBK
+    jmp nrBit
+    lac nrD
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nrPut
+    lac i [numLen:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nrNext              // a leading zero
+nrPut, lac nrD
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp nrAF
+    lac nrD
+    add [CH_ZERO]
+    jmp nrSt
+nrAF, add [0101]
+nrSt, dac i nrQ
+    idx nrQ
+    lac i [numLen:0]
+    add [1]
+    dac i [numLen:0]
+nrNext, isp nrDK
+    jmp nrDig
+    idx nrW
+    isp nrPK
+    jmp nrPart
+    lac i [numLen:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nrEnd
+    law CH_ZERO             // 0 is one digit
+    dac i nrQ
+    law 1
+    dac i [numLen:0]
+nrEnd, jmp i nrX
+
+// c11CO, c11CD -- ^O and ^D set octal and decimal from here on.
+// Entered by jmp from the dispatch, end by jmp rsLoop.
+c11CO, law 010
+    dac i [radix:0]
+    jmp i [rsLoop:0]
+c11CD, law 0d10
+    dac i [radix:0]
+    jmp i [rsLoop:0]
+
+// c11CR -- ^R is the radix; n^R sets it to n, 8, 10 or 16, else it is IRA.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11CR, lac i [have:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crN
+    lio i [radix:0]
+    jmp v11Int
+crN, cli
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_DIFFERENT [010]
+    jmp crSet
+    SKIP_NEXT_IF_DIFFERENT [0d10]
+    jmp crSet
+    SKIP_NEXT_IF_DIFFERENT [0d16]
+    jmp crSet
+    ERR11(EC_IRA)
+crSet, dac i [radix:0]
+    jmp i [rsLoop:0]
+
+// c11Bs -- backslash.
+// n\ inserts n at the pointer in the radix, decimal signed, octal and hex unsigned.
+// \ alone reads a number at the pointer in the radix, a sign first, and moves past it;
+// its value is the number, 0 with no digit there, the pointer then unmoved.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Bs, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bsRd
+    lac i [val:0]
+    dac i [ra:0]
+    lac i [val:0+1]
+    dac i [ra:0+1]
+    lac i [val:0+2]
+    dac i [ra:0+2]
+    jsp clr11
+    lac i [radix:0]
+    SKIP_NEXT_IF_DIFFERENT [010]
+    jmp bsOct
+    SKIP_NEXT_IF_DIFFERENT [0d16]
+    jmp bsHex
+bsDec, jsp i [fmtNum:0]
+    jmp bsIns
+bsOct, lio [3]
+    jsp numRad
+    jmp bsIns
+bsHex, lio [4]
+    jsp numRad
+bsIns, lio i [numLen:0]
+    jsp i [bRoom:0]
+    lac i [numLen:0]
+    dac i [lsLen:0]
+    cma
+    dac bsK
+    lac [numBuf:0]
+    dac bsP
+bsL, lio i bsP
+    jsp i [bIns1:0]
+    idx bsP
+    isp bsK
+    jmp bsL
+    jmp i [rsLoop:0]
+    // read the sign, then digits while there are any
+bsRd, lac i [dot:0]
+    dac bsI
+    dzm bsNeg
+    dzm bsAcc
+    dzm i [ra:0]
+    dzm i [ra:0+1]
+    dzm i [ra:0+2]
+    lac bsI
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp bsVal
+    lio bsI
+    jsp i [bGet:0]
+    dio bsD
+    lac bsD
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp bsSg
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp bsPl
+    jmp bsDL
+bsSg, law 1
+    dac bsNeg
+bsPl, idx bsI
+bsDL, lac bsI
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp bsEnd
+    lio bsI
+    jsp i [bGet:0]
+    dio bsD
+    lac bsD
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp bsEnd
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp bsHx
+    add [0d10]
+    jmp bsDig
+    // A to F, either case, past 9
+bsHx, lac bsD
+    and [0137]
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp bsEnd
+    add [0d10]
+bsDig, dac bsD
+    sub i [radix:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp bsEnd
+    // ra = ra * radix + the digit
+    dzm i [rb:0]
+    dzm i [rb:0+1]
+    lac i [radix:0]
+    dac i [rb:0+2]
+    jsp i [mul36:0]
+    lac bsD
+    dac i [rb:0+2]
+    jsp i [add36:0]
+    law 1
+    dac bsAcc
+    idx bsI
+    jmp bsDL
+bsEnd, lac bsAcc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bsVal               // no digit, so 0, the pointer kept
+    lac bsI
+    dac i [dot:0]
+    lac bsNeg
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [neg36:0]
+bsVal, jsp i [opnd:0]
+    jmp i [rsLoop:0]
+
+// c11CU -- n^_ is n's ones complement; with no n it is NAB.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11CU, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cuNab
+    lac i [val:0]
+    xor [07777]
+    dac i [val:0]
+    lac i [val:0+1]
+    xor [07777]
+    dac i [val:0+1]
+    lac i [val:0+2]
+    xor [07777]
+    dac i [val:0+2]
+    jmp i [rsLoop:0]
+cuNab, ERR11(EC_NAB)
+
+// c11CC -- ^^x is the code of x, as typed.
+// Entered by jmp from the dispatch, ends by jmp v11Int.
+c11CC, jsp i [nextCh:0]
+    lai
+    and [0177]
+    lia
+    jmp v11Int
+
+// c11CS -- ^S is minus the length of the last insert, match or G, 0 before any.
+// Entered by jmp from the dispatch, ends by jmp v11Int.
+c11CS, lac i [lsLen:0]
+    SKIP_NEXT_IF_AC_ZERO
+    cma
+    lia
+    jmp v11Int
+
+// c11CY -- ^Y is .+^S,., the last insert, match or G as m,n.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11CY, lac i [dot:0]
+    sub i [lsLen:0]
+    lia
+    jsp i [fromInt:0]
+    lac i [ra:0]
+    dac i [mval:0]
+    lac i [ra:0+1]
+    dac i [mval:0+1]
+    lac i [ra:0+2]
+    dac i [mval:0+2]
+    lio i [dot:0]
+    jsp i [fromInt:0]
+    lac i [ra:0]
+    dac i [val:0]
+    lac i [ra:0+1]
+    dac i [val:0+1]
+    lac i [ra:0+2]
+    dac i [val:0+2]
+    law 1
+    dac i [have:0]
+    dac i [comma:0]
+    dzm i [op:0]
+    jmp i [rsLoop:0]
+
+// c11CZ -- ^Z is the characters of text in the q-registers and of the command
+// string being run, as TECO C counts them.
+// It counts the globals in qTab, then every local set at LQ_BASE (qreg11.ac), not the
+// push-down list's entries, and the source's length, which in a macro is the macro's.
+// Entered by jmp from the dispatch, ends by jmp v11Int.
+c11CZ, lac i [srcLen:0]
+    dac czS
+    lac [qTab:0]
+    dac czR
+    law i NQREG
+    dac czK
+    dzm czW
+czL, lac i czR
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp czN
+    lac czR
+    add [QR_BLK]
+    dac czP
+    lac i czP               // the block
+    add [1]
+    dac czP
+    lac i czP               // its length
+    add czS
+    dac czS
+czN, lac czR
+    add [QR_WORDS]
+    dac czR
+    isp czK
+    jmp czL
+    lac czW
+    SKIP_NEXT_IF_AC_ZERO
+    jmp czE
+    idx czW
+    lac [LQ_BASE]
+    dac czR
+    law i LQ_NSET*NQREG
+    dac czK
+    jmp czL
+czE, lio czS
+    jmp v11Int
+
+// c11CN, c11CE -- ^N is the end of file flag, -1 once the input's end is reached; ^E
+// is the form feed flag, -1 when the last page read ended at a FORM, and n^E sets it
+// (files11.ac).
+// c11CB -- ^B, the date, is 0.
+// Entered by jmp from the dispatch, end by jmp rsLoop or v11Int.
+c11CN, lio i [fiEof:EX_BANK]
+    jmp v11Int
+c11CE, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ceGet
+    cli
+    jsp i [argOr:0]
+    dac i [fiFF:EX_BANK]
+    jmp i [rsLoop:0]
+ceGet, lio i [fiFF:EX_BANK]
+    jmp v11Int
+c11CB, cli
+    jmp v11Int
+
+// c11A -- nA is the code of the character n after the one at the pointer, so
+// 0A is the one right of it; -1 outside the buffer.
+// A alone, :A and n:A append from the input (files11.ac's fiA).
+// Entered by jmp from the dispatch, ends by jmp v11Int or jmp to fiA.
+c11A, lac i [colon11:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [fiA:EX_BANK]
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [fiA:EX_BANK]
+    cli
+    jsp i [argOr:0]
+    add i [dot:0]
+    dac aI
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp aOut
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp aOut
+    lio aI
+    jsp i [bGet:0]
+    jmp v11Int
+aOut, lio [-1]
+    jmp v11Int
+
+// c11V -- V, nV and m,nV are 1-nTnT and 1-mTnT; V is 1V, the line the pointer
+// is on.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11V, lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vMN
+    law 1
+    lia
+    jsp i [argOr:0]
+    dac vN
+    dac vM
+    jmp vGo
+vMN, lac i [mval:0]
+    dac i [ra:0]
+    lac i [mval:0+1]
+    dac i [ra:0+1]
+    lac i [mval:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac vM
+    lac i [val:0]
+    dac i [ra:0]
+    lac i [val:0+1]
+    dac i [ra:0+1]
+    lac i [val:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac vN
+    jsp clr11
+vGo, law 1
+    sub vM
+    lia
+    jsp i [lnTo:0]
+    dac i [a2M:0]
+    lio vN
+    jsp i [lnTo:0]
+    dac i [a2N:0]
+    sub i [a2M:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vTy
+    lac i [a2M:0]           // the other way round, for n of 0 or less
+    dac vT
+    lac i [a2N:0]
+    dac i [a2M:0]
+    lac vT
+    dac i [a2N:0]
+vTy, jsp i [tyRange:0]
+    jmp i [rsLoop:0]
+
+// c11I -- Itext$ inserts the text; nI$ the character whose code is n, taken
+// to 7 bits, and its text must be empty, else IIA.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11I, jsp txSv
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp iTxt
+    cli
+    jsp i [argOr:0]
+    and [0177]
+    dac iN
+    lio [CH_ESC]
+    jsp txArg
+    SKIP_NEXT_IF_AC_ZERO
+    jmp iBad
+    law 1
+    lia
+    jsp i [bRoom:0]
+    lio iN
+    jsp i [bIns1:0]
+    law 1
+    dac i [lsLen:0]
+    jmp iEnd
+iTxt, lio [CH_ESC]
+    jsp txArg
+    jsp txIns
+iEnd, jsp clr11
+    jmp i [rsLoop:0]
+iBad, ERR11(EC_IIA)
+
+// c11Tab -- TAB and text insert the TAB and the text after it, to ALT MODE.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Tab, lac i [srcPos:0]
+    sub [1]
+    dac i [srcPos:0]
+    dzm txAt
+    lio [CH_ESC]
+    jsp txArg
+    jsp txIns
+    jsp clr11
+    jmp i [rsLoop:0]
+
+// c11D -- nD as the 1965 set's; m,nD is m,nK.
+// Entered by jmp from the dispatch, ends by jmp to cD or cK.
+c11D, lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [cK:0]
+    jmp i [cD:0]
+
+// c11FR -- FRtext$ replaces the last insert or match (^S's length, before the
+// pointer) with the text; nFR replaces n characters as nD, and m,nFR the text from m
+// to n.
+// Entered by jmp from c11F (interp11.ac), ends by jmp rsLoop.
+c11FR, jsp txSv
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp frMN
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp frN
+frLs, lac i [lsLen:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp frTx
+    dac frK
+    jmp frL
+frN, cli
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp frTx
+    dac frK
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp frR
+    cma
+    dac frK
+    // frK characters before the pointer
+frL, lac i [dot:0]
+    sub frK
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp frDtb
+    lio frK
+    jsp i [bDelL:0]
+    jmp frTx
+    // frK after it
+frR, lac i [dot:0]
+    add frK
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp frDtb
+    lio frK
+    jsp i [bDelR:0]
+    jmp frTx
+frMN, jsp i [arg2:0]
+    lac i [a2M:0]
+    dac i [dot:0]
+    lac i [a2N:0]
+    sub i [a2M:0]
+    lia
+    jsp i [bDelR:0]
+frTx, lio [CH_ESC]
+    jsp txArg
+    jsp txIns
+    jsp clr11
+    jmp i [rsLoop:0]
+frDtb, ERR11(EC_DTB)
+
+// c11CtA -- ^Atext^A types the text as it is.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11CtA, jsp txSv
+    lio [CH_CTLA]
+    jsp txArg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp caEnd
+    cma
+    dac caK
+caL, lio txP
+    jsp i [srcGet:0]
+    jsp i [putc:1]
+    idx txP
+    isp caK
+    jmp caL
+caEnd, jsp clr11
+    jmp i [rsLoop:0]
+
+// c11CtT -- n^T types the character n, as typing echoes it, or as it is with ET&1;
+// ^T alone is the code of the next key typed, echoed unless ET&8, and with ET&32 -1
+// when none waits.
+// Entered by jmp from the dispatch, ends by jmp rsLoop or v11Int.
+c11CtT, lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ctIn
+    cli
+    jsp i [argOr:0]
+    and [0177]
+    dac ctC
+    lac flET+2
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ctImg
+    // BEL rings, then shows as ^G, as typing it does
+    lac ctC
+    SKIP_NEXT_IF_DIFFERENT [CH_BELL]
+    jsp i [ringBell:1]
+    lio ctC
+    jsp i [echoCh:1]
+    jmp ctEnd
+ctImg, lio ctC
+    jsp i [putc:1]
+ctEnd, jsp clr11
+    jmp i [rsLoop:0]
+ctIn, lac flET+2
+    and [040]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ctWait
+    jsp i [pollc:1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ctGot
+    lio [-1]
+    jmp v11Int
+ctWait, jsp rdKey
+ctGot, dio ctC
+    lac flET+2
+    and [010]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ctVal
+    lac i [useTty:1]        // the typewriter prints what is typed
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ctVal
+    lio ctC
+    jsp i [echoCh:1]
+ctVal, lio ctC
+    jmp v11Int
+
+// txSv -- keep the @ before the command for its text (txArg), before the arguments
+// are read, which clears it.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Sets txAt and clears at11.
+// Called via jsp.
+txSv, dac tsX
+    lac i [at11:0]
+    dac txAt
+    dzm i [at11:0]
+    jmp i tsX
+
+// txArg -- read a text argument and pass it, from the source's next character to the
+// delimiter in IO, or after @ (txAt) to the next appearance of the character after the
+// command.
+// With no delimiter it is UTC.
+// IO is the delimiter.
+// AC and txN are the text's length, txP its first character's index.
+// AC is the result, IO is not preserved.
+// txAt is cleared.
+// Called via jsp.
+txArg, dac txX
+    dio txD
+    lac txAt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp txGo
+    dzm txAt
+    jsp i [nextCh:0]
+    dio txD
+txGo, lac i [srcPos:0]
+    dac txP
+    lio txD
+    jsp i [scanTo:0]
+    dac txN
+    add txP
+    add [1]
+    dac i [srcPos:0]
+    lac txN
+    jmp i txX
+
+// txIns -- insert txArg's text at the pointer; its length is ^S's.
+// Its arguments are txN and txP.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+txIns, dac tiX
+    lio txN
+    jsp i [bRoom:0]
+    lac txN
+    dac i [insN:0]
+    dac i [lsLen:0]
+    lac i [srcArr:0]
+    dac i [insB:0]
+    lac txP
+    dac i [insP:0]
+    jsp i [bIns:0]
+    jmp i tiX
+
+eqN, 0
+eqC, 0
+eqK, 0
+eqP, 0
+nrX, 0                      // the return addresses
+txX, 0
+tsX, 0
+tiX, 0
+nrB, 0                      // numRad's bits a digit
+nrQ, 0                      //   where the next digit goes
+nrW, 0                      //   the part being read
+nrPK, 0                     //   the parts left
+nrDP, 0                     //   the digits a part
+nrDK, 0                     //   the part's digits left
+nrD, 0                      //   the digit
+nrBK, 0                     //   its bits left
+bsK, 0
+bsP, 0
+bsI, 0
+bsD, 0
+bsNeg, 0
+bsAcc, 0
+czS, 0
+czR, 0
+czK, 0
+czP, 0
+czW, 0                      // 0 in qTab, 1 at LQ_BASE
+aI, 0
+vM, 0
+vN, 0
+vT, 0
+iN, 0
+txD, 0                      // txArg's delimiter
+txP, 0                      //   the text's index
+txN, 0                      //   its length
+txAt, 0                     //   @ before the command
+frK, 0
+caK, 0
+ctC, 0
+endloc

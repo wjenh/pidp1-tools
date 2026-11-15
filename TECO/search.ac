@@ -1,0 +1,400 @@
+// search.ac -- the searches, S, N and left arrow, each with the :
+// and up-arrow modifiers and a count n.
+//
+// The modifiers come first, then the count, then the command and its text.
+// : and up arrow each drop the value before them, as PDP-6 TECO as it
+// survives does, so 3:S is one search and :3S three.
+// The text runs to the next ALT MODE, or with up arrow between two instances
+// of its first character, as I and up arrow I take theirs.
+// The search starts at the pointer and moves right; found, the pointer is
+// after the match.
+// Not found in the buffer, S fails, N does a P and searches on, and left
+// arrow a Y; N and left arrow fail at the end of the file.
+// A failure leaves the pointer at the end of the buffer; without
+// :, it is the error ?; with :, the value is 0, and -1 when found.
+// n is the command written out n times; n of 0 or less, written out
+// no times, does nothing, as in the surviving binary.
+//
+// The first character is looked for a word at a time in each run of the
+// gap buffer, before the gap and after it; the rest is compared at each
+// place it is found, so a match may span the gap.
+// The text is read from the source, the command string or a macro, where it
+// stands.
+//
+// The routines are reached from bank 0 with the extend window open.
+// The file goes in bank 0; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, interp.ac, expr.ac, edit.ac (scanTo),
+// buffer.ac, and in bank 1 outBuf and pgY (pageio.ac), lpEnd (lpt.ac).
+
+local saX, saK, saC, saL, saPass, saMod, saNo, saYes, sgGo, sgAlt, sgTxt, sgRun, \
+    sgOne, sgY, sgNext, sgFail, sgEnd, sgVal, sgC, sgU, sgN, sgK, sgV, sfX, sfC1, \
+    sfC1h, sfLast, sfA, sfB, sfOff, sfB1, sfR1, sfA2, sfNo, sfYes, srX, srNo, sfPA, \
+    sfPB, sfW0, sfWP, sfK, sfHi, sfLo, sfNxt, sfGotH, sfGotL, sfTry, sfCont, sfPl, \
+    sfI, scX, scK, scB, scP, scC, scL, scYes, scNo
+
+// cCol -- : before a search, which makes the value -1 found and 0
+// not, and a failure no error.
+// A : before anything else is the iteration test (cColIt, control.ac).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cCol, jsp srAhead
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cColIt
+    law 1
+    dac srCol
+    jsp clrArgs
+    jmp rsLoop
+
+// srAhead -- tell whether a search follows in the source, for : and up
+// arrow, which are modifiers only before a search.
+// The characters from srcPos are passed while they are digits, : or up
+// arrow, and the next must be S, N or left arrow, either case.
+// Nothing is taken from the source.
+// Has no arguments.
+// Returns AC 1 when a search follows, else 0.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+srAhead, dac saX
+    lac srcPos
+    dac saK
+saL, lac saK
+    sub srcLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp saNo
+    lio saK
+    jsp srcGet
+    lai
+    and [0177]
+    dac saC
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp saMod
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp saMod
+saPass, idx saK
+    jmp saL
+saMod, lac saC
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    jmp saPass
+    SKIP_NEXT_IF_DIFFERENT [CH_UPARROW]
+    jmp saPass
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp saYes
+    and [0137]              // lower case as upper
+    SKIP_NEXT_IF_DIFFERENT [0123]
+    jmp saYes
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp saYes
+saNo, cla
+    jmp i saX
+saYes, law 1
+    jmp i saX
+
+// cSrS, cSrN, cSrL -- S, N and left arrow, srK 0, 1 and 2.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSrS, law 0
+    jmp sgGo
+cSrN, law 1
+    jmp sgGo
+cSrL, law 2
+sgGo, dac srK
+    lac srCol
+    dac sgC
+    dzm srCol
+    lac srUp
+    dac sgU
+    dzm srUp
+    // m,n means nothing to a search, so it is ?
+    lac comma
+    SKIP_NEXT_IF_AC_ZERO
+    jmp err
+    // a minus with no number after it is not -1 here, as argOr makes it,
+    // since the surviving binary's -S searches as S does
+    dzm op
+    law 1
+    lia
+    jsp argOr
+    dac sgN
+    // the text, after up arrow between two of its first character
+    lac sgU
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sgAlt
+    jsp nextCh
+    jmp sgTxt
+sgAlt, lio [CH_ESC]
+sgTxt, jsp scanTo
+    dac srL
+    lac srcPos
+    dac srP
+    add srL
+    add [1]
+    dac srcPos
+    lac sgN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp sgRun
+    jmp rsLoop              // written out no times
+sgRun, cma
+    dac sgK
+sgOne, jsp srFind
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sgNext
+    lac srK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sgFail              // S, the end of the buffer
+    SKIP_NEXT_IF_SAME [1]
+    jmp sgY
+    jsp i [outBuf:1]        // N does P, which is PW then Y
+sgY, jsp i [pgY:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sgOne               // a page read, on from its start
+    jmp sgFail              // the end of the file
+sgNext, isp sgK
+    jmp sgOne
+    dzm srFail
+    lac srL                 // the second set's ^S
+    dac lsLen
+    lio [-1]
+    jmp sgEnd
+sgFail, lac zz
+    dac dot
+    law 1
+    dac srFail
+    cli
+sgEnd, dio sgV
+    // N's output ends with the printer at a line's start, as P's
+    lac srK
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jsp i [lpEnd:1]
+    lac sgC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sgVal
+    lac srFail
+    SKIP_NEXT_IF_AC_ZERO
+    jmp err
+    jmp rsLoop
+sgVal, lio sgV
+    jsp fromInt
+    jsp opnd
+    jmp rsLoop
+
+// srFind -- look for the text, srL characters from index srP of the
+// source, in the buffer from the pointer.
+// Takes srP and srL.
+// Found, AC is 0 and the pointer is after the match; the empty text is found
+// where the pointer is, as in the surviving binary.
+// Not found, AC is 1 and the pointer is unmoved.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+srFind, dac sfX
+    lac srL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sfYes
+    lio srP
+    jsp srcGet
+    dio sfC1
+    lac sfC1
+    ral 9s
+    dac sfC1h               // the first character as a high half
+    // the last index a match can start at
+    lac zz
+    sub srL
+    dac sfLast
+    sub dot
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sfNo
+    // before the gap, indexes dot to min(gs-1, sfLast), at places equal to them
+    dzm sfOff
+    lac dot
+    dac sfA
+    lac gs
+    sub [1]
+    dac sfB
+    sub sfLast
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sfB1
+    jmp sfR1
+sfB1, lac sfLast
+    dac sfB
+sfR1, jsp sfRun
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sfYes
+    // after it, indexes max(dot, gs) to sfLast, at places ge-gs above them
+    lac ge
+    sub gs
+    dac sfOff
+    lac dot
+    sub gs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sfA2
+    lac gs
+    jmp .+2
+sfA2, lac dot
+    dac sfA
+    lac sfLast
+    dac sfB
+    jsp sfRun
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sfYes
+sfNo, law 1
+    jmp i sfX
+sfYes, cla
+    jmp i sfX
+
+// sfRun -- look for the text starting at an index sfA to sfB, all in one
+// run of the buffer, at places sfOff above the indexes.
+// Takes sfA, sfB and sfOff.
+// Returns AC 0 when found, the pointer after the match, else AC 1.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+sfRun, dac srX
+    lac sfB
+    sub sfA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp srNo
+    lac sfA
+    add sfOff
+    dac sfPA                // the first place
+    lac sfB
+    add sfOff
+    dac sfPB                //   and the last
+    rar 1s
+    and [PK_WORD]
+    dac sfK
+    lac sfPA
+    rar 1s
+    and [PK_WORD]
+    dac sfW0
+    add [BUF_BASE]
+    dac sfWP
+    // the words from sfPA's through sfPB's, as -(count) for isp
+    lac sfK
+    sub sfW0
+    add [1]
+    cma
+    dac sfK
+    // each word is read whole and both its halves compared with the first
+    // character; a half outside sfA to sfB, perhaps the gap's, is passed over
+sfHi, lac i sfWP
+    and [PK_HI]
+    SKIP_NEXT_IF_DIFFERENT sfC1h
+    jmp sfGotH
+sfLo, lac i sfWP
+    and [PK_LO]
+    SKIP_NEXT_IF_DIFFERENT sfC1
+    jmp sfGotL
+sfNxt, idx sfWP
+    isp sfK
+    jmp sfHi
+srNo, law 1
+    jmp i srX
+sfGotH, lac sfWP
+    sub [BUF_BASE]
+    ral 1s                  // twice the word's offset, which is below 2^16
+    jmp sfTry
+sfGotL, lac sfWP
+    sub [BUF_BASE]
+    ral 1s
+    add [1]
+    // the first character is at place sfPl; before sfPA it is passed over,
+    // past sfPB the run is done
+sfTry, dac sfPl
+    sub sfPA
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sfCont
+    lac sfPB
+    sub sfPl
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp srNo
+    lac sfPl
+    sub sfOff
+    dac sfI
+    jsp sfCmp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sfCont
+    lac sfI
+    add srL
+    dac dot
+    cla
+    jmp i srX
+    // on with the low half after a high one, else the next word
+sfCont, lac sfPl
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sfNxt
+    jmp sfLo
+
+// sfCmp -- compare the text with the buffer from index sfI, its first
+// character already known to match.
+// Takes sfI.
+// Returns AC 0 when it matches, else AC 1.
+// The text's last character is at most at index Z-1 (srFind's sfLast).
+// AC is the result, IO is not preserved.
+// Called via jsp.
+sfCmp, dac scX
+    lac srL
+    sub [1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp scYes
+    cma
+    dac scK
+    lac sfI
+    add [1]
+    dac scB
+    lac srP
+    add [1]
+    dac scP
+scL, lio scB
+    jsp bGet
+    dio scC
+    lio scP
+    jsp srcGet
+    lai
+    SKIP_NEXT_IF_SAME scC
+    jmp scNo
+    idx scB
+    idx scP
+    isp scK
+    jmp scL
+scYes, cla
+    jmp i scX
+scNo, law 1
+    jmp i scX
+
+saX, 0                      // the return addresses
+sfX, 0
+srX, 0
+scX, 0
+saK, 0
+saC, 0
+sgC, 0                      // the search's : and up arrow
+sgU, 0
+sgN, 0                      //   its n, and the instances still to find
+sgK, 0
+sgV, 0                      //   its value, -1 or 0
+sfC1, 0                     // the text's first character, low and high
+sfC1h, 0
+sfLast, 0
+sfA, 0
+sfB, 0
+sfOff, 0
+sfPA, 0
+sfPB, 0
+sfW0, 0
+sfWP, 0
+sfK, 0
+sfPl, 0
+sfI, 0
+scK, 0
+scB, 0
+scP, 0
+scC, 0
+endloc
+
+srCol, 0                    // : was typed before the search to come
+srUp, 0                     // up arrow was
+srFail, 0                   // the last search failed, for : in an iteration (control.ac)
+srK, 0                      // the search being done, 0 S, 1 N, 2 left arrow
+srP, 0                      // its text's index in the source
+srL, 0                      //   and the length

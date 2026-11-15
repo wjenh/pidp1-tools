@@ -1,0 +1,271 @@
+// ptape.ac -- the paper tape reader and punch, in FOCAL's ASCII format.
+// Every character is punched with its eighth hole and read with or without
+// it; blank tape (NUL) and rubbed-out frames (0377, which reads as DEL) are
+// passed over.
+// The tape's end is RD_MS, 2 s, with no character, FOCAL's rule.
+// The check character after a FORM, punched and checked, is
+// additions.ac's (bank 15).
+// ptPut punches through it; rdGet gives it each frame read and takes from it
+// the frame it held after a FORM.
+//
+// The reader's buffer holds what Y and A gave back.
+// When the text buffer fills, the line cut short goes back here with the
+// character that did not fit, and the next Y or A reads it first.
+// /C empties it.
+// It is RDB_CHARS characters, two to a word as the text buffer has them, at
+// RDB_BASE in this bank.
+//
+// The reader is polled with a time limit, a read that does not wait, since
+// at the end of a tape no character comes and the flag never sets; while it
+// waits, the break is looked for and the clock read.
+// The time is the BBN clock's, which restart enables.
+//
+// Every routine is reached from bank 1 with the extend window open.
+// The file goes in bank 1; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, <CLOCK/clockdefs.ah>, brkChk
+// (termio.ac), in bank 0 clkTick and buffer.ac's gch, pch, cpyB and bOut, and
+// in bank 15 additions.ac's pckPut, pckFrm, pckHeld and pkHold.
+
+// A difference of two clock readings, in AC, brought into 0 to 59,999, where
+// the clock wraps.
+#define PT_MSWRAP    SKIP_NEXT_IF_AC_NOT_NEGATIVE; add [CLK_WRAP]
+
+local riX, rsX, rsNew, rsGo, rsMt, rgX, rgTape, rgAsk, rgWait, rgTime, rgMt, \
+    rcX, rcDone, \
+    rbX, rbN, rbR, rbHd, rbPut, rbNo, pfX, pfN, pfLoop
+
+// rdInit -- reset the reader, no request made and its buffer empty.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+rdInit, dac riX
+    dzm rdReq
+    dzm rdHd
+    dzm rdTl
+    jmp i riX
+
+// rdStart -- start the time limit for a page to be read.
+// A character a request has already brought in is kept; otherwise a new
+// request is made, so a tape mounted since the last one ran out is read.
+// With input from the Microtape (ER, /Q), tapefile.ac's mtStart does the
+// work instead.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+rdStart, dac rsX
+    lac i [inMt:MT_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rsMt
+    lac rdReq
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rsNew
+    cks
+    ril 1s
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp rsNew
+    jmp rsGo                // the character is in, keep it
+rsNew, rpa-i
+    law 1
+    dac rdReq
+rsGo, rck
+    dio rdT0
+    jmp i rsX
+rsMt, jsp i [mtStart:MT_BANK]
+    jmp i rsX
+
+// rdGet -- read the next character from the reader's buffer, else from the
+// tape with its eighth bit dropped, passing over NUL, DEL and the check
+// character (pckHeld, pckFrm).
+// Has no arguments.
+// Returns AC 0 and the character in IO.
+// At the tape's end, RD_MS with no character, AC is 1 and IO is not
+// preserved.
+// A break leaves through tmErr (brkChk).
+// With input from the Microtape, tapefile.ac's mtGet does the work instead,
+// giving AC 1 at the file's end; the reader's buffer is paper tape's and is
+// kept for it.
+// Called via jsp.
+rdGet, dac rgX
+    lac i [inMt:MT_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rgMt
+    lac rdHd
+    sub rdTl
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rgTape
+    lac [RDB_BASE]
+    dac i [gBase:0]
+    lac rdHd
+    dac i [gPos:0]
+    jsp i [gch:0]
+    idx rdHd
+    cla
+    jmp i rgX
+rgTape, jsp i [pckHeld:EX_BANK]    // the frame after a FORM, if it was held
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i rgX
+    lac rdReq
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rgWait
+rgAsk, rpa-i
+    law 1
+    dac rdReq
+    rck
+    dio rdT0
+rgWait, cks
+    ril 1s
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp rgTime
+    rrb
+    dzm rdReq
+    jsp i [pckFrm:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rgAsk               // blank tape, a rubbed-out frame, a check character
+    jmp i rgX
+// nothing in yet, so look for a break and read the clock; past the limit is the end
+rgTime, jsp brkChk
+    jsp i [clkTick:0]
+    rck
+    lai
+    sub rdT0
+    PT_MSWRAP
+    sub [RD_MS]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rgWait
+    law 1
+    jmp i rgX
+rgMt, jsp i [mtGet:MT_BANK]
+    jmp i rgX
+
+// rdClear -- /C, empty the reader's buffer and drop a character the
+// reader has brought in that nobody has taken.
+// A request still waiting is left, since its character is still on the tape.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+rdClear, dac rcX
+    dzm rdHd
+    dzm rdTl
+    dzm i [pkHold:EX_BANK]
+    lac rdReq
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i rcX
+    cks
+    ril 1s
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp i rcX
+    rrb
+    dzm rdReq
+    jmp i rcX
+
+// rdBack -- give back to the reader's buffer, ahead of what it holds, the
+// text from index rbFrom to the end of the text buffer, then the character
+// in IO.
+// These are the line Y or A cut short and the character that did not fit.
+// The caller then deletes that text.
+// Takes the index in rbFrom and the character in IO.
+// AC is 0 when it is given back; when it does not fit, AC is 1 and nothing
+// is changed.
+// AC is the result, IO is not preserved.
+// Called via jsp.
+rdBack, dac rbX
+    dio rbC
+    // n characters go in ahead of the r the buffer holds
+    lac i [zz:0]
+    sub rbFrom
+    add [1]
+    dac rbN
+    lac rdTl
+    sub rdHd
+    dac rbR
+    add rbN
+    sub [RDB_CHARS+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rbNo
+    lac rdHd
+    sub rbN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rbPut               // room in front of what it holds
+    // move what it holds up to place n; the text goes in at 0
+    lac [RDB_BASE]
+    dac i [cSB:0]
+    dac i [cDB:0]
+    lac rdHd
+    dac i [cSP:0]
+    lac rbN
+    dac i [cDP:0]
+    lac rbR
+    dac i [cN:0]
+    jsp i [cpyB:0]
+    cla
+    dac rdHd
+    add rbN
+    add rbR
+    dac rdTl
+    jmp rbHd
+rbPut, dac rdHd
+rbHd, lac [RDB_BASE]
+    dac i [outB:0]
+    lac rdHd
+    dac i [outP:0]
+    lac rbFrom
+    dac i [boM:0]
+    lac i [zz:0]
+    dac i [boN:0]
+    jsp i [bOut:0]
+    lac [RDB_BASE]
+    dac i [pBase:0]
+    lac rdHd
+    add rbN
+    sub [1]
+    dac i [pPos:0]
+    lio rbC
+    jsp i [pch:0]
+    cla
+    jmp i rbX
+rbNo, law 1
+    jmp i rbX
+
+// ptPut -- punch the ASCII character in IO with its eighth hole, and after a
+// FORM the check character if 1/P asked for it.
+// pckPut (additions.ac, bank 15) does the work and returns to ptPut's caller.
+// Waits for the punch.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+ptPut, jmp i [pckPut:EX_BANK]
+
+// ptFeed -- punch the blank frames whose count is in IO, none for 0.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+ptFeed, dac pfX
+    dio pfN
+pfLoop, lac pfN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i pfX
+    jsp brkChk
+    cli
+    ppa
+    lac pfN
+    sub [1]
+    dac pfN
+    jmp pfLoop
+
+riX, 0                      // the return addresses
+rsX, 0
+rgX, 0
+rcX, 0
+rbX, 0
+pfX, 0
+rbN, 0
+rbR, 0
+pfN, 0
+endloc
+
+rdReq, 0                    // a read has been asked for and not yet taken
+rdT0, 0                     // the clock when it was asked for, in ms
+rdHd, 0                     // the reader's buffer, its next character's place
+rdTl, 0                     //   and the place after its last
+rbFrom, 0                   // rdBack's first index given back
+rbC, 0                      //   and the character after the text

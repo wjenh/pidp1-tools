@@ -1,0 +1,154 @@
+// dpytab.ac -- the display's tables (display.ac), in bank 13's free end (DPY_TABS,
+// teco.ah).
+// They are read only through full addresses ([dgTab:DT_BANK], [dsTab:DT_BANK]), so
+// they need not share display.ac's bank.
+// Assembled after bank 1 with teco.ah and <TYPE340/type340defs.ah> in force.
+
+    assert . == DPY_TABS-MT_DATA, "the display's tables start at DPY_TABS"
+
+// dgTab -- each size's geometry, 7 words a size, as dF to dHalf, from teco.ah's defines.
+// The words are the scale's factor; the columns and rows; the row's pitch and a
+// character's, scaled; the top row's baseline, the bottom row's being DPY_SUB steps up
+// for a subscript; half the rows.
+dgTab,
+    1
+    DG_COLS(1)
+    DG_ROWS(1)
+    DPY_PITCH
+    DPY_CHW
+    DG_TOP(1)
+    DG_ROWS(1)/2
+    2
+    DG_COLS(2)
+    DG_ROWS(2)
+    DPY_PITCH*2
+    DPY_CHW*2
+    DG_TOP(2)
+    DG_ROWS(2)/2
+    4
+    DG_COLS(4)
+    DG_ROWS(4)
+    DPY_PITCH*4
+    DPY_CHW*4
+    DG_TOP(4)
+    DG_ROWS(4)/2
+    0d8
+    DG_COLS(0d8)
+    DG_ROWS(0d8)
+    DPY_PITCH*0d8
+    DPY_CHW*0d8
+    DG_TOP(0d8)
+    DG_ROWS(0d8)/2
+    assert . - dgTab == 0d28, "dgTab holds 7 words a size"
+    assert DPY_LEFT > 0d8, "the margin is wider than size 3's step, for the bar"
+
+// dsTab -- a character's entry, by ASCII code.
+// A glyph's entry is its set in bits 0300 (0100 set 1, 0200 set 2, 0 either) and its
+// code in 077.
+// Any other entry has the sign bit, so a walk tells a glyph with one skip, and a kind,
+// 0 a down arrow and the octal code, 1 TAB, 2 CR, 3 LF, 4 the grave over a space.
+dsTab,
+    table 11, 0400000    // 000-010
+    0400001              // 011 TAB
+    0400003              // 012 LF
+    table 2, 0400000     // 013-014
+    0400002              // 015 CR
+    table 22, 0400000    // 016-037
+    040                  // 040 space, either set
+    0141                 // 041 !
+    0142                 // 042 quote
+    0143                 // 043 #
+    0144                 // 044 $
+    0145                 // 045 %
+    0146                 // 046 &
+    0147                 // 047 '
+    0150                 // 050 (
+    0151                 // 051 )
+    0152                 // 052 *
+    0153                 // 053 +
+    0154                 // 054 ,
+    0155                 // 055 -
+    0156                 // 056 .
+    0157                 // 057 slash
+    0160                 // 060 0
+    0161                 // 061 1
+    0162                 // 062 2
+    0163                 // 063 3
+    0164                 // 064 4
+    0165                 // 065 5
+    0166                 // 066 6
+    0167                 // 067 7
+    0170                 // 070 8
+    0171                 // 071 9
+    0172                 // 072 :
+    0173                 // 073 ;
+    0174                 // 074 <
+    0175                 // 075 =
+    0176                 // 076 >
+    0177                 // 077 ?
+    0400000              // 100
+    0101                 // 101 A
+    0102                 // 102 B
+    0103                 // 103 C
+    0104                 // 104 D
+    0105                 // 105 E
+    0106                 // 106 F
+    0107                 // 107 G
+    0110                 // 110 H
+    0111                 // 111 I
+    0112                 // 112 J
+    0113                 // 113 K
+    0114                 // 114 L
+    0115                 // 115 M
+    0116                 // 116 N
+    0117                 // 117 O
+    0120                 // 120 P
+    0121                 // 121 Q
+    0122                 // 122 R
+    0123                 // 123 S
+    0124                 // 124 T
+    0125                 // 125 U
+    0126                 // 126 V
+    0127                 // 127 W
+    0130                 // 130 X
+    0131                 // 131 Y
+    0132                 // 132 Z
+    0253                 // 133 [
+    0252                 // 134 backslash
+    0254                 // 135 ]
+    0246                 // 136 up arrow (1965 ASCII)
+    0247                 // 137 left arrow (1965 ASCII)
+    0400004              // 140 grave, an accent over a space
+    0201                 // 141 a
+    0202                 // 142 b
+    0203                 // 143 c
+    0204                 // 144 d
+    0205                 // 145 e
+    0206                 // 146 f
+    0207                 // 147 g
+    0210                 // 150 h
+    0211                 // 151 i
+    0212                 // 152 j
+    0213                 // 153 k
+    0214                 // 154 l
+    0215                 // 155 m
+    0216                 // 156 n
+    0217                 // 157 o
+    0220                 // 160 p
+    0221                 // 161 q
+    0222                 // 162 r
+    0223                 // 163 s
+    0224                 // 164 t
+    0225                 // 165 u
+    0226                 // 166 v
+    0227                 // 167 w
+    0230                 // 170 x
+    0231                 // 171 y
+    0232                 // 172 z
+    0255                 // 173 {
+    0262                 // 174 |
+    0256                 // 175 }
+    0243                 // 176 ~
+    0400000              // 177
+    assert . - dsTab == 0200, "the display's table is 128 words"
+    assert . <= 010000, "the display's tables end in bank 13"

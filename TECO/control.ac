@@ -1,0 +1,954 @@
+// control.ac -- macros, iterations, tags and conditionals.
+// It holds M, < > and ;, : alone, !tag! and O, the " tests and ', and the
+// skip, which reads the source without acting, to pass over commands and
+// their text arguments.
+//
+// A macro runs in place; its source is its q-register block, held while it
+// runs (qreg.ac), and its frame keeps the caller's source and open
+// iterations.
+// The argument state is not saved, so a macro takes the caller's argument
+// and leaves its value to the caller, as in the surviving PDP-6 TECO binary,
+// where 5MA with A holding = types 5.
+// An iteration's frame keeps the index after its < and the passes its count
+// leaves; the iterations a source has open are itDepth, and > ; : and O act
+// only on the current source's.
+// A false " test, n;, : and O skip forward; running off the source's end
+// while skipping is an error, as in the surviving binary.
+//
+// Handlers are entered by jmp from the dispatch (interp.ac) and end by jmp
+// rsLoop; the routines are entered by jsp from bank 0 with the extend
+// window open and return by jmp i.
+// The file goes in bank 0; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, interp.ac, expr.ac (COPY3), qreg.ac,
+// edit.ac (scanTo), search.ac (srFail), and csPos and csBase in bank 1.
+
+// The skip looks for the > that ends the iteration it is in, the ' that ends
+// the test, the tag O names, or, for O's check, the position skEnd, noting
+// the iteration the tag is in.
+#define MD_GT        1
+#define MD_QT        2
+#define MD_TAG       3
+#define MD_TO        4
+
+local cmB, cmP, cmIn, cmNum, cmK, cmL, cmD, cmMore, cmMin, cmNx, mrX, mrL, mrM, \
+    arX, arCs, smX, smF, smL, smI, smM, \
+    smP, smQ, gtP, itExit, smN, cqC, cqT, cqF, cqG, cqL, cqN, cqE, cqC1, \
+    cqZero, cqNeg, coPop, coChk, coGo, coP, coErr, otD, otTo, \
+    skX, skC, skL, skRd, skDig, skCol, skUp, skUpI, skSrch, skTxt, \
+    skI, skO, skX1, skTag, skTg, skCmp, skE, skE2, skName, skNameV, skQ, \
+    skAp, skLt, skLt2, skGt, skVal, skV, skNot, skClr, skTo, skEndC, skDone, \
+    skQD, skHv, skUpF, skColF, skTL, skTP, skK, skA, skB, skC1, \
+    skDel, nxX, nxOut, mrI, ltNone, ltKind, gtC, gtQ, gtT, gtDec, gtBor, gtTst, \
+    gtBack, smNas, smSni, cqNaq, cqIqc
+
+// cM -- Mi, run register i's text as commands.
+// A number, or an undefined register's 0, runs as its decimal digits, as G
+// inserts them; in the surviving PDP-6 TECO binary 5UA MA2+2= types 54, the
+// 5 typed on into the 2.
+// Leaves the argument state to the macro.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cM, jsp qName
+    lac i qRec
+    SKIP_NEXT_IF_SAME [QK_TEXT]
+    jmp cmNum
+// cmTx -- run the text of register qRec.
+// The second set's Mq comes in here (qreg11.ac).
+// Entered by jmp, ends by jmp rsLoop.
+cmTx, lac qRec
+    add [QR_BLK]
+    dac cmP
+    lac i cmP
+    dac cmB
+    law MACRO_WORDS
+    lia
+    jsp pdlRoom
+    lio srcBlk
+    jsp push
+    lio srcPos
+    jsp push
+    lio srcLen
+    jsp push
+    lio itDepth
+    jsp push
+    lio [FR_MACRO]
+    jsp push
+    // an error inside shows the command string through this M's name
+    lac srcBlk
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cmIn
+    lac srcPos
+    sub [1]
+    dac i [csPos:1]
+cmIn, lio cmB
+    jsp qHold
+    dio srcBlk
+    jsp setArr
+    lac cmB
+    add [1]
+    dac cmP
+    lac i cmP
+    dac srcLen
+    dzm srcPos
+    dzm itDepth
+    jmp rsLoop
+    // the digits as cDig takes them, the minus sign as an operator
+cmNum, jsp qGetNum
+    jsp fmtNum
+    lac numLen
+    cma
+    dac cmK
+    lac [numBuf]
+    dac cmP
+cmL, lac i cmP
+    SKIP_NEXT_IF_DIFFERENT [055]
+    jmp cmMin
+    sub [CH_ZERO]
+    dac cmD
+    lac inNum
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cmMore
+    dzm num
+    dzm num+1
+    dzm num+2
+    law 1
+    dac inNum
+cmMore, COPY3(num, ra)
+    dzm rb
+    dzm rb+1
+    law 0d10
+    dac rb+2
+    jsp imul
+    lac cmD
+    dac rb+2
+    jsp add36
+    COPY3(ra, num)
+    jmp cmNx
+cmMin, dac op
+cmNx, idx cmP
+    isp cmK
+    jmp cmL
+    jmp rsLoop
+
+// mRet -- end the running macro, dropping the frames it left open,
+// iterations and parentheses, letting its block go, and bringing its
+// caller's source back.
+// In the second set, mRet11 (qreg11.ac) then ends the macro's local
+// registers and points the trace at the caller.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from bank 14 too, with the extend window open.
+// Called via jsp.
+mRet, dac mrX
+mrL, jsp pdlKind
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp err                 // no frame, which cannot be inside a macro
+    SKIP_NEXT_IF_DIFFERENT [FR_MACRO]
+    jmp mrM
+    SKIP_NEXT_IF_DIFFERENT [FR_ITER]
+    jmp mrI
+    lac pdlP
+    sub [PAREN_WORDS]
+    dac pdlP
+    jmp mrL
+mrI, lac pdlP
+    sub [ITER_WORDS]
+    dac pdlP
+    jmp mrL
+mrM, lio srcBlk
+    jsp qUnhold
+    jsp pop                 // the kind
+    jsp pop
+    dio itDepth
+    jsp pop
+    dio srcLen
+    jsp pop
+    dio srcPos
+    jsp pop
+    dio srcBlk
+    jsp setArr
+    lac i [tSet:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [mRet11:EX_BANK]
+    jmp i mrX
+
+// setArr -- set srcArr to where the source's characters start, after a
+// block's two header words, or the command string's.
+// srcBlk is the source's block, 0 for the command string.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+setArr, dac arX
+    lac srcBlk
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp arCs
+    add [2]
+    dac srcArr
+    jmp i arX
+arCs, lac i [csBase:1]
+    dac srcArr
+    jmp i arX
+
+// srcMoved -- make the running source, and every macro frame's caller,
+// follow a held block that compaction (qCompact) has moved.
+// mvFrom is where the block was, mvTo where it is.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+srcMoved, dac smX
+    lac srcBlk
+    SKIP_NEXT_IF_SAME mvFrom
+    jmp smF
+    lac mvTo
+    dac srcBlk
+    add [2]
+    dac srcArr
+smF, lac pdlP
+    dac smP
+smL, lac smP
+    sub [PDL_BASE]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i smX
+    lac smP
+    sub [1]
+    dac smQ
+    lac i smQ               // the frame's kind, on top of it
+    SKIP_NEXT_IF_DIFFERENT [FR_MACRO]
+    jmp smM
+    SKIP_NEXT_IF_DIFFERENT [FR_ITER]
+    jmp smI
+    lac smP
+    sub [PAREN_WORDS]
+    dac smP
+    jmp smL
+smI, lac smP
+    sub [ITER_WORDS]
+    dac smP
+    jmp smL
+smM, lac smP
+    sub [MACRO_WORDS]
+    dac smP                 // its first word, the caller's block
+    lac i smP
+    SKIP_NEXT_IF_SAME mvFrom
+    jmp smL
+    lac mvTo
+    dac i smP
+    jmp smL
+
+// cLt -- <, start an iteration; > comes back to here.
+// n< runs it n times (the surviving PDP-6 TECO binary's count; the
+// memo's < takes none).
+// With n 0 it runs not at all, with a negative n without end, as the
+// surviving binary's -1<; of m,n the n counts.
+// Reads n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cLt, law ITER_WORDS
+    lia
+    jsp pdlRoom
+    lio srcPos
+    jsp push
+    lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ltNone
+    lac val
+    and [04000]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ltNone
+    lio val
+    jsp push
+    lio val+1
+    jsp push
+    lio val+2
+    jsp push
+    jmp ltKind
+ltNone, lio [ITER_NONE]
+    jsp push
+    jsp push
+    jsp push
+ltKind, lio [FR_ITER]
+    jsp push
+    idx itDepth
+    jsp clrArgs
+    lac pdlP                // a count of 0 goes past the > (ITER_NONE is not 0)
+    sub [4]
+    dac gtC
+    lac i gtC
+    dac gtT
+    idx gtC
+    lac i gtC
+    ior gtT
+    dac gtT
+    idx gtC
+    lac i gtC
+    ior gtT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp itExit
+    jmp rsLoop
+
+// cGt -- >, count one pass fewer to run and go back to the character
+// after the iteration's <, or, the count spent, on past the > with the frame
+// dropped.
+// With no iteration open in this source, or a parenthesis open inside it,
+// it is an error.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cGt, lac itDepth
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp err
+    jsp pdlKind
+    SKIP_NEXT_IF_SAME [FR_ITER]
+    jmp err
+    jsp clrArgs
+    lac pdlP
+    sub [ITER_WORDS]
+    dac gtP                 // the index after <
+    add [1]
+    dac gtC                 // the count's high word
+    lac i gtC
+    and [ITER_NONE]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gtBack
+    lac gtC
+    add [2]
+    dac gtQ                 // its low word; the count is above 0
+gtDec, lac i gtQ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gtBor
+    sub [1]
+    dac i gtQ
+    jmp gtTst
+gtBor, law 07777
+    dac i gtQ
+    lac gtQ
+    sub [1]
+    dac gtQ
+    jmp gtDec
+gtTst, lac i gtC
+    dac gtT
+    lac gtC
+    add [1]
+    dac gtQ
+    lac i gtQ
+    ior gtT
+    dac gtT
+    idx gtQ
+    lac i gtQ
+    ior gtT
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gtBack
+    lac gtP
+    dac pdlP
+    lac itDepth
+    sub [1]
+    dac itDepth
+    jmp rsLoop
+gtBack, lac i gtP
+    dac srcPos
+    jmp rsLoop
+
+// cSemi -- n;, with n 0 or more leave the iteration, past its >;
+// with n negative do nothing.
+// With no n, or outside an iteration, it is an error, as the surviving
+// PDP-6 TECO binary's SNI? for 5; and -1; alike.
+// Reads n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cSemi, lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smNas
+    lac itDepth
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smSni
+    lac val
+    and [04000]
+    dac smN
+    jsp clrArgs
+    lac smN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rsLoop
+// itExit -- leave the iteration open in this source, skipping past its >
+// and dropping its frame.
+// Entered by jmp, ends by jmp rsLoop.
+itExit, jsp pdlKind
+    SKIP_NEXT_IF_SAME [FR_ITER]
+    jmp err
+    law MD_GT
+    dac skMode
+    jsp skip
+    lac pdlP
+    sub [ITER_WORDS]
+    dac pdlP
+    lac itDepth
+    sub [1]
+    dac itDepth
+    jmp rsLoop
+
+// cColIt -- : with no search after it, leave the iteration as n;
+// does when the last search failed, otherwise do nothing.
+// Outside an iteration, a failed search makes it an error.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cColIt, lac srFail
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rsLoop
+    lac itDepth
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp err
+    jsp clrArgs
+    jmp itExit
+
+// cQuote -- n"X, skip to the matching ' unless the test holds for n.
+// The tests are G, n above 0; L, below 0; N, not 0; E, 0; and C, n the code
+// of a letter, a digit, . $ or %.
+// A letter is an upper-case one, as in the surviving PDP-6 TECO binary,
+// where 97"C does not hold.
+// With no n, or another letter, it is an error.
+// Reads n from have and val.
+// No return value.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cQuote, lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cqNaq
+    COPY3(val, ra)
+    jsp clrArgs
+    jsp nextCh
+    dio cqC
+    lac cqC
+    and [0137]              // lower case as upper
+    dac cqC
+    // cqZero is 0 when n is 0; cqNeg not 0 when n is below 0
+    lac ra
+    ior ra+1
+    ior ra+2
+    dac cqZero
+    lac ra
+    and [04000]
+    dac cqNeg
+    lac cqC
+    SKIP_NEXT_IF_DIFFERENT [0107]
+    jmp cqG
+    SKIP_NEXT_IF_DIFFERENT [0114]
+    jmp cqL
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp cqN
+    SKIP_NEXT_IF_DIFFERENT [0105]
+    jmp cqE
+    SKIP_NEXT_IF_DIFFERENT [0103]
+    jmp cqC1
+    jmp cqIqc
+cqG, lac cqNeg
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cqF
+cqN, lac cqZero
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cqF
+    jmp rsLoop
+cqL, lac cqNeg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cqF
+    jmp rsLoop
+cqE, lac cqZero
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cqF
+    jmp rsLoop
+    // "C holds for a code, 0 to 127, in the set
+cqC1, lac ra
+    ior ra+1
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cqF
+    lac ra+2
+    dac cqT
+    sub [0200]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cqF
+    lac cqT
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp rsLoop
+    SKIP_NEXT_IF_DIFFERENT [CH_DOLLAR]
+    jmp rsLoop
+    SKIP_NEXT_IF_DIFFERENT [CH_PCT]
+    jmp rsLoop
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cqF
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rsLoop              // a digit
+    lac cqT
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cqF
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rsLoop              // a letter
+    // the test is false
+cqF, law MD_QT
+    dac skMode
+    jsp skip
+    jmp rsLoop
+
+// cExcl -- !tag!, a tag, which does nothing where it stands; the text
+// to the next ! is passed.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cExcl, lio [CH_EXCL]
+    jsp scanTo
+    add srcPos
+    add [1]
+    dac srcPos
+    jmp rsLoop
+
+// cO -- Otag$, go on from just after !tag! in this source, looked for
+// from its start by the skip, so a ! in a text argument is no tag.
+// Leaving iterations drops their frames; going into one, or into another
+// iteration at the same depth, is an error, as is a tag that is not there.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cO, lio [CH_ESC]
+    jsp scanTo
+    dac otL
+    lac srcPos
+    dac otP
+    add otL
+    add [1]
+    dac otEnd               // past the ALT MODE, for an error's ?
+    dac srcPos
+// coRun -- go to the tag of otL characters at otP, srcPos and otEnd past the
+// O's text.
+// The second set's O and nO come in here (control11.ac).
+// Entered by jmp, ends by jmp rsLoop.
+coRun, jsp clrArgs
+    law MD_TAG
+    dac skMode
+    dzm srcPos
+    jsp skip
+    lac skLD
+    dac otD                 // the iterations open at the tag
+    lac srcPos
+    dac otTo
+    lac itDepth
+    sub otD
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp coErr               // into an iteration
+coPop, lac itDepth
+    sub otD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp coChk
+    jsp pdlKind
+    SKIP_NEXT_IF_SAME [FR_ITER]
+    jmp coErr
+    lac pdlP
+    sub [ITER_WORDS]
+    dac pdlP
+    lac itDepth
+    sub [1]
+    dac itDepth
+    jmp coPop
+    // the iteration still open must be the one the tag is in, its < being
+    // the last one before the tag that opened depth otD
+coChk, lac otD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp coGo
+    jsp pdlKind
+    SKIP_NEXT_IF_SAME [FR_ITER]
+    jmp coErr
+    law MD_TO
+    dac skMode
+    lac otTo
+    dac skEnd
+    lac otD
+    dac skWant
+    dzm skOpen
+    dzm srcPos
+    jsp skip
+    lac pdlP
+    sub [ITER_WORDS]
+    dac coP
+    lac i coP
+    SKIP_NEXT_IF_SAME skOpen
+    jmp coErr
+coGo, lac otTo
+    dac srcPos
+    jmp rsLoop
+coErr, lac otEnd
+    dac srcPos
+    law EC_TAG
+    dac eCode
+    jmp err
+    // the second set's names for ; and " errors
+smNas, ERR0(EC_NAS)
+smSni, ERR0(EC_SNI)
+cqNaq, ERR0(EC_NAQ)
+cqIqc, ERR0(EC_IQC)
+
+// skip -- read the source from srcPos without acting, to what skMode
+// names (MD_GT, MD_QT, MD_TAG or MD_TO), and leave srcPos past it.
+// Each command's text argument is passed whole, these being I's to ALT
+// MODE, and nI's none, told apart by whether a value comes before the I, as
+// the interpreter has one (skHv); up arrow I's between its delimiters; a
+// search's to ALT MODE, or after up arrow between two of its first
+// character; a tag's to the next !; O's to ALT MODE; ER, EF and ED's name to
+// ALT MODE, EN's two.
+// A register's name after Q U X G M and %, and a test's letter after ", are
+// passed too, and VW's W, VW being a value.
+// Running off the source's end is an error (err), as in the surviving PDP-6
+// TECO binary.
+// skMode is the target; MD_TAG compares with otP and otL, MD_TO reads skEnd
+// and skWant.
+// skLD is the iterations open at the end, counted from where the skip began;
+// MD_TO sets skOpen.
+// Does not preserve AC or IO.
+// Called via jsp.
+skip, dac skX
+    lac i [tSet:EX_BANK]    // the second set's skip (control11.ac)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [skip11:P11_BANK]
+    dzm skLD
+    dzm skQD
+    dzm skHv
+    dzm skUpF
+    dzm skColF
+skL, lac skMode
+    SKIP_NEXT_IF_DIFFERENT [MD_TO]
+    jmp skTo
+skRd, lac srcPos
+    sub srcLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp skEndC
+    jsp skNext
+    // blanks change nothing
+    SKIP_NEXT_IF_DIFFERENT [040]
+    jmp skL
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp skL
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp skL
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp skL
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp skL
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    jmp skCol
+    SKIP_NEXT_IF_DIFFERENT [CH_UPARROW]
+    jmp skUp
+    SKIP_NEXT_IF_DIFFERENT [0123]
+    jmp skSrch
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp skSrch
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp skSrch
+    SKIP_NEXT_IF_DIFFERENT [0111]
+    jmp skI
+    SKIP_NEXT_IF_DIFFERENT [0117]
+    jmp skO
+    SKIP_NEXT_IF_DIFFERENT [CH_EXCL]
+    jmp skTag
+    SKIP_NEXT_IF_DIFFERENT [0105]
+    jmp skE
+    SKIP_NEXT_IF_DIFFERENT [0121]
+    jmp skNameV
+    SKIP_NEXT_IF_DIFFERENT [CH_PCT]
+    jmp skNameV
+    SKIP_NEXT_IF_DIFFERENT [0125]
+    jmp skName
+    SKIP_NEXT_IF_DIFFERENT [0130]
+    jmp skName
+    SKIP_NEXT_IF_DIFFERENT [0107]
+    jmp skName
+    SKIP_NEXT_IF_DIFFERENT [0115]
+    jmp skName
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp skQ
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp skAp
+    SKIP_NEXT_IF_DIFFERENT [CH_LT]
+    jmp skLt
+    SKIP_NEXT_IF_DIFFERENT [CH_GT]
+    jmp skGt
+    SKIP_NEXT_IF_DIFFERENT [0126]
+    jmp skV
+    // a value is ended by ) B Z . H and /@, and kept by A and the operators
+    SKIP_NEXT_IF_DIFFERENT [CH_RPAR]
+    jmp skVal
+    SKIP_NEXT_IF_DIFFERENT [0102]
+    jmp skVal
+    SKIP_NEXT_IF_DIFFERENT [0132]
+    jmp skVal
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp skVal
+    SKIP_NEXT_IF_DIFFERENT [0110]
+    jmp skVal
+    SKIP_NEXT_IF_DIFFERENT [CH_NUL]
+    jmp skVal
+    SKIP_NEXT_IF_DIFFERENT [0101]
+    jmp skClr
+    SKIP_NEXT_IF_DIFFERENT [053]
+    jmp skClr
+    SKIP_NEXT_IF_DIFFERENT [055]
+    jmp skClr
+    SKIP_NEXT_IF_DIFFERENT [052]
+    jmp skClr
+    SKIP_NEXT_IF_DIFFERENT [057]
+    jmp skClr
+    SKIP_NEXT_IF_DIFFERENT [CH_AMP]
+    jmp skClr
+    sub [CH_ZERO]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp skNot
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp skDig
+    // anything else ends any value
+skNot, dzm skHv
+    jmp skClr
+skVal, law 1
+    dac skHv
+    jmp skClr
+    // V has no value; VW, its W passed, has one (display.ac)
+skV, jsp peekCh
+    SKIP_NEXT_IF_SAME [0127]
+    jmp skNot
+    idx srcPos
+    jmp skVal
+    // a digit is a value, and a modifier waits past it, as srAhead
+skDig, law 1
+    dac skHv
+    jmp skL
+skCol, dzm skHv
+    law 1
+    dac skColF
+    jmp skL
+    // up arrow is up arrow I and its delimited text, or a search's modifier
+skUp, dzm skHv
+    jsp peekCh
+    SKIP_NEXT_IF_DIFFERENT [0111]
+    jmp skUpI
+    law 1
+    dac skUpF
+    jmp skL
+skUpI, idx srcPos
+    jsp nextCh
+    jmp skDel
+    // a search has a value when : came first
+skSrch, lac skColF
+    dac skHv
+    lac skUpF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp skTxt
+    jsp nextCh
+    jmp skDel
+    // I with a value is nI; else its text is passed
+skI, lac skHv
+    dzm skHv
+    SKIP_NEXT_IF_AC_ZERO
+    jmp skClr
+skO, dzm skHv
+skTxt, lio [CH_ESC]
+    // the text to the next IO, and it
+skDel, jsp scanTo
+    add srcPos
+    add [1]
+    dac srcPos
+    jmp skClr
+    // a tag is passed, or for O compared with O's
+skTag, lac skMode
+    SKIP_NEXT_IF_DIFFERENT [MD_TAG]
+    jmp skTg
+    lio [CH_EXCL]
+    jmp skDel
+skTg, lio [CH_EXCL]
+    jsp scanTo
+    dac skTL
+    lac srcPos
+    dac skTP
+    lac skTL
+    add srcPos
+    add [1]
+    dac srcPos
+    lac skTL
+    sub otL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp skClr
+    lac skTL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp skDone              // both empty
+    cma
+    dac skK
+    lac skTP
+    dac skA
+    lac otP
+    dac skB
+skCmp, lio skA
+    jsp srcGet
+    dio skC1
+    lio skB
+    jsp srcGet
+    lai
+    SKIP_NEXT_IF_SAME skC1
+    jmp skClr
+    idx skA
+    idx skB
+    isp skK
+    jmp skCmp
+    jmp skDone
+    // E and its letter, where ER EF ED take a name, EN two
+skE, dzm skHv
+    jsp skNext
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp skTxt
+    SKIP_NEXT_IF_DIFFERENT [0106]
+    jmp skTxt
+    SKIP_NEXT_IF_DIFFERENT [0104]
+    jmp skTxt
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp skE2
+    jmp skClr
+skE2, lio [CH_ESC]
+    jsp scanTo
+    add srcPos
+    add [1]
+    dac srcPos
+    jmp skTxt
+    // a register's name, after Q and % a value, after U X G M none
+skNameV, law 1
+    dac skHv
+    jsp nextCh
+    jmp skClr
+skName, dzm skHv
+    jsp nextCh
+    jmp skClr
+    // " and its letter open a test; ' ends one
+skQ, dzm skHv
+    jsp nextCh
+    idx skQD
+    jmp skClr
+skAp, lac skQD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp skX1
+    sub [1]
+    dac skQD
+    jmp skClr
+skX1, lac skMode
+    SKIP_NEXT_IF_DIFFERENT [MD_QT]
+    jmp skDone
+    jmp skClr
+    // < and > open and end iterations
+skLt, dzm skHv
+    idx skLD
+    lac skMode
+    SKIP_NEXT_IF_SAME [MD_TO]
+    jmp skClr
+    lac skLD
+    SKIP_NEXT_IF_SAME skWant
+    jmp skClr
+    lac srcPos
+    dac skOpen
+    jmp skClr
+skGt, dzm skHv
+    lac skLD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp skLt2
+    sub [1]
+    dac skLD
+    jmp skClr
+skLt2, lac skMode
+    SKIP_NEXT_IF_DIFFERENT [MD_GT]
+    jmp skDone
+    // a modifier lasts only past digits, : and up arrow, as srAhead
+skClr, dzm skUpF
+    dzm skColF
+    jmp skL
+    // O's check goes up to the position after its tag
+skTo, lac srcPos
+    sub skEnd
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp skDone
+    jmp skRd
+    // the end of the source is O's error (coErr) for O, else err
+skEndC, lac skMode
+    SKIP_NEXT_IF_DIFFERENT [MD_TAG]
+    jmp coErr
+    jmp err
+skDone, jmp i skX
+skOut, jmp i skX            // skip11's return, from bank 14
+
+// skNext -- read the source's next character, a lower-case letter as its
+// upper case; running off the end is an error (nextCh).
+// Has no arguments.
+// AC is the character.
+// AC is the result, IO is not preserved.
+// Reached from bank 14 too, with the extend window open.
+// Called via jsp.
+skNext, dac nxX
+    jsp nextCh
+    lai
+    and [0177]
+    dac skC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp nxOut
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp nxOut
+    lac skC
+    sub [040]
+    dac skC
+nxOut, lac skC
+    jmp i nxX
+
+cmB, 0                      // M's block
+cmP, 0
+cmK, 0
+cmD, 0
+mrX, 0                      // the return addresses
+arX, 0
+smX, 0
+skX, 0
+nxX, 0
+smP, 0
+smQ, 0
+smN, 0
+gtP, 0                      // < and >, the iteration's frame and its count
+gtC, 0
+gtQ, 0
+gtT, 0
+cqC, 0
+cqT, 0
+cqZero, 0
+cqNeg, 0
+coP, 0
+otD, 0                      // O's tag, the iterations open at it
+otTo, 0                     //   the position after it
+skC, 0
+skQD, 0                     // the skip's tests open,
+skHv, 0                     //   a value before the next command
+skUpF, 0                    //   up arrow before a search
+skColF, 0                   //   : before one
+skTL, 0
+skTP, 0
+skK, 0
+skA, 0
+skB, 0
+skC1, 0
+endloc
+
+skMode, 0                   // what the skip looks for, MD_GT ... MD_TO
+skEnd, 0                    // MD_TO's position
+skWant, 0                   //   the depth whose < it notes
+skOpen, 0                   //   and the position after that <
+itDepth, 0                  // iterations open in the running source
+mvFrom, 0                   // srcMoved's block, where it was
+mvTo, 0                     //   and where it is
+otP, 0                      // O's tag, its index and length
+otL, 0
+otEnd, 0                    //   and the position after the O command
+skLD, 0                     // the skip's iterations open at its end

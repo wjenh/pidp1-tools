@@ -1,0 +1,329 @@
+// data11.ac -- the second command set's data, at D11_DATA, bank 9's top 1,024 words,
+// taken from q-register text (teco.ah's QR_END).
+// It holds the set's dispatch, its error messages, VT100 mode's greeting, its search
+// string and the ^E constructs' table.
+// Nothing here is code, and every word is read through a full address
+// ([name:D11_BANK]), so it need not share bank 14 with the code that reads it.
+// Assembled after bank 14, with teco.ah and search11.ac's EK_ defines in force.
+// Every handler named is tagged with its bank.
+
+    assert . == D11_DATA-D11_BANK*010000, "the second set's data starts at D11_DATA"
+
+// The error messages, by code, EC_ILL first.
+// They are TECO C's, with a % where the argument goes.
+msgTab, mILL:D11_BANK
+    mUTC:D11_BANK
+    mPOP:D11_BANK
+    mDTB:D11_BANK
+    mSRH:D11_BANK
+    mNAC:D11_BANK
+    mNAE:D11_BANK
+    mNAU:D11_BANK
+    mIQN:D11_BANK
+    mIIA:D11_BANK
+    mILN:D11_BANK
+    mIRA:D11_BANK
+    mIEC:D11_BANK
+    mIFC:D11_BANK
+    mIUC:D11_BANK
+    mNAB:D11_BANK
+    mMEM:D11_BANK
+    mPDO:D11_BANK
+    mXAB:D11_BANK
+    mBNI:D11_BANK
+    mSNI:D11_BANK
+    mNAS:D11_BANK
+    mNAQ:D11_BANK
+    mIQC:D11_BANK
+    mTAG:D11_BANK
+    mMAP:D11_BANK
+    mUTM:D11_BANK
+    mNAP:D11_BANK
+    mPES:D11_BANK
+    mISA:D11_BANK
+    mICE:D11_BANK
+    mISS:D11_BANK
+    mSTL:D11_BANK
+    mNFI:D11_BANK
+    mNFO:D11_BANK
+    mOFO:D11_BANK
+    mYCA:D11_BANK
+    mNYA:D11_BANK
+    mIFN:D11_BANK
+    mDEV:D11_BANK
+    mNPA:D11_BANK
+    mFNF:D11_BANK
+    mFUL:D11_BANK
+    mWLO:D11_BANK
+    mFER:D11_BANK
+    mUNA:D11_BANK
+    assert . - msgTab == EC_LAST, "a message for every error code"
+mILL, ascii "ILL   Illegal command \042%\042"
+    0
+mUTC, ascii "UTC   Unterminated command"
+    0
+mPOP, ascii "POP   Attempt to move pointer off page with \042%\042"
+    0
+mDTB, ascii "DTB   Delete too big"
+    0
+mSRH, ascii "SRH   Search failure \042%\042"
+    0
+mNAC, ascii "NAC   No argument before ,"
+    0
+mNAE, ascii "NAE   No argument before ="
+    0
+mNAU, ascii "NAU   No argument before U"
+    0
+mIQN, ascii "IQN   Illegal Q-register name \042%\042"
+    0
+mIIA, ascii "IIA   Illegal insert argument"
+    0
+mILN, ascii "ILN   Illegal number"
+    0
+mIRA, ascii "IRA   Illegal radix argument to ^R"
+    0
+mIEC, ascii "IEC   Illegal character \042%\042 after E"
+    0
+mIFC, ascii "IFC   Illegal character \042%\042 after F"
+    0
+mIUC, ascii "IUC   Illegal character \042%\042 following ^"
+    0
+mNAB, ascii "NAB   No argument before ^_ "
+    0
+mMEM, ascii "MEM   Memory overflow"
+    0
+mPDO, ascii "PDO   Push-down list overflow"
+    0
+mXAB, ascii "XAB   Execution aborted"
+    0
+mBNI, ascii "BNI   > not in iteration"
+    0
+mSNI, ascii "SNI   ; not in iteration"
+    0
+mNAS, ascii "NAS   No argument before ;"
+    0
+mNAQ, ascii "NAQ   No argument before \042"
+    0
+mIQC, ascii "IQC   Illegal \042 character"
+    0
+mTAG, ascii "TAG   Missing tag !%!"
+    0
+mMAP, ascii "MAP   Missing '"
+    0
+mUTM, ascii "UTM   Unterminated macro"
+    0
+mNAP, ascii "NAP   No argument before )"
+    0
+mPES, ascii "PES   Attempt to pop an empty stack"
+    0
+mISA, ascii "ISA   Illegal search argument"
+    0
+mICE, ascii "ICE   Illegal ^E command in search argument"
+    0
+mISS, ascii "ISS   Illegal search string"
+    0
+mSTL, ascii "STL   String too long"
+    0
+mNFI, ascii "NFI   No file for input"
+    0
+mNFO, ascii "NFO   No file for output"
+    0
+mOFO, ascii "OFO   Output file already open"
+    0
+mYCA, ascii "YCA   Y command aborted"
+    0
+mNYA, ascii "NYA   Numeric argument with Y"
+    0
+mIFN, ascii "IFN   Illegal character \042%\042 in filename"
+    0
+mDEV, ascii "DEV   Invalid device"
+    0
+mNPA, ascii "NPA   Negative or 0 argument to P"
+    0
+// A library failure's messages, the code with the library's message as the argument.
+mFNF, ascii "FNF   %"
+    0
+mFUL, ascii "FUL   %"
+    0
+mWLO, ascii "WLO   %"
+    0
+mFER, ascii "FER   %"
+    0
+mUNA, ascii "DEV   %"
+    0
+
+// The code of each of the file system library's statuses, for err11 when a failure
+// left its message in errTxt (tapefile.ac's mtFail, which keeps the status in mfS).
+stCode, EC_FER              // FS_OK, never a failure
+    EC_UNA                  // FS_ENOUNIT
+    EC_UNA                  // FS_ENOMEDIUM
+    EC_WLO                  // FS_ELOCKED
+    EC_UNA                  // FS_EHALTED
+    EC_UNA                  // FS_EBADBLOCK
+    EC_UNA                  // FS_EENDZONE
+    EC_FER                  // FS_ENOFS, BAD DIRECTORY
+    EC_FER                  // FS_EFOREIGN
+    EC_FER                  // FS_ENAME
+    EC_FER                  // FS_EEXISTS
+    EC_FNF                  // FS_ENOTFOUND
+    EC_FUL                  // FS_EDIRFULL
+    EC_FUL                  // FS_ENOSPACE
+    EC_FER                  // FS_ERANGE
+    EC_FER                  // FS_EREADONLY
+    EC_FER                  // FS_EBADFD
+    EC_FER                  // FS_ESMALLBUF
+    EC_UNA                  // FS_ETIMEOUT
+    EC_UNA                  // FS_EXFER, DRUM FAILED
+    assert . - stCode == FS_EXFER+1, "a code for each of the library's statuses"
+
+// The second set's dispatch, a handler for each ASCII code, a lower-case letter looked up
+// as its upper case.
+// A command both sets share is bank 0's (or bank 1's) handler.
+// cBad is ILL, for a command not built as for one TECO-11 lacks.
+dTab11,
+    cBad:0                  // 000 NUL, ILL
+    c11CtA:P11_BANK         // 001 ^A a message
+    c11CB:P11_BANK          // 002 ^B the date
+    c11CtC:P11_BANK         // 003 ^C stop, or leave
+    c11CD:P11_BANK          // 004 ^D decimal
+    c11CE:P11_BANK          // 005 ^E the form feed flag
+    cSlX:EX_BANK            // 006 ^F the test word, n^F a sense switch
+    cBad:0                  // 007 ^G
+    cAt:0                   // 010 ^H the time, TECO's running time, as /@
+    c11Tab:P11_BANK         // 011 TAB an insert
+    cIgn:0                  // 012 LF
+    cIgn:0                  // 013 VT
+    cIgn:0                  // 014 FF
+    cIgn:0                  // 015 CR
+    c11CN:P11_BANK          // 016 ^N the end of file flag
+    c11CO:P11_BANK          // 017 ^O octal
+    cBad:0                  // 020 ^P
+    cBad:0                  // 021 ^Q
+    c11CR:P11_BANK          // 022 ^R the radix
+    c11CS:P11_BANK          // 023 ^S the last length, negative
+    c11CtT:P11_BANK         // 024 ^T a character in or out
+    c11CtU:EX_BANK          // 025 ^U text into a register
+    cBad:0                  // 026 ^V
+    cBad:0                  // 027 ^W
+    c11CX:P11_BANK          // 030 ^X the search mode flag
+    c11CY:P11_BANK          // 031 ^Y .+^S,.
+    c11CZ:P11_BANK          // 032 ^Z q-register space
+    c11Esc:P11_BANK         // 033 ESC, and $$
+    cBad:0                  // 034
+    cBad:0                  // 035
+    c11CC:P11_BANK          // 036 ^^x the code of x
+    c11CU:P11_BANK          // 037 ^_ the complement
+    cIgn:0                  // 040 space
+    cExcl:0                 // 041 ! a tag
+    c11Qt:P11_BANK          // 042 " a conditional
+    cOp:0                   // 043 # or
+    cBad:0                  // 044 $
+    c11Pct:EX_BANK          // 045 %
+    cOp:0                   // 046 &
+    cIgn:0                  // 047 ' the end of a conditional
+    cLp:0                   // 050 (
+    cRp:0                   // 051 )
+    cOp:0                   // 052 *
+    cOp:0                   // 053 +
+    cComma:0                // 054 ,
+    cOp:0                   // 055 -
+    cDot:0                  // 056 .
+    cOp:0                   // 057 /
+    table 012, cDig:0       // 060-071 the digits
+    c11Col:P11_BANK         // 072 : a modifier
+    c11Sm:P11_BANK          // 073 ;
+    c11Lt:P11_BANK          // 074 <
+    c11Eq:P11_BANK          // 075 = == ===
+    cGt:0                   // 076 >
+    c11Trc:P11_BANK         // 077 ? the trace
+    c11At:P11_BANK          // 0100 @ a modifier
+    c11A:P11_BANK           // 0101 A
+    cB:0                    // 0102 B
+    cC:0                    // 0103 C
+    c11D:P11_BANK           // 0104 D and m,nD
+    c11E:P11_BANK           // 0105 E and its letter
+    c11F:P11_BANK           // 0106 F and its letter
+    c11G:EX_BANK            // 0107 G
+    cH:0                    // 0110 H
+    c11I:P11_BANK           // 0111 I and nI
+    cJ:0                    // 0112 J
+    cK:0                    // 0113 K
+    cL:0                    // 0114 L
+    c11M:EX_BANK            // 0115 M
+    c11N:P11_BANK           // 0116 N
+    c11O:P11_BANK           // 0117 O
+    fiP:EX_BANK             // 0120 P
+    c11Q:EX_BANK            // 0121 Q
+    cR:0                    // 0122 R
+    c11S:P11_BANK           // 0123 S
+    cT:0                    // 0124 T
+    c11U:EX_BANK            // 0125 U
+    c11V:P11_BANK           // 0126 V
+    c11W:P11_BANK           // 0127 W
+    c11X:EX_BANK            // 0130 X
+    fiY:EX_BANK             // 0131 Y
+    cZ:0                    // 0132 Z
+    c11Lb:EX_BANK           // 0133 [
+    c11Bs:P11_BANK          // 0134 backslash
+    c11Rb:EX_BANK           // 0135 ]
+    c11Car:P11_BANK         // 0136 ^ the caret form
+    c11Un:P11_BANK          // 0137 _
+    table 034, cBad:0       // 0140-0173
+    c11Bar:P11_BANK         // 0174 | the else
+    table 3, cBad:0         // 0175-0177
+    assert . - dTab11 == 0200, "the dispatch table is 128 words"
+
+// E's letters, A to Z (interp11.ac's c11E), each one's handler, c11Ec for IEC.
+eLet, c11Ec:P11_BANK         // A
+    fiEB:EX_BANK            // B
+    fiEC:EX_BANK            // C
+    c11ED:P11_BANK          // D
+    c11Ec:P11_BANK          // E
+    fiEF:EX_BANK            // F
+    fiEG:EX_BANK            // G
+    c11EH:P11_BANK          // H
+    fiEI:EX_BANK            // I
+    c11EJ:P11_BANK          // J
+    fiEK:EX_BANK            // K
+    table 2, c11Ec:P11_BANK // L M
+    fiEN:EX_BANK            // N
+    c11EO:P11_BANK          // O
+    table 2, c11Ec:P11_BANK // P Q
+    fiER:EX_BANK            // R
+    c11ES:P11_BANK          // S
+    c11ET:P11_BANK          // T
+    c11EU:P11_BANK          // U
+    c11EV:P11_BANK          // V
+    fiEW:EX_BANK            // W
+    fiEX:EX_BANK            // X
+    fiEY:EX_BANK            // Y
+    c11Ec:P11_BANK          // Z
+    assert . - eLet == 0d26, "an entry for each of A to Z"
+
+// What ^E and each letter A to X accepts; 0 is no construct, ICE.
+// Q and U are taken as sBld builds the string; M and the bracketed forms are TECO-10's.
+eTab, 6                     // A a letter
+    EK_SEP                  // B a separator, as ^S
+    EK_CLS                  // C a symbol constituent
+    1                       // D a digit
+    table 2, 0              // E F
+    EK_REG                  // G one of a register's characters
+    table 4, 0              // H I J K
+    EK_EOL                  // L a line's end, LF, VT or FF
+    table 5, 0              // M N O P Q
+    7                       // R a letter or a digit
+    EK_SP                   // S spaces and tabs
+    table 2, 0              // T U
+    4                       // V a lower-case letter
+    2                       // W an upper-case letter
+    EK_ANY                  // X any character
+    assert . - eTab == 0d24, "an entry for each of A to X"
+
+// The greeting's ending in VT100 mode, sense switch 2 (greeting.ac's tmHello).
+tmHiVt, ascii " VT100 mode"
+    0
+
+// The search string (search11.ac), sbLen characters, a character a word.
+sbBuf,
+    table SB_MAX, 0
+    assert . <= 010000, "the second set's data runs past bank 9"

@@ -1,0 +1,991 @@
+// expr.ac -- TECO's values, 36-bit two's complement, each value
+// three words of 12 bits, high first, so that every carry is a plain
+// positive add and the PDP-1's one's complement never sees a sign.
+// It holds the arithmetic on two such registers, ra and rb, the conversions
+// to and from an 18-bit count, and the decimal form that = types and G
+// inserts.
+//
+// Every routine is reached from bank 0 with the extend window open.
+// The file goes in bank 0; its data words follow its code.
+// Needs teco.ah and <AIDS/skipmacros.ah>, and err (interp.ac).
+//
+// mul36 and the decimal division use the hardware mul and div, so TECO
+// needs muldiv=on, as FOCAL does.
+
+// COPY3 -- the three words at s to d.
+#define COPY3(s,d) lac s; dac d; lac s+1; dac d+1; lac s+2; dac d+2
+
+// SHR12 -- AC, a positive value below 2^17, shifted right 12 places.
+#define SHR12 sar 9s; sar 3s
+
+local adX, adT, ngX, ngT, ngC, sbX, anX, muX, muR0, muS1, muS2, \
+    mp, mpR, mpX, mpY, mpT, mpU, mpLo, mpHi, dvX, dvSa, dvSb, dvN, dvM, dvR, \
+    dvK, dvTop, dvT, dvL, dvNoR, dvSign, tiX, tiNeg, tiBad, tiN, fiX, fiNeg, \
+    fiV, fiPos, dtX, d10c, dcX, d10In, fnX, fnK, fnL, fnDig, fnCp, fnP, fnQ, \
+    fnPos, imX, imS
+
+// add36 -- ra = ra + rb, modulo 2^36.
+// rb is unchanged.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+add36, dac adX
+    lac ra+2
+    add rb+2
+    dac adT
+    and [07777]
+    dac ra+2
+    lac adT
+    SHR12
+    add ra+1
+    add rb+1
+    dac adT
+    and [07777]
+    dac ra+1
+    lac adT
+    SHR12
+    add ra
+    add rb
+    and [07777]
+    dac ra
+    jmp i adX
+
+// neg36 -- ra = -ra, each part complemented, then 1 added.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+neg36, dac ngX
+    lac ra+2
+    xor [07777]
+    add [1]
+    dac ngT
+    and [07777]
+    dac ra+2
+    lac ngT
+    SHR12
+    dac ngC
+    lac ra+1
+    xor [07777]
+    add ngC
+    dac ngT
+    and [07777]
+    dac ra+1
+    lac ngT
+    SHR12
+    dac ngC
+    lac ra
+    xor [07777]
+    add ngC
+    and [07777]
+    dac ra
+    jmp i ngX
+
+// sub36 -- ra = ra - rb, as -(-ra + rb).
+// rb is unchanged.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+sub36, dac sbX
+    jsp neg36
+    jsp add36
+    jsp neg36
+    jmp i sbX
+
+// and36 -- ra = ra & rb.
+// rb is unchanged.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+and36, dac anX
+    lac ra
+    and rb
+    dac ra
+    lac ra+1
+    and rb+1
+    dac ra+1
+    lac ra+2
+    and rb+2
+    dac ra+2
+    jmp i anX
+
+// mul36 -- ra = ra * rb, the low 36 bits of the product.
+// rb is unchanged.
+// Does not preserve AC or IO.
+// Called via jsp.
+mul36, dac muX
+    // the six products of 12-bit parts that reach the low 36 bits, each at
+    // most 24 bits, are added by place
+    // place 0, and the carry of a0 b0 into place 1
+    lac ra+2
+    dac mpX
+    lac rb+2
+    dac mpY
+    jsp mp
+    lac mpLo
+    dac muR0
+    lac mpHi
+    dac muS1
+    // place 1, a1 b0 and a0 b1, their high parts into place 2
+    lac ra+1
+    dac mpX
+    jsp mp
+    lac muS1
+    add mpLo
+    dac muS1
+    lac mpHi
+    dac muS2
+    lac ra+2
+    dac mpX
+    lac rb+1
+    dac mpY
+    jsp mp
+    lac muS1
+    add mpLo
+    dac muS1
+    lac muS2
+    add mpHi
+    dac muS2
+    // place 2, the low parts of a2 b0, a1 b1, a0 b2
+    lac ra
+    dac mpX
+    lac rb+2
+    dac mpY
+    jsp mp
+    lac muS2
+    add mpLo
+    dac muS2
+    lac ra+1
+    dac mpX
+    lac rb+1
+    dac mpY
+    jsp mp
+    lac muS2
+    add mpLo
+    dac muS2
+    lac ra+2
+    dac mpX
+    lac rb
+    dac mpY
+    jsp mp
+    lac muS2
+    add mpLo
+    dac muS2
+    // the sums, every one below 2^15, carried upward
+    lac muS1
+    SHR12
+    add muS2
+    and [07777]
+    dac ra
+    lac muS1
+    and [07777]
+    dac ra+1
+    lac muR0
+    dac ra+2
+    jmp i muX
+
+// imul -- ra = ra * rb as PDP-6 TECO multiplies, the product's low 35 bits
+// with the true product's sign (the surviving binary's 17179869184*3 is
+// 17179869184).
+// It equals mul36 wherever the product fits.
+// rb is unchanged.
+// Does not preserve AC or IO.
+// Called via jsp.
+imul, dac imX
+    lac ra
+    and [04000]
+    dac imS
+    lac rb
+    and [04000]
+    xor imS
+    dac imS                 // 04000 when the signs differ
+    lac ra
+    ior ra+1
+    ior ra+2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dzm imS                 // a zero operand, so the product is 0
+    lac rb
+    ior rb+1
+    ior rb+2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dzm imS
+    jsp mul36
+    lac ra
+    and [03777]
+    ior imS
+    dac ra
+    jmp i imX
+
+// mp -- multiply mpX by mpY, each 0 to 07777, into mpLo, the product's low
+// 12 bits, and mpHi, the next 12.
+// Does not preserve AC or IO.
+// Called via jsp.
+mp, dac mpR
+    lac mpX
+    mul mpY
+    // mul leaves the product shifted left one in AC:IO
+    scr 1s
+    dio mpT                 // bits 0-17
+    scr 9s
+    scr 3s
+    dio mpU                 // bits 12-29
+    lac mpT
+    and [07777]
+    dac mpLo
+    lac mpU
+    and [07777]
+    dac mpHi
+    jmp i mpR
+
+// div36's dividend and quotient, divisor, remainder and trial, three parts
+// each, high first
+dvN, 0
+    0
+    0
+dvM, 0
+    0
+    0
+dvR, 0
+    0
+    0
+dvT, 0
+    0
+    0
+// div36 -- ra = ra / rb, truncated toward 0; ra / 0 leaves ra (the
+// surviving binary's n/0).
+// rb is unchanged.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+div36, dac dvX
+    lac rb
+    ior rb+1
+    ior rb+2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i dvX
+    lac ra
+    and [04000]
+    dac dvSa
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp .+2
+    jsp neg36
+    COPY3(ra, dvN)
+    // dvM is rb if negative, else -rb
+    COPY3(rb, ra)
+    lac rb
+    and [04000]
+    dac dvSb
+    SKIP_NEXT_IF_AC_ZERO
+    jmp .+2
+    jsp neg36
+    COPY3(ra, dvM)
+    dzm dvR
+    dzm dvR+1
+    dzm dvR+2
+    law i 0d36
+    dac dvK
+    // restoring division of the magnitudes, 36 steps; the dividend dvN
+    // shifts into the remainder dvR as the quotient's bits shift into dvN
+dvL, lac dvN
+    and [04000]
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    dac dvTop               // the bit shifted out of dvN
+    // dvN left one
+    lac dvN+2
+    ral 1s
+    dac dvT
+    and [07777]
+    dac dvN+2
+    lac dvT
+    SHR12
+    dac dvT
+    lac dvN+1
+    ral 1s
+    add dvT
+    dac dvT+1
+    and [07777]
+    dac dvN+1
+    lac dvT+1
+    SHR12
+    dac dvT
+    lac dvN
+    ral 1s
+    add dvT
+    and [07777]
+    dac dvN
+    // dvR left one, dvTop in at the bottom
+    lac dvR+2
+    ral 1s
+    add dvTop
+    dac dvT
+    and [07777]
+    dac dvR+2
+    lac dvT
+    SHR12
+    dac dvT
+    lac dvR+1
+    ral 1s
+    add dvT
+    dac dvT+1
+    and [07777]
+    dac dvR+1
+    lac dvT+1
+    SHR12
+    dac dvT
+    lac dvR
+    ral 1s
+    add dvT
+    and [07777]
+    dac dvR
+    // the trial, dvT = dvR + dvM, and its carry out of 36 bits; dvM is
+    // -|rb|, so it carries exactly when dvR >= |rb|
+    lac dvR+2
+    add dvM+2
+    dac dvT+2
+    SHR12
+    add dvR+1
+    add dvM+1
+    dac dvT+1
+    SHR12
+    add dvR
+    add dvM
+    dac dvT
+    and [010000]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dvNoR               // dvR < |rb|, so the bit is 0
+    lac dvT
+    and [07777]
+    dac dvR
+    lac dvT+1
+    and [07777]
+    dac dvR+1
+    lac dvT+2
+    and [07777]
+    dac dvR+2
+    lac dvN+2
+    ior [1]
+    dac dvN+2
+dvNoR, isp dvK
+    jmp dvL
+    // the quotient, negative when exactly one operand was
+    COPY3(dvN, ra)
+    lac dvSa
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    dac dvSign
+    lac dvSb
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    xor dvSign
+    SKIP_NEXT_IF_AC_ZERO
+    jsp neg36
+    jmp i dvX
+
+// toInt -- convert ra to an 18-bit count, -131,071 to 131,071; past that
+// the command is an error (err), as is any count past the buffer.
+// AC is the count, IO is preserved; ra is not preserved.
+// Called via jsp.
+toInt, dac tiX
+    dzm tiNeg
+    lac ra
+    and [04000]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp .+3
+    idx tiNeg
+    jsp neg36
+    // the magnitude must be below 2^17, with ra 0 and ra+1 below 040
+    lac ra
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tiBad
+    lac ra+1
+    and [07740]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tiBad
+    lac ra+1
+    ral 9s
+    ral 3s
+    ior ra+2
+    dac ra
+    lac tiNeg
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tiN
+    lac ra
+    jmp i tiX
+tiN, lac ra
+    cma                     // the magnitude is not 0, so no -0
+    jmp i tiX
+tiBad, jmp err
+
+// fromInt -- convert the 18-bit one's complement count in IO to a value in
+// ra.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+fromInt, dac fiX
+    dio fiV
+    dzm fiNeg
+    lac fiV
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp fiPos
+    cma
+    dac fiV
+    idx fiNeg
+fiPos, lac fiV
+    and [07777]
+    dac ra+2
+    lac fiV
+    SHR12
+    dac ra+1
+    dzm ra
+    lac fiNeg
+    SKIP_NEXT_IF_AC_ZERO
+    jsp neg36
+    jmp i fiX
+
+// fmtNum -- write ra in decimal, a minus sign first when negative, into
+// numBuf, one character a word, numLen of them (at most 12).
+// Does not preserve AC, IO or ra.
+// Called via jsp.
+fmtNum, dac fnX
+    dzm numLen
+    lac [numBuf]
+    dac fnP
+    lac ra
+    and [04000]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnPos
+    law 055                 // the minus sign
+    dac i fnP
+    idx fnP
+    idx numLen
+    jsp neg36               // -2^35 becomes 2^35, unsigned, which dv10 takes
+    // the digits, last first, into fnDig
+fnPos, dzm fnK
+fnL, jsp dv10
+    lac fnK
+    add [fnDig]
+    dac fnQ
+    lac dvRem
+    add [CH_ZERO]
+    dac i fnQ
+    idx fnK
+    lac ra
+    ior ra+1
+    ior ra+2
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnL
+    // then reversed after the sign
+fnCp, lac fnK
+    sub [1]
+    dac fnK
+    add [fnDig]
+    dac fnQ
+    lac i fnQ
+    dac i fnP
+    idx fnP
+    idx numLen
+    lac fnK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnCp
+    jmp i fnX
+
+// dv10 -- divide ra, unsigned, by 10, leaving the quotient in ra and the
+// remainder in dvRem.
+// It works a part at a time from the top, each step's dividend below
+// 10 * 2^12.
+// Does not preserve AC or IO.
+// Called via jsp.
+dv10, dac dtX
+    dzm dvRem
+    lac ra
+    dac d10In
+    jsp d10c
+    dac ra
+    lac ra+1
+    dac d10In
+    jsp d10c
+    dac ra+1
+    lac ra+2
+    dac d10In
+    jsp d10c
+    dac ra+2
+    jmp i dtX
+
+// d10c -- divide dvRem * 2^12 + d10In by 10.
+// AC is the quotient, IO is not preserved; dvRem is the remainder.
+// Called via jsp.
+d10c, dac dcX
+    lac dvRem
+    ral 9s
+    ral 3s
+    add d10In
+    lia
+    // div wants its dividend shifted left one, and skips when it succeeds,
+    // which it always does here
+    cla
+    scl 1s
+    div [0d10]
+    jmp i dcX               // no overflow, since the quotient is below 2^14
+    dio dvRem
+    jmp i dcX
+
+adX, 0                      // the return addresses
+imX, 0
+imS, 0
+ngX, 0
+sbX, 0
+anX, 0
+muX, 0
+mpR, 0
+dvX, 0
+tiX, 0
+fiX, 0
+fnX, 0
+dtX, 0
+dcX, 0
+adT, 0
+ngT, 0
+ngC, 0
+muR0, 0
+muS1, 0
+muS2, 0
+mpX, 0
+mpY, 0
+mpT, 0
+mpU, 0
+mpLo, 0
+mpHi, 0
+dvSa, 0
+dvSb, 0
+dvK, 0
+dvTop, 0
+dvSign, 0
+tiNeg, 0
+fiV, 0
+fiNeg, 0
+d10In, 0
+fnK, 0
+fnP, 0
+fnQ, 0
+fnDig,
+    table 0d12
+endloc
+
+ra, 0                       // the arithmetic's registers, three 12-bit
+    0                       //   parts, high first
+    0
+rb, 0
+    0
+    0
+dvRem, 0                    // dv10's remainder
+numLen, 0                   // fmtNum's characters
+numBuf,
+    table 0d12
+
+// The argument state is the value being built, val, when have is set;
+// a pending operator, op, its ASCII code; after a comma, the first argument
+// mval with comma set; and while digits are typed, the number num with
+// inNum set.
+// An operand meets the pending operator, left to right with no precedence,
+// or, with none, is added to the value before it, so values side by side
+// add, as in the surviving binary's %A%A%AQA.
+// A command that takes an argument reads it and clears the state (clrArgs).
+
+local onX, onOp, onL, onDo, onAdd, onSub, onMul, onDiv, onSet, fmX, caI, \
+    caZ, atT, rpV, rpNone, rpPop, cdMore, eqL, eqK, eqP, aoX, aoD, aoDef, aoClr, clX, \
+    cdDig, cdD, cdBad, onOr, rpNac
+
+// cDig -- a digit, which makes the number being typed the number times the
+// radix (imul), plus the digit; the surviving binary keeps 99999999999 as
+// 31280523263.
+// The radix is 10 except in the second set, whose ^O and ^R change it; there
+// a digit not below it is the error ILN.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cDig, lac curC
+    sub [CH_ZERO]
+cdDig, dac cdD
+    sub radix
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cdBad
+    lac inNum
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cdMore
+    dzm num
+    dzm num+1
+    dzm num+2
+    law 1
+    dac inNum
+cdMore, COPY3(num, ra)
+    dzm rb
+    dzm rb+1
+    lac radix
+    dac rb+2
+    jsp imul
+    lac cdD
+    dac rb+2
+    jsp add36
+    COPY3(ra, num)
+    jmp rsLoop
+cdBad, ERR0(EC_ILN)
+// cHex -- A to F, either case, as digits in radix 16.
+// Does not preserve AC or IO.
+// Entered by jmp from rsHex (interp.ac), ends by jmp rsLoop.
+cHex, lac curC
+    and [0137]
+    sub [067]                // A, 0101, is 10
+    jmp cdDig
+
+// finNum -- make the number typed an operand.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+finNum, dac fmX
+    dzm inNum
+    COPY3(num, ra)
+    jsp opnd
+    jmp i fmX
+
+// opnd -- make ra an operand.
+// With a pending operator it is the right side, and the value before it, or
+// 0 with none, the left; with none, it is added to the value before it, or
+// is the value.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+opnd, dac onX
+    lac op
+    SKIP_NEXT_IF_AC_ZERO
+    jmp onOp
+    lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp onSet
+    COPY3(val, rb)
+    jsp add36
+onSet, COPY3(ra, val)
+    law 1
+    dac have
+    jmp i onX
+onOp, COPY3(ra, rb)
+    lac have
+    SKIP_NEXT_IF_AC_ZERO
+    jmp onL
+    dzm ra
+    dzm ra+1
+    dzm ra+2
+    jmp onDo
+onL, COPY3(val, ra)
+onDo, lac op
+    dzm op
+    SKIP_NEXT_IF_DIFFERENT [053]
+    jmp onAdd
+    SKIP_NEXT_IF_DIFFERENT [055]
+    jmp onSub
+    SKIP_NEXT_IF_DIFFERENT [052]
+    jmp onMul
+    SKIP_NEXT_IF_DIFFERENT [057]
+    jmp onDiv
+    SKIP_NEXT_IF_DIFFERENT [CH_HASH]
+    jmp onOr
+    jsp and36               // &
+    jmp onSet
+onAdd, jsp add36
+    jmp onSet
+onSub, jsp sub36
+    jmp onSet
+onMul, jsp imul
+    jmp onSet
+onDiv, jsp div36
+    jmp onSet
+    // the second set's #, the inclusive or
+onOr, lac ra
+    ior rb
+    dac ra
+    lac ra+1
+    ior rb+1
+    dac ra+1
+    lac ra+2
+    ior rb+2
+    dac ra+2
+    jmp onSet
+
+// clrArgs -- clear the argument state, leaving no value, no operator, no
+// comma, no number being typed, and none of the second set's : and @
+// modifiers.
+// Has no arguments and no return values.
+// AC is not preserved (the return), IO is preserved.
+// Returns into bank 0.
+// Called via jsp.
+clrArgs, dap clX
+    dzm have
+    dzm op
+    dzm comma
+    dzm inNum
+    dzm colon11
+    dzm at11
+clX, jmp .
+
+// argOr -- get the argument as a count (toInt), or IO when there is none,
+// and clear the state.
+// IO is the count to use when there is no argument.
+// A minus with no number after it negates IO, so -D is -1D, as in the
+// surviving binary; minus 0 stays 0, as the surviving binary's -J is J.
+// AC is the result, IO is preserved.
+// Called via jsp.
+argOr, dac aoX
+    dio aoD
+    lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp aoDef
+    COPY3(val, ra)
+    jsp toInt
+    dac aoD
+    jmp aoClr
+aoDef, lac op
+    SKIP_NEXT_IF_SAME [055]
+    jmp aoClr
+    lac aoD
+    SKIP_NEXT_IF_AC_ZERO
+    cma
+    dac aoD
+aoClr, jsp clrArgs
+    lac aoD
+    jmp i aoX
+
+// cOp -- the operators + - * / &, each waiting for its right side.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cOp, lac curC
+    dac op
+    jmp rsLoop
+
+// cLp -- an open parenthesis, which puts the expression around it onto the
+// push-down list and starts a new one.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cLp, law PAREN_WORDS
+    lia
+    jsp pdlRoom
+    lio have
+    jsp push
+    lio op
+    jsp push
+    lio comma
+    jsp push
+    lio val
+    jsp push
+    lio val+1
+    jsp push
+    lio val+2
+    jsp push
+    lio mval
+    jsp push
+    lio mval+1
+    jsp push
+    lio mval+2
+    jsp push
+    lio [FR_PAREN]
+    jsp push
+    dzm have
+    dzm op
+    dzm comma
+    jmp rsLoop
+
+// cRp -- a close parenthesis, which makes the inner value an operand of the
+// expression taken back off the list.
+// With no open one, it is an error; with no value inside, the value is 0,
+// whatever operator waits there, as in the surviving binary, so ()D
+// deletes nothing and 3+()= types 3.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cRp, jsp pdlKind
+    SKIP_NEXT_IF_SAME [FR_PAREN]
+    jmp err
+    lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rpNone
+    COPY3(val, rpV)
+    jmp rpPop
+rpNone, dzm rpV
+    dzm rpV+1
+    dzm rpV+2
+rpPop, jsp pop              // the kind
+    jsp pop
+    dio mval+2
+    jsp pop
+    dio mval+1
+    jsp pop
+    dio mval
+    jsp pop
+    dio val+2
+    jsp pop
+    dio val+1
+    jsp pop
+    dio val
+    jsp pop
+    dio comma
+    jsp pop
+    dio op
+    jsp pop
+    dio have
+    COPY3(rpV, ra)
+    jsp opnd
+    jmp rsLoop
+
+// cComma -- m, makes the value the first of two arguments; with none, it is
+// the second set's NAC.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cComma, lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rpNac
+    COPY3(val, mval)
+    law 1
+    dac comma
+    dzm have
+    dzm op
+    jmp rsLoop
+rpNac, ERR0(EC_NAC)
+
+// cEq -- n= types the value in decimal, then CR LF.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cEq, lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp err
+    COPY3(val, ra)
+    jsp clrArgs
+    jsp fmtNum
+    lac numLen
+    cma
+    dac eqK
+    lac [numBuf]
+    dac eqP
+eqL, lio i eqP
+    jsp i [putc:1]
+    idx eqP
+    isp eqK
+    jmp eqL
+    jsp i [newline:1]
+    jmp rsLoop
+
+// cB, cZ, cDot -- B, Z and ., which are 0, the text's length and the
+// pointer.
+// Do not preserve AC or IO.
+// Entered by jmp from the dispatch, end by jmp rsLoop.
+cB, dzm ra
+    dzm ra+1
+    dzm ra+2
+    jsp opnd
+    jmp rsLoop
+cZ, lio zz
+    jsp fromInt
+    jsp opnd
+    jmp rsLoop
+cDot, lio dot
+    jsp fromInt
+    jsp opnd
+    jmp rsLoop
+
+// cH -- H, which is B,Z.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cH, dzm mval
+    dzm mval+1
+    dzm mval+2
+    lio zz
+    jsp fromInt
+    COPY3(ra, val)
+    law 1
+    dac have
+    dac comma
+    dzm op
+    jmp rsLoop
+
+// cA -- nA, the code of the character n-1 after the pointer, the surviving
+// binary's reading (1A the one right of it); 0 past the end, an error before
+// the start.
+// A with no argument appends a page (cAppend, pageio.ac).
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cA, lac have
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [cAppend:1]
+    jsp argOr
+    add dot
+    sub [1]
+    dac caI
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp err
+    lac caI
+    sub zz
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp caZ
+    lio caI
+    jsp bGet
+    jsp fromInt
+    jsp opnd
+    jmp rsLoop
+caZ, dzm ra
+    dzm ra+1
+    dzm ra+2
+    jsp opnd
+    jmp rsLoop
+
+// cAt -- /@, TECO's running time in 60ths of a second, from the
+// clock's total of milliseconds, ckHi and ckLo, times 60 over 1,000.
+// Does not preserve AC or IO.
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+cAt, jsp clkTick
+    lac ckLo
+    and [07777]
+    dac ra+2
+    lac ckLo
+    rar 9s
+    rar 3s
+    and [077]
+    dac atT
+    lac ckHi
+    ral 6s
+    and [07700]
+    ior atT
+    dac ra+1
+    lac ckHi
+    rar 6s
+    and [07777]
+    dac ra
+    dzm rb
+    dzm rb+1
+    law AT_HZ
+    dac rb+2
+    jsp mul36
+    law CLK_HZ
+    dac rb+2
+    jsp div36
+    jsp opnd
+    jmp rsLoop
+
+onX, 0                      // the return addresses
+fmX, 0
+aoX, 0
+aoD, 0
+caI, 0
+atT, 0
+eqK, 0
+eqP, 0
+cdD, 0
+rpV, 0
+    0
+    0
+endloc
+
+val, 0                      // the value being built, when have is set
+    0
+    0
+mval, 0                     // the first argument, when comma is set
+    0
+    0
+num, 0                      // the number being typed, when inNum is set
+    0
+    0
+have, 0
+op, 0                       // the pending operator's code, or 0
+comma, 0
+inNum, 0
+radix, 0d10                 // the numbers' radix, 10, or the second set's 8 or 16
+colon11, 0                  // the second set's : modifiers before a command, counted
+at11, 0                     //   and its @ modifier

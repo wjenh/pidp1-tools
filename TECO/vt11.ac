@@ -1,0 +1,1177 @@
+// vt11.ac -- the second command set's video terminal, for a DCS2 caller
+// whose client is a VT100 or VT102.
+// It gives the video terminal's W and n:W while a type is set (0:W 4 or 8, ET&512), and
+// m,7:W's split screen, the buffer in a window of 2:W rows at the top and the dialogue
+// scrolling in the m rows below it.
+// The window is brought up to date before every prompt.
+// With no type set, W is dpy11.ac's, and only 4,0:W, 8,0:W and m,7:W come here,
+// to set one.
+// Sense switch 2 on at the greeting, VT100 mode, splits each caller's screen as 5,7:W
+// does (vtInit).
+//
+// The window starts at a line's start (vtTop).
+// It is kept while the pointer's row is in the window, with hold (5:W) n at least n rows
+// from each edge; with hold off only while the pointer's row is the cursor line (nW);
+// else it moves so the pointer's line is on the cursor line, or to the buffer's start.
+// A row is walked from the gap buffer directly.
+// A printing character takes a column, TAB goes to the next multiple of 8, ESC shows as
+// $, any other control character as ^ and its letter, DEL as ^?.
+// CR shows nothing and LF ends the row, unless SEEALL (3:W) shows them as ^M and ^J, and
+// TAB as ^I.
+// A line wider than the window goes on in the next row; rows past the buffer's end are
+// blank.
+// What the pointer is before is sent in reverse video, or a reversed space where it
+// shows nothing.
+//
+// Each row's checksum, of what it shows, is kept (vtSums).
+// A row is sent, CUP, EL and its characters, only when its checksum changed; nW,
+// W, m,7:W and the rest mark rows for sending by clearing theirs.
+// With the screen split, the rows are sent between DECSC and DECRC, so the dialogue goes
+// on where it was.
+// With it whole, only -1W paints, every row when output since the last paint spoiled the
+// window, and leaves the cursor at the pointer.
+//
+// vtW is entered by jmp from dpy11.ac's c11W and ends by jmp i [rsLoop:0], through
+// interp11.ac's v11Int, or back to c11W0.
+// vtInit, vtPrompt, vtCtlW and vtQuit are entered by jsp from any bank with the extend
+// window open and return by jmp i.
+// The routines within the file return by a jmp their entry's dap sets, so only from this
+// bank.
+// The file goes in bank 10's top, at PDL_END.
+// Needs teco.ah, <AIDS/skipmacros.ah>; in bank 0 expr.ac (have, comma, colon11, val,
+// mval, ra, toInt, argOr), buffer.ac (dot, zz, gs, ge) and interp.ac's rsLoop; in bank 1
+// termio.ac (putc, pcCnt) and display.ac (dpyNo, dpyStop); in bank 14 dpy11.ac (c11W0)
+// and interp11.ac (v11Int, flET).
+
+local vwOn, vwNeg, vwMode, vw1, vw1k, vwCol, vwR42, vcNoM, vcRd, vcNone, vcS0, vcS0S, \
+    vcS1, vcS2, vcS3, vcS3S, vcS4, vcS5, vcS5S, vcS7, vc7Z, vcSet, vSplit, vxR, \
+    vpX, vqtX, viX, voR, vuR, vrR, veR, vtfR, vkL, \
+    vaR, vaSc, vaGo, vaRow, vaCk, vaNx, vaEnd, vaRc, vaOut, vfR, vfOff, vfMv, \
+    vfUp, vfLn, vfCnt, vqR, vqL, vqYes, vqNo, vlR, vlL, vlLo, vlC, vlE, vlpR, vpB, vpC, \
+    vmR, vwR, vwL, vwEv, vwRd, vwLo, vwC, vwSl, vwEsc, vwLf, vwCr, vwTab, vwCtl, vwFit, \
+    vwF1, vwZ, vwDone, vtiR, viS, viB, viRep, viTwo, viOff, vsnR, vsR, vsL, vciR, \
+    vcuR, vcuG, vdR, vgR, vgL, vgE, \
+    vtType, vtWid, vtRows, vtSplit, vtSee, vtMark, vtHold, vtTop, vtCur, vtOutC, \
+    vN, vC, vM, vT, vG, vK, vK2, vR, vS, vNeed, vI, vP, vHalf, vP2, vEv, vNx, \
+    vCh, vRev, vEnd, vA, vB, vW, vCol, vSum, vSend, vHit, vHc, vPr, vlJ, vaT, vsP, vCc, \
+    vdN, vdD, vdC, vdF, \
+    vsEl, vsRev, vsNorm, vsClr, vsReg, vsSave, vsRest, vtSums
+
+// vtW -- every W the second set reads, the video terminal's while a type is set.
+// With none, m,0:W and m,7:W are handled here and the rest go back to c11W0.
+// Reads the argument state (colon11, comma, have, val, mval).
+// The value of n:W goes to v11Int.
+// Does not preserve AC or IO.
+// Entered by jmp i from dpy11.ac's c11W, from bank 14; ends by jmp i [rsLoop:0], through
+// v11Int, or by jmp i to c11W0.
+vtW, lac vtType
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vwOn
+    lac i [colon11:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwR42
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwR42
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwCol               // m,:W, which is m,0:W
+    lac i [val:0]           // n, 0 to 4095 in its low word
+    ior i [val:0+1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwR42
+    lac i [val:0+2]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwCol
+    SKIP_NEXT_IF_DIFFERENT [7]
+    jmp vwCol
+vwR42, jmp i [c11W0:P11_BANK]
+
+// W and nW with a type set
+vwOn, lac i [colon11:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwCol
+    lac i [have:0]
+    dac vC
+    law 1                   // W alone as 1, so a lone minus is -1W, as dpy11.ac has it
+    lia
+    jsp i [argOr:0]
+    dac vN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vwNeg
+    lac vC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwMode              // W forgets the screen's image and the modes
+    lac vN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law VT_CUR              // 0W is 16W
+    dac vtCur
+vwMode, dzm vtSee
+    dzm vtMark
+    dzm vtHold
+    jsp vtForget
+    jmp i [rsLoop:0]
+vwNeg, SKIP_NEXT_IF_DIFFERENT [-1]
+    jmp vw1
+    SKIP_NEXT_IF_DIFFERENT [VT_FORGET]
+    jmp vw1k
+    jsp vtForget            // -nW, the top n-1 rows sent at the next paint, and the rest
+    jmp i [rsLoop:0]
+vw1, jsp vtPaint
+    jmp i [rsLoop:0]
+vw1k, lac i [pcCnt:1]       // -1000W, which says the output so far spoiled nothing
+    dac vtOutC
+    jmp i [rsLoop:0]
+
+// n:W and m,n:W, n 0 to 7.
+// m, when given, sets n:W if the value is allowed (vcSet).
+// The value returned is n:W's after any setting, the state word n after vtType.
+// Any other n is 0.
+vwCol, lac i [comma:0]
+    dac vC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcNoM
+    lac i [mval:0]
+    dac i [ra:0]
+    lac i [mval:0+1]
+    dac i [ra:0+1]
+    lac i [mval:0+2]
+    dac i [ra:0+2]
+    jsp i [toInt:0]
+    dac vM
+vcNoM, cli
+    jsp i [argOr:0]
+    dac vN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vcNone
+    sub [0d8]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vcNone
+    lac vC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcRd
+    lac vN
+    add [vcSet|thisbank]
+    dac vP2
+    lac i vP2
+    dac vP2
+    jmp i vP2
+vcRd, lac vN
+    add [vtType|thisbank]
+    dac vP2
+    lio i vP2
+    jmp i [v11Int:P11_BANK]
+vcNone, cli
+    jmp i [v11Int:P11_BANK]
+
+// 0:W, the type, which 4 or 8 sets and -1 ends
+vcS0, lac vM
+    SKIP_NEXT_IF_DIFFERENT [VT_TYPE]
+    jmp vcS0S
+    SKIP_NEXT_IF_DIFFERENT [VT_TYPE2]
+    jmp vcS0S
+    SKIP_NEXT_IF_SAME [-1]
+    jmp vcRd
+    jsp vtOff
+    jmp vcRd
+vcS0S, dac vtType
+    jsp vEtSet
+    jmp vcRd
+
+// 1:W, the width, VT_COLMIN to VT_COLMAX
+vcS1, lac vM
+    sub [VT_COLMIN]
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    jmp vcRd
+    lac vM
+    sub [VT_COLMAX+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vcRd
+    lac vM
+    dac vtWid
+    jsp vtForget
+    jmp vcRd
+
+// 2:W, the window's rows, VT_ROWMIN to VT_RMAX; set only while the screen is whole
+vcS2, lac vtSplit
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vcRd
+    lac vM
+    sub [VT_ROWMIN]
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    jmp vcRd
+    lac vM
+    sub [VT_RMAX+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vcRd
+    lac vM
+    dac vtRows
+    jsp vtForget
+    jmp vcRd
+
+// 3:W, SEEALL, 0 or -1
+vcS3, lac vM
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcS3S
+    SKIP_NEXT_IF_SAME [-1]
+    jmp vcRd
+vcS3S, dac vtSee
+    jsp vtForget
+    jmp vcRd
+
+// 4:W, the mark, kept and shown nowhere
+vcS4, lac vM
+    dac vtMark
+    jmp vcRd
+
+// 5:W, hold, which is 0, -1, or n rows at each edge
+vcS5, lac vM
+    SKIP_NEXT_IF_SAME [-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vcS5S
+    jmp vcRd
+vcS5S, dac vtHold
+    jmp vcRd
+
+// 7:W, the dialogue's rows.
+// 0 makes the screen whole again; m of VT_SPLMIN or more, leaving VT_WINMIN rows or more,
+// splits it (vSplit).
+vcS7, lac vM
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vc7Z
+    sub [VT_SPLMIN]
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    jmp vcRd
+    lac vtRows
+    add vtSplit
+    sub vM
+    sub [VT_WINMIN]
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    jmp vcRd
+    jsp vSplit
+    jmp vcRd
+vc7Z, lac vtSplit
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vUnsplit
+    jmp vcRd
+
+// vSplit -- split the screen, a VT100's type set if none was.
+// 2:W becomes the rest, the screen is cleared, the scrolling region (DECSTBM) is the rows
+// below the window, the cursor goes on its last row, and the 340 is off while split
+// (dpyNo's VT_DPYNO).
+// vM is the dialogue's rows, checked by the caller.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vSplit, dap vxR
+    lac vtType
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    law VT_TYPE
+    dac vtType
+    jsp vEtSet
+    lac vtRows
+    add vtSplit
+    dac vT                  // the screen's rows
+    sub vM
+    dac vtRows
+    lac vM
+    dac vtSplit
+    lac i [dpyNo:1]         // the 340 off while split, as after 0W (dpy11.ac)
+    ior [VT_DPYNO]
+    dac i [dpyNo:1]
+    jsp i [dpyStop:1]
+    jsp vCsi
+    lac vtRows
+    add [1]
+    lia
+    jsp vDec
+    lio [CH_SEMI]
+    jsp i [putc:1]
+    lio vT
+    jsp vDec
+    lio [0162]              // r
+    jsp i [putc:1]
+    jsp vScr
+vxR, jmp .
+
+// The setters of 0:W to 7:W.
+vcSet, vcS0|thisbank
+    vcS1|thisbank
+    vcS2|thisbank
+    vcS3|thisbank
+    vcS4|thisbank
+    vcS5|thisbank
+    vcRd|thisbank           // 6:W changes nothing
+    vcS7|thisbank
+
+// vtInit -- ready the video terminal at every greeting (greeting.ac's tmHello), before
+// p11Init, which keeps ET&512 (vtEt).
+// It sets no type, the screen VT_COLS by VT_ROWS and whole, the modes off, the cursor
+// line VT_CUR, the window at the buffer's start, and every row to be sent.
+// Then it sets dpyNo as sense switch 2 has it.
+// Off, dpyNo is 0, the 340 on whatever an earlier caller's 0W left.
+// On, VT100 mode, dpyNo is VT_SWNO, the 340 off for the session, and the screen is split
+// as VT_SWDLG,7:W makes it.
+// Has no arguments.
+// AC is 0, or VT_SWNO under switch 2; IO is not preserved.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+vtInit, dac viX
+    lac [-1]
+    dac vtType
+    dzm vtEt
+    dzm vtSplit
+    dzm vtSee
+    dzm vtMark
+    dzm vtHold
+    dzm vtTop
+    law VT_COLS
+    dac vtWid
+    law VT_ROWS
+    dac vtRows
+    law VT_CUR
+    dac vtCur
+    lac i [pcCnt:1]
+    dac vtOutC
+    jsp vtForget
+    cla
+    szs SW_VT*010           // skip while switch 2 is off
+    law VT_SWNO
+    dac i [dpyNo:1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i viX
+    law VT_SWDLG
+    dac vM
+    jsp vSplit
+    law VT_SWNO
+    jmp i viX
+
+// vtPrompt -- bring the window up to date while the screen is split, before each prompt
+// (cmdread11.ac's c1Pr).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+vtPrompt, dac vpX
+    lac vtSplit
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vtPaint
+    jmp i vpX
+
+// vtCtlW -- for ^W first after the prompt (cmdread11.ac), send every row of the window
+// again while the screen is split.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+vtCtlW, dac vpX
+    jsp vtForget
+    lac vtSplit
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vtPaint
+    jmp i vpX
+
+// vtQuit -- leave the caller's terminal as it was found, before termio.ac drops the
+// caller (tmQuit, trTty).
+// The scrolling region is reset, reverse video turned off, and the cursor put on the
+// screen's last row.
+// Does nothing while no type is set.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+vtQuit, dac vqtX
+    lac vtType
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i vqtX
+    lio [vsReg|thisbank]
+    jsp vStr
+    lio [vsNorm|thisbank]
+    jsp vStr
+    lac vtRows
+    add vtSplit
+    lia
+    jsp vCup1
+    jmp i vqtX
+
+// vtOff -- for -1,0:W, end the type, making the screen whole first if it was split.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+vtOff, dap voR
+    lac vtSplit
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vUnsplit
+    lac [-1]
+    dac vtType
+    jsp vEtSet
+voR, jmp .
+
+// vUnsplit -- make the screen whole again.
+// 2:W becomes its rows, the 340 is back at idle unless 0W or switch 2 (VT_SWNO) turned it
+// off, and the region is reset, then vScr.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+vUnsplit, dap vuR
+    lac vtRows
+    add vtSplit
+    dac vtRows
+    dac vT
+    dzm vtSplit
+    lac i [dpyNo:1]         // the 340 back at idle, unless 0W or switch 2 keeps it off
+    and [0777777-VT_DPYNO]
+    dac i [dpyNo:1]
+    lio [vsReg|thisbank]
+    jsp vStr
+    jsp vScr
+vuR, jmp .
+
+// vScr -- clear the screen, put the cursor on row vT, and mark every row of the window
+// to be sent.
+// Reads vT.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vScr, dap vrR
+    lio [vsClr|thisbank]
+    jsp vStr
+    lio vT
+    jsp vCup1
+    jsp vtForget
+vrR, jmp .
+
+// vEtSet -- set ET&512 as the type has it (vtEt, which interp11.ac's fKeep keeps).
+// Reads vtType.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+vEtSet, dap veR
+    law VT_ET
+    dac vtEt
+    lac vtType
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    dzm vtEt
+    lac i [flET:P11_BANK+2]
+    and [0777777-VT_ET]
+    ior vtEt
+    dac i [flET:P11_BANK+2]
+veR, jmp .
+
+// vtForget -- mark every row to be sent.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Changes vK and vP2.
+// Called via jsp.
+vtForget, dap vtfR
+    law i VT_RMAX
+    dac vK                  // -VT_RMAX, counted up by isp
+    lac [vtSums|thisbank]
+    dac vP2
+vkL, dzm i vP2
+    idx vP2
+    isp vK
+    jmp vkL
+vtfR, jmp .
+
+// vtPaint -- bring the window up to date, its top chosen (vTopFix) and each row whose
+// checksum changed sent.
+// Split, the rows go between DECSC and DECRC.
+// Whole, every row is first marked when output since the last paint spoiled it (pcCnt),
+// and the cursor is left at the pointer.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+vtPaint, dap vaR
+    lac vtSplit
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaSc
+    lac i [pcCnt:1]
+    SKIP_NEXT_IF_SAME vtOutC
+    jsp vtForget
+    jmp vaGo
+vaSc, lio [vsSave|thisbank]
+    jsp vStr
+vaGo, jsp vTopFix
+    dzm vR
+    lac [-1]
+    dac vPr
+    lac vtTop
+    dac vI
+vaRow, lac vR
+    sub vtRows
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaEnd
+    lac vI
+    dac vS
+    dzm vSend
+    jsp vRow
+    lac vHit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaCk
+    lac vR
+    dac vPr
+vaCk, lac vR
+    add [vtSums|thisbank]
+    dac vP2
+    lac vSum
+    SKIP_NEXT_IF_DIFFERENT i vP2
+    jmp vaNx
+    // the row again from its start, sent; its checksum kept once it is, so a row a
+    // break cuts short is sent again next time
+    lac vS
+    dac vI
+    law 1
+    dac vSend
+    lac vR
+    add [1]
+    lia
+    jsp vCup1
+    lio [vsEl|thisbank]     // EL first; a full row needs none after, and a row narrower
+    jsp vStr                // than the client's leaves nothing old beyond it
+    jsp vRow
+    lac vSum
+    dac i vP2
+vaNx, idx vR
+    jmp vaRow
+vaEnd, lac vtSplit
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaRc
+    lac vPr
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vaOut
+    lac vHc
+    add [1]
+    dac vCc
+    lac vPr
+    add [1]
+    lia
+    jsp vCup
+    jmp vaOut
+vaRc, lio [vsRest|thisbank]
+    jsp vStr
+vaOut, lac i [pcCnt:1]
+    dac vtOutC
+vaR, jmp .
+
+// vTopFix -- choose vtTop, the window's top, for the pointer as the file's header says.
+// Has no arguments.
+// Sets vtTop, and vG to the cursor line's row within the window, 0 the first.
+// Does not preserve AC or IO.
+// Called via jsp.
+vTopFix, dap vfR
+    lac vtCur
+    sub vtRows
+    SKIP_NEXT_IF_AC_NEGATIVE
+    cla                     // the cursor line below the window, its last row
+    add vtRows
+    sub [1]
+    dac vG
+    lac vtTop
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vfMv                // past the buffer's end
+    lio vtTop
+    jsp vLnSt
+    dac vtTop
+    lac i [dot:0]
+    sub vtTop
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfMv                // above the window
+    jsp vPtrRow
+    dac vT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfMv                // below it
+    lac vtHold
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vfOff
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfR                 // hold -1, kept anywhere in the window
+    lac vT
+    sub vtHold
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfMv                // within n rows of the top
+    lac vtRows
+    sub vtHold
+    sub [1]
+    sub vT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfMv                // within n rows of the bottom
+    jmp vfR
+vfOff, lac vT
+    SKIP_NEXT_IF_DIFFERENT vG
+    jmp vfR
+    // the pointer's line put on the cursor line, the top going back from it a whole line
+    // at a time while the line fits above
+vfMv, lio i [dot:0]
+    jsp vLnSt
+    dac vtTop
+    jsp vPtrRow             // the pointer's row within its line
+    dac vT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfR                 // a line longer than the window, its start the top
+    lac vG
+    sub vT
+    dac vNeed
+vfUp, lac vNeed
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vfLn
+    jmp vfR
+vfLn, lac vtTop
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vfR                 // the buffer's start
+    sub [1]
+    lia
+    jsp vLnSt
+    dac vS
+    dac vI
+    dzm vK
+vfCnt, dzm vSend
+    jsp vRow
+    idx vK
+    lac vI
+    sub vtTop
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfCnt
+    lac vNeed
+    sub vK
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vfR                 // the line before does not fit
+    dac vNeed
+    lac vS
+    dac vtTop
+    jmp vfUp
+vfR, jmp .
+
+// vPtrRow -- find the pointer's row counted from vtTop, 0 the first.
+// Has no arguments.
+// AC is the row, or -1 when the pointer is not in the window's 2:W rows; IO is not
+// preserved.
+// Called via jsp.
+vPtrRow, dap vqR
+    lac vtTop
+    dac vI
+    dzm vK
+vqL, lac vK
+    sub vtRows
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vqNo
+    dzm vSend
+    jsp vRow
+    lac vHit
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vqYes
+    lac vI
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vqNo                // past the buffer's end
+    idx vK
+    jmp vqL
+vqYes, lac vK
+    jmp vqR
+vqNo, lac [-1]
+vqR, jmp .
+
+// vLnSt -- find where the line holding an index starts, after the LF before it, or 0.
+// IO is the index.
+// AC is the start's index, IO is preserved.
+// vI, vP and vHalf are not preserved.
+// Called via jsp.
+vLnSt, dap vlR
+    dio vlJ
+vlL, lac vlJ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vlE
+    sub [1]
+    dac vI
+    jsp vPlace
+    lac vHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vlLo
+    lac i vP
+    rar 9s
+    jmp vlC
+vlLo, lac i vP
+vlC, and [0177]
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vlE
+    lac vI
+    dac vlJ
+    jmp vlL
+vlE, lac vlJ
+vlR, jmp .
+
+// vPlace -- set vP and vHalf to the word holding index vI and its half, 0 the high.
+// Reads vI.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+vPlace, dap vlpR
+    lac vI
+    sub i [gs:0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vpB
+    add i [ge:0]
+    jmp vpC
+vpB, lac vI
+vpC, dac vaT
+    and [1]
+    dac vHalf
+    lac vaT
+    rar 1s
+    and [PK_WORD]
+    add [BUF_BASE]
+    dac vP
+vlpR, jmp .
+
+// vMin -- make vEv IO when IO is past vI and short of vEv.
+// IO is an index; reads vI and vEv.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+vMin, dap vmR
+    dio vlJ
+    lac vI
+    sub vlJ
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vmR
+    lac vlJ
+    sub vEv
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vmR
+    dio vEv
+vmR, jmp .
+
+// vRow -- walk one row of the window from index vI at column 0, sending it when vSend
+// is 1.
+// A character that does not fit starts the next row.
+// Reads vI and vSend.
+// Leaves vI at the row's next character, vSum its checksum, never 0, and vCol its
+// columns; vHit is 1, with vHc the column, when the pointer's mark is in it.
+// Does not preserve AC or IO.
+// Called via jsp.
+vRow, dap vwR
+    dzm vCol
+    dzm vHit
+    dzm vRev
+    law 1
+    dac vSum
+    lac vI
+    dac vEv                 // the first character an event, so its place is found
+    lac [vwC|thisbank]
+    dac vNx
+    // Printing characters go the short way (vwC); the pointer, the gap and the end are
+    // events (vEv) where the reading is set again, and the rest go by vwSl.
+vwL, lac vI
+    SKIP_NEXT_IF_DIFFERENT vEv
+    jmp vwEv
+vwRd, lac vHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwLo
+    idx vHalf
+    lac i vP
+    rar 9s
+    and [0177]
+    dac vCh
+    jmp i vNx
+vwLo, dzm vHalf
+    lac i vP
+    and [0177]
+    dac vCh
+    idx vP
+    jmp i vNx
+vwC, lac vCh
+    sub [040]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vwSl                // a control character
+    sub [CH_DEL-040]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vwSl                // DEL
+    lac vCol
+    sub vtWid
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vwDone              // the row is full
+    idx vCol
+    lac vSum
+    ral 1s
+    xor vCh
+    dac vSum
+    lac vSend
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vSnd
+    idx vI
+    jmp vwL
+
+// an event, the buffer's end (vwZ), or else the place found, the next event set, and
+// the pointer's mark
+vwEv, lac vI
+    sub i [zz:0]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vwZ
+    jsp vPlace
+    lac i [zz:0]
+    dac vEv
+    lio i [gs:0]
+    jsp vMin
+    lio i [dot:0]
+    jsp vMin
+    lac vI
+    SKIP_NEXT_IF_SAME i [dot:0]
+    jmp vwRd
+    law 1
+    dac vRev
+    lac [vwSl|thisbank]
+    dac vNx
+    jmp vwRd
+
+// the slow way, what the character shows (vA, then vB if not 0, else vA vW times)
+vwSl, lac [vwC|thisbank]
+    dac vNx
+    dzm vEnd
+    law 1
+    dac vW
+    dzm vB
+    lac vCh
+    dac vA
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp vwEsc
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp vwTab
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vwLf
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp vwCr
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp vwCtl
+    sub [040]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vwCtl
+    jmp vwFit               // printing, the pointer's
+vwEsc, law CH_DOLLAR
+    dac vA
+    jmp vwFit
+vwLf, law 1
+    dac vEnd
+vwCr, lac vtSee
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwCtl
+    dzm vW                  // shows nothing
+    jmp vwFit
+vwTab, lac vtSee
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwCtl
+    law 040
+    dac vA
+    lac vCol
+    and [7]
+    sub [0d8]
+    cma
+    dac vW                  // to the next multiple of 8
+    jmp vwFit
+vwCtl, law CH_UPARROW
+    dac vA
+    lac vCh
+    add [0100]
+    and [0177]
+    dac vB
+    law 2
+    dac vW
+vwFit, lac vRev
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwF1
+    lac vW
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwF1
+    law 1                   // the pointer on what shows nothing, a reversed space
+    dac vW
+    law 040
+    dac vA
+vwF1, lac vCol
+    add vW
+    sub vtWid
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vwDone              // it does not fit, so it starts the next row
+    jsp vItem
+    lac vCol
+    add vW
+    dac vCol
+    dzm vRev
+    idx vI
+    lac vEnd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwL
+    jmp vwDone
+
+// at or past the buffer's end, the pointer there a reversed space, after which vI is
+// past the end, so no later row shows it again
+vwZ, SKIP_NEXT_IF_AC_ZERO
+    jmp vwDone
+    lac i [zz:0]
+    SKIP_NEXT_IF_SAME i [dot:0]
+    jmp vwDone
+    law 1
+    dac vRev
+    dac vEnd
+    dac vW
+    law 040
+    dac vA
+    dzm vB
+    jmp vwF1
+
+vwDone, lac vSum
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law 1                   // 0 marks a row to be sent
+    dac vSum
+vwR, jmp .
+
+// vItem -- add the slow way's item into the checksum and send it when vSend is 1, noting
+// the pointer's mark (vHit, vHc).
+// Reads vA, vB, vW, vRev, vCol and vSend.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vItem, dap vtiR
+    lac vRev
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp viS
+    law 1
+    dac vHit
+    lac vCol
+    dac vHc
+viS, lac vSum
+    ral 1s
+    xor vA
+    ral 1s
+    xor vB
+    ral 1s
+    xor vRev
+    dac vSum
+    lac vSend
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vtiR
+    lac vRev
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp viB
+    lio [vsRev|thisbank]
+    jsp vStr
+viB, lac vB
+    SKIP_NEXT_IF_AC_ZERO
+    jmp viTwo
+    lac vW
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp viOff
+    cma
+    dac vK2
+viRep, lio vA
+    jsp i [putc:1]
+    isp vK2
+    jmp viRep
+    jmp viOff
+viTwo, lio vA
+    jsp i [putc:1]
+    lio vB
+    jsp i [putc:1]
+viOff, lac vRev
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vtiR
+    lio [vsNorm|thisbank]
+    jsp vStr
+vtiR, jmp .
+
+// vSnd -- send vCh.
+// Reads vCh.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vSnd, dap vsnR
+    lio vCh
+    jsp i [putc:1]
+vsnR, jmp .
+
+// vStr -- send a sequence of characters, one a word, to a 0.
+// IO is the sequence's full address.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vStr, dap vsR
+    dio vsP
+vsL, lac i vsP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vsR
+    lia
+    jsp i [putc:1]
+    idx vsP
+    jmp vsL
+vsR, jmp .
+
+// vCsi -- send ESC [.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+vCsi, dap vciR
+    lio [CH_ESC]
+    jsp i [putc:1]
+    lio [0133]
+    jsp i [putc:1]
+vciR, jmp .
+
+// vCup1 -- move the cursor to a row, column 1 (CUP).
+// vCup -- move the cursor to a row, column vCc.
+// IO is the row; vCup reads vCc, which vCup1 sets to 1.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vCup1, dap vcuR
+    law 1
+    dac vCc
+    jmp vcuG
+vCup, dap vcuR
+vcuG, dio vdN
+    jsp vCsi
+    lio vdN
+    jsp vDec
+    lio [CH_SEMI]
+    jsp i [putc:1]
+    lio vCc
+    jsp vDec
+    lio [0110]              // H
+    jsp i [putc:1]
+vcuR, jmp .
+
+// vDec -- send a number in decimal with no leading zeros.
+// IO is the number, 0 to 999.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vDec, dap vdR
+    dio vdN
+    dzm vdF
+    law 0d100
+    dac vdD
+    jsp vDig
+    law 0d10
+    dac vdD
+    jsp vDig
+    law 1
+    dac vdD
+    dac vdF                 // the units always sent
+    jsp vDig
+vdR, jmp .
+
+// vDig -- take the digit of vdN for vdD off vdN, and send it once a digit has been (vdF).
+// Reads vdN, vdD and vdF.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+vDig, dap vgR
+    law CH_ZERO
+    dac vdC
+vgL, lac vdN
+    sub vdD
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vgE
+    dac vdN
+    idx vdC
+    law 1
+    dac vdF
+    jmp vgL
+vgE, lac vdF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vgR
+    lio vdC
+    jsp i [putc:1]
+vgR, jmp .
+
+vpX, 0                      // the return addresses of the entries from other banks
+vqtX, 0
+viX, 0
+
+// The state, 0:W to 7:W in n's order (vcRd).
+// These are the type, -1 for none; the width and the window's rows (1:W, 2:W); SEEALL,
+// the mark and hold (3:W to 5:W); the window's top (6:W); the dialogue's rows (7:W).
+// Then the cursor line (nW), and putc's count at the last paint or -1000W.
+vtType, -1
+vtWid, VT_COLS
+vtRows, VT_ROWS
+vtSee, 0
+vtMark, 0
+vtHold, 0
+vtTop, 0
+vtSplit, 0
+vtCur, VT_CUR
+vtOutC, 0
+
+vN, 0                       // vtW's n, an argument (W) or m (n:W) given, and m
+vC, 0
+vM, 0
+vT, 0                       // the screen's rows; the pointer's row
+vG, 0                       // the cursor line's row
+vK, 0                       // counts
+vK2, 0
+vR, 0                       // the row being painted, its first index
+vS, 0
+vNeed, 0                    // rows still wanted above the pointer's line
+vI, 0                       // the walk's index, and the word and half it reads
+vP, 0
+vHalf, 0
+vP2, 0                      // a table word's address
+vEv, 0                      // the next event's index
+vNx, 0                      // where a character read goes, vwC, or vwSl for the pointer's
+vCh, 0
+vRev, 0                     // 1 for the pointer's character
+vEnd, 0                     // 1 when the character ends the row
+vA, 0                       // what a character shows
+vB, 0
+vW, 0
+vCol, 0
+vSum, 0
+vSend, 0
+vHit, 0
+vHc, 0
+vPr, 0                      // the pointer's row in the window, -1 if none
+vlJ, 0
+vaT, 0
+vsP, 0
+vCc, 0                      // the cursor's column for CUP
+vdN, 0                      // vDec's number, divisor, digit, and a digit sent
+vdD, 0
+vdC, 0
+vdF, 0
+
+// The sequences EL, reverse video on and off (SGR), ED, the region reset (DECSTBM),
+// DECSC and DECRC.
+vsEl, CH_ESC
+    0133
+    0113
+    0
+vsRev, CH_ESC
+    0133
+    067
+    0155
+    0
+vsNorm, CH_ESC
+    0133
+    0155
+    0
+vsClr, CH_ESC
+    0133
+    062
+    0112
+    0
+vsReg, CH_ESC
+    0133
+    0162
+    0
+vsSave, CH_ESC
+    067
+    0
+vsRest, CH_ESC
+    070
+    0
+
+// A checksum a row of the window, 0 for a row to be sent.
+vtSums,
+    table VT_RMAX
+endloc
+
+vtEt, 0                     // ET&512 (interp11.ac), VT_ET while a type is set, else 0

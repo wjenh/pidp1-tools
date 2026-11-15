@@ -1,0 +1,65 @@
+// greeting.ac -- the line TECO types to each new DCS2 caller, and on the typewriter
+// when sense switch 6 makes it the console.
+// tmReady (termio.ac) calls tmHello after its CR LF.
+// In bank 15 (EX_BANK), since bank 1 has no room for the text.
+//
+// The greeting is also where sense switches 2 and 4 are read, and only there.
+// With switch 4 on, the command strings that follow are the second set's, PDP-11
+// TECO's (tSet 1), its flags as they start (p11Init, interp11.ac).
+// With switch 4 off, they are the 1965 set's.
+// Switch 2 on is VT100 mode.
+// It gives the second set whatever switch 4 says, the screen split as 5,7:W makes it
+// and the Type 340 off for the session (vtInit, vt11.ac), and the greeting ends with
+// " VT100 mode".
+// Either way the radix is decimal again, the only one the 1965 set knows, and, switch
+// 2 off, the display is on again (display.ac's dpyNo), which only the second set's 0W
+// and split screen turn off.
+//
+// Needs tapemsg.ac's elStr, which also counts EL's column (elCol).
+// cEL sets elCol before it types, so the count left here is harmless.
+// Needs newline and dpyNo in bank 1, radix (expr.ac) in bank 0, p11Init in bank 14,
+// vtInit (vt11.ac) in bank 10, and tmHiVt (data11.ac) in bank 9.
+
+local thX, thP11, thTy
+
+// tmHello -- read switches 2 and 4, choose the command set, ready the video terminal
+// and the display, and type the greeting and CR LF.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Sets radix and tSet, and dpyNo through vtInit.
+// Reached from any bank with the extend window open.
+// Called via jsp.
+tmHello, dac thX
+    law 0d10
+    dac i [radix:0]
+    dzm tSet
+    jsp i [vtInit:VT_BANK]  // dpyNo and the video terminal as switch 2 has them
+    lio [tmHi:.]
+    SKIP_NEXT_IF_AC_ZERO    // AC not 0 under switch 2 (vtInit)
+    jmp thP11               // VT100 mode, the second set whatever switch 4 says
+    szs SW_P11*010          // skip while switch 4 is off
+    jmp thP11
+thTy, jsp elStr
+    law VT_SWNO
+    and i [dpyNo:1]
+    lio [tmHiVt:D11_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jsp elStr               // " VT100 mode", for this session's switch 2
+    jsp i [newline:1]
+    jmp i thX
+thP11, law 1
+    dac tSet
+    jsp i [p11Init:P11_BANK]
+    lio [tmHi11:.]
+    jmp thTy
+
+thX, 0                      // the return address
+endloc
+
+tSet, 0                     // the command set, 0 the 1965 set's, 1 PDP-11 TECO's
+
+// The greetings of the two sets; VT100 mode's ending is tmHiVt, in data11.ac.
+tmHi, ascii "TECO PDP-1/PDP-6"
+    0
+tmHi11, ascii "TECO PDP-1/PDP-11"
+    0

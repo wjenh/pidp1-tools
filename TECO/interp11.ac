@@ -1,0 +1,715 @@
+// interp11.ac -- the second command set's frame, TECO-11 version 40's commands,
+// taken when sense switch 4 was on at the greeting (tSet, greeting.ac).
+// The interpreter is the 1965 set's, runStr in interp.ac, with dTab11 as its dispatch
+// (data11.ac, in bank 9 with the error messages).
+// A command both sets share is bank 0's handler, and the rest are here and in
+// edit11.ac, control11.ac and search11.ac.
+// This file also holds the flags and their starting values, the errors'
+// type-out, and the modifiers : and @ and the caret form.
+//
+// An error is named by its code.
+// A handler's ERR0 or ERR11 leaves it in eCode (interp.ac), and any other error is
+// named from the command that ran (err11).
+// The message is the manual's, as TECO C types it, under EH.
+//
+// Handlers are entered by jmp from the dispatch and end by jmp i [rsLoop:0].
+// The routines are called via jsp with the extend window open and return by jmp i.
+// The file goes in bank 14 (P11_BANK), so every name of another bank is tagged.
+// Needs teco.ah, <AIDS/skipmacros.ah>; in bank 0 interp.ac, expr.ac, edit.ac,
+// search.ac, buffer.ac, control.ac and idle (teco.am1); in bank 1 termio.ac and
+// cmdread.ac; in bank 12 errTxt; edit11.ac's handlers.
+
+local p1X, p1P, p1K, p1L, e1K, e1C, e1A, e1L, e1P, e1I, e1N, e1Cmd, e1Have, e1Out, \
+    e1Code, e1Msg, e1Back, e1BkL, e1BkE, e1Keep, e1Utm, e1Pop, e1PopM, e1Dtb, \
+    e1Srh, e1Bni, e1Nap, e1Nae, e1Nac, e1Ill, e1Fix, e2X, e2P, e2W, e2Wd, e2Done, \
+    e2cX, e2C, e2Arg, e2Ch, eaX, eaCh, eaSrh, eaSL, eaTag, eaL, eaI, eaN, ecX, ecC, \
+    ecPl, ecNm, ecCtl, e3X, e3P, e3W, e3Wd, e3Done, e3Ch, crC, crBad, crUp, uX, uC, \
+    uOut, fP, fP1, fP2, fRead, fSet, fMN, fKeep, fDone, ejNo, clX, ecNul, ecTab, ecLf, \
+    ecVt, ecFf, ecCr, ecEsc, e1Lib, eaLib, ecL
+
+// p11Init -- set the second set as each greeting with switch 4 on leaves it.
+// Every flag is 0, but ET is 1028 (4, lower case kept, and 1024, the 340), with 512
+// kept, as fKeep keeps it, when the greeting's vtInit set a type (switch 2's VT100
+// mode), EU is -1 and EO 40.
+// There is no insert or match yet for ^S, and no search string.
+// A global register with no number reads 0 (qNorm).
+// The radix is the greeting's (tmHello).
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+p11Init, dac p1X
+    lac [flED:.]
+    dac p1P
+    law i FL_WORDS
+    dac p1K
+p1L, dzm i p1P
+    idx p1P
+    isp p1K
+    jmp p1L
+    law FL_ET0
+    ior i [vtEt:VT_BANK]    // 512 while a video terminal's type is set (vt11.ac)
+    dac flET+2
+    law FL_EO0
+    dac flEO+2
+    law 07777
+    dac flEU
+    dac flEU+1
+    dac flEU+2
+    dzm i [lsLen:0]
+    dzm sbLen
+    jsp i [qNorm:EX_BANK]
+    jsp i [fiSel:EX_BANK]
+    jmp i p1X
+
+// err11 -- type the second set's error.
+// It types ? and the code, and its message unless EH&3 is 1; then, with EH&4, the
+// command string through the bad character and ?; CR LF after each.
+// The string is kept for ? typed first (cmdread11.ac); with ET&128 an error leaves
+// TECO as /G does.
+// Every macro level ends with its local registers (lqDrop), and an indirect file is
+// closed (fiEiS).
+// A failure of the file system library (tapefile.ac's mtFail, its message in errTxt)
+// is named by its status (stCode), the message its argument.
+// AC is ERR_BREAK or ERR_CMD; eCode and eArg name a command's error.
+// Reached by jmp from errIdle (teco.am1), from any bank; ends at idle.
+err11, dac e1K
+    jsp i [fiEiS:EX_BANK]
+    jsp i [lqDrop:EX_BANK]
+    lac i [eCode:0]
+    dac e1C
+    lac i [eArg:0]
+    dac e1A
+    lac e1K
+    SKIP_NEXT_IF_SAME [ERR_BREAK]
+    jmp e1Lib
+    dzm i [errTxt:MT_BANK]
+    law EC_XAB
+    dac e1C
+    jmp e1Out
+e1Lib, lac i [errTxt:MT_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp e1Cmd
+    lac i [mfS:MT_BANK]
+    add [stCode:D11_BANK]
+    dac e1P
+    lac i e1P
+    jmp e1Fix
+e1Cmd, lac e1C
+    SKIP_NEXT_IF_AC_ZERO
+    jmp e1Have
+    // no code left, so the command that ran names it, its character the argument
+    lac i [curC:0]
+    dac e1A
+    SKIP_NEXT_IF_DIFFERENT [0103]
+    jmp e1Pop               // C
+    SKIP_NEXT_IF_DIFFERENT [0112]
+    jmp e1Pop               // J
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp e1Pop               // R
+    SKIP_NEXT_IF_DIFFERENT [0113]
+    jmp e1PopM              // m,nK
+    SKIP_NEXT_IF_DIFFERENT [0124]
+    jmp e1PopM              // m,nT
+    SKIP_NEXT_IF_DIFFERENT [0130]
+    jmp e1PopM              // m,nX
+    SKIP_NEXT_IF_DIFFERENT [0104]
+    jmp e1Dtb               // D
+    SKIP_NEXT_IF_DIFFERENT [0123]
+    jmp e1Srh               // S
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp e1Srh               // N
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp e1Srh               // _
+    SKIP_NEXT_IF_DIFFERENT [CH_GT]
+    jmp e1Bni
+    SKIP_NEXT_IF_DIFFERENT [CH_RPAR]
+    jmp e1Nap
+    SKIP_NEXT_IF_DIFFERENT [CH_EQ]
+    jmp e1Nae
+    SKIP_NEXT_IF_DIFFERENT [054]
+    jmp e1Nac
+e1Ill, law EC_ILL
+    jmp e1Fix
+e1PopM, lac e1A
+    ior [0200]              // POP's argument as m,n and the command
+    dac e1A
+e1Pop, law EC_POP
+    jmp e1Fix
+e1Dtb, law EC_DTB
+    jmp e1Fix
+e1Srh, law EC_SRH
+    jmp e1Fix
+e1Bni, law EC_BNI
+    jmp e1Fix
+e1Nap, law EC_NAP
+    jmp e1Fix
+e1Nae, law EC_NAE
+    jmp e1Fix
+e1Nac, law EC_NAC
+e1Fix, dac e1C
+    jmp e1Out
+    // an unterminated command inside a macro is UTM
+e1Have, SKIP_NEXT_IF_SAME [EC_UTC]
+    jmp e1Out
+    lac i [srcBlk:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp e1Out
+e1Utm, law EC_UTM
+    dac e1C
+e1Out, lio [CH_QMARK]
+    jsp i [putc:1]
+    law 07777               // the whole message
+    dac e1L
+    lac flEH+2
+    and [3]
+    SKIP_NEXT_IF_SAME [1]
+    jmp e1Msg
+e1Code, law 3               // the code alone
+    dac e1L
+e1Msg, lac e1C
+    add [msgTab:D11_BANK-1]
+    dac e1P
+    lio i e1P
+    jsp e1Str
+    jsp i [newline:1]
+    lac flEH+2
+    and [4]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp e1Keep
+    // with EH&4, the string through the bad character, then ?
+e1Back, dzm e1I
+e1BkL, lac e1I
+    sub i [csPos:1]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp e1BkE
+    lac e1I
+    sub i [csLen:1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp e1BkE
+    lio e1I
+    jsp i [csGet:1]
+    jsp i [echoCh:1]
+    idx e1I
+    jmp e1BkL
+e1BkE, lio [CH_QMARK]
+    jsp i [putc:1]
+    jsp i [newline:1]
+e1Keep, dzm i [errTxt:MT_BANK]  // not typed with EH&3 1
+    lio i [csPos:1]
+    jsp i [cmdErr:1]
+    lac flET+2
+    and [0200]
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [tmQuit:1]
+    jmp i [idle:0]
+
+// e1Str -- type the ASCII string at the full address in IO, at most e1L characters,
+// a % as the error's argument (e1Arg).
+// IO is the string's address.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+e1Str, dac e2X
+    dio e2P
+e2W, lac i e2P
+    dac e2Wd
+    rar 9s
+    and [0777]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp e2Done
+    lia
+    jsp e2Ch
+    lac e2Wd
+    and [0777]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp e2Done
+    lia
+    jsp e2Ch
+    idx e2P
+    jmp e2W
+e2Done, jmp i e2X
+
+// e2Ch -- type e1Str's character in IO, unless the limit is reached.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Counts e1L down.
+// Called via jsp.
+e2Ch, dac e2cX
+    dio e2C
+    lac e1L
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i e2cX
+    sub [1]
+    dac e1L
+    lac e2C
+    SKIP_NEXT_IF_DIFFERENT [CH_PCT]
+    jmp e2Arg
+    lio e2C
+    jsp i [putc:1]
+    jmp i e2cX
+e2Arg, jsp e1Arg
+    jmp i e2cX
+
+// e1Arg -- type the error's argument, which is a library failure's message (mtMsg),
+// SRH's search string (search11.ac), TAG's tag, or the character in e1A, after m,n
+// when its 0200 bit is set, as e1Chr shows it.
+// Its arguments are errTxt, e1C and e1A.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+e1Arg, dac eaX
+    lac i [errTxt:MT_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp eaLib
+    lac e1C
+    SKIP_NEXT_IF_DIFFERENT [EC_SRH]
+    jmp eaSrh
+    SKIP_NEXT_IF_DIFFERENT [EC_TAG]
+    jmp eaTag
+    lac e1A
+    and [0200]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp eaCh
+    lio [0155]              // m,n
+    jsp i [putc:1]
+    lio [054]
+    jsp i [putc:1]
+    lio [0156]
+    jsp i [putc:1]
+eaCh, lac e1A
+    and [0177]
+    lia
+    jsp e1Chr
+    jmp i eaX
+eaLib, jsp i [mtMsg:EX_BANK]
+    jmp i eaX
+eaSrh, lac [sbBuf:D11_BANK]
+    dac eaI
+    lac sbLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i eaX
+    cma
+    dac eaN
+eaSL, lac i eaI
+    and [0177]
+    lia
+    jsp e1Chr
+    idx eaI
+    isp eaN
+    jmp eaSL
+    jmp i eaX
+eaTag, lac i [otP:0]
+    dac eaI
+    lac i [otL:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i eaX
+    cma
+    dac eaN
+eaL, lio eaI
+    jsp i [srcGet:0]
+    jsp e1Chr
+    idx eaI
+    isp eaN
+    jmp eaL
+    jmp i eaX
+
+// e1Chr -- type the character in IO as an error message shows it, as TECO C does.
+// A control character is typed as <NUL> <TAB> <LF> <VT> <FF> <CR> <ESC>, or <^x>; the
+// rest as itself.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+e1Chr, dac ecX
+    dio ecC
+    lac ecC
+    sub [040]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ecPl
+    lio [CH_LT]
+    jsp i [putc:1]
+    lac ecC
+    SKIP_NEXT_IF_DIFFERENT [CH_NUL]
+    jmp ecNul
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp ecTab
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp ecLf
+    SKIP_NEXT_IF_DIFFERENT [CH_VT]
+    jmp ecVt
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp ecFf
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp ecCr
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp ecEsc
+ecCtl, lio [CH_UPARROW]
+    jsp i [putc:1]
+    lac ecC
+    add [0100]
+    lia
+    jsp i [putc:1]
+    jmp ecNm+1
+ecNul, lio [nmNul:.]
+    jmp ecNm
+ecTab, lio [nmTab:.]
+    jmp ecNm
+ecLf, lio [nmLf:.]
+    jmp ecNm
+ecVt, lio [nmVt:.]
+    jmp ecNm
+ecFf, lio [nmFf:.]
+    jmp ecNm
+ecCr, lio [nmCr:.]
+    jmp ecNm
+ecEsc, lio [nmEsc:.]
+ecNm, jsp e3Str
+    lio [CH_GT]
+    jsp i [putc:1]
+    jmp i ecX
+ecPl, lio ecC
+    jsp i [putc:1]
+    jmp i ecX
+
+// e3Str -- type the ASCII string at the full address in IO.
+// IO is the string's address.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+e3Str, dac e3X
+    dio e3P
+e3W, lac i e3P
+    dac e3Wd
+    rar 9s
+    and [0777]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp e3Done
+    lia
+    jsp i [putc:1]
+    lac e3Wd
+    and [0777]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp e3Done
+    lia
+    jsp i [putc:1]
+    idx e3P
+    jmp e3W
+e3Done, jmp i e3X
+
+// up11 -- read the source's next character.
+// Running off the end is UTC (nextCh).
+// Has no arguments.
+// AC is the character as upper case, IO the character as it is.
+// Called via jsp.
+up11, dac uX
+    jsp i [nextCh:0]
+    dio uC
+    lac uC
+    and [0177]
+    dac uC
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp uOut
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp uOut
+    lac uC
+    sub [040]
+    jmp i uX
+uOut, lac uC
+    jmp i uX
+
+// clr11 -- clear the arguments as clrArgs does, for bank 14, which clrArgs cannot
+// return to.
+// It leaves no value, operator, comma or number, and no : or @.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+clr11, dac clX
+    dzm i [have:0]
+    dzm i [op:0]
+    dzm i [comma:0]
+    dzm i [inNum:0]
+    dzm i [colon11:0]
+    dzm i [at11:0]
+    jmp i clX
+
+// c11Car -- ^ and a character.
+// ^ and a letter of either case, or one of @ [ \ ] ^ _, is that control character's
+// command; any other is IUC.
+// Entered by jmp from the dispatch, ends by jmp to that command's handler.
+c11Car, jsp i [nextCh:0]
+    dio crC
+    lac crC
+    and [0177]
+    dac crC
+    dac i [eArg:0]
+    sub [0141]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp crUp
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp crUp
+    lac crC
+    sub [040]
+    dac crC
+crUp, lac crC
+    sub [0100]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp crBad
+    dac crC
+    sub [040]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp crBad
+    lac crC
+    dac i [curC:0]
+    add [dTab11:D11_BANK]
+    dac crC
+    lac i crC
+    dac crC
+    jmp i crC
+crBad, ERR11(EC_IUC)
+
+// c11Col -- :, counted for the command after it (colon11).
+// Before a search it is that search's modifier as in the 1965 set, the value before it
+// kept (srCol, search.ac).
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11Col, lac i [colon11:0]
+    add [1]
+    dac i [colon11:0]
+    jsp i [srAhead:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    law 1
+    dac i [srCol:0]
+    jmp i [rsLoop:0]
+
+// c11At -- @, which puts the next command's text argument between two of its
+// first character (at11, txArg in edit11.ac).
+// Before a search it is the 1965 set's up arrow modifier, which is the same (srUp).
+// Entered by jmp from the dispatch, ends by jmp rsLoop.
+c11At, law 1
+    dac i [at11:0]
+    jsp i [srAhead:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [rsLoop:0]
+    law 1
+    dac i [srUp:0]
+    jmp i [rsLoop:0]
+
+// c11E -- E and its letter, dispatched by eLet (data11.ac).
+// The flags ED EH ES ET EU EV EO and EJ are here, E_ is in search11.ac, and the files'
+// commands are in files11.ac; any other is IEC.
+// Entered by jmp from the dispatch, ends by jmp to the letter's handler.
+c11E, jsp up11
+    dio i [eArg:0]
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp c11EUn
+    sub [0101]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp c11Ec
+    dac ecL
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp c11Ec
+    lac ecL
+    add [eLet:D11_BANK]
+    dac ecL
+    lac i ecL
+    dac ecL
+    jmp i ecL
+c11Ec, ERR11(EC_IEC)
+c11ED, lac [flED:.]
+    jmp f11Go
+c11EH, lac [flEH:.]
+    jmp f11Go
+c11ES, lac [flES:.]
+    jmp f11Go
+c11ET, lac [flET:.]
+    jmp f11Go
+c11EU, lac [flEU:.]
+    jmp f11Go
+c11EV, lac [flEV:.]
+    jmp f11Go
+c11EO, lac [flEO:.]
+    jmp f11Go
+c11CX, lac [flCX:.]
+    jmp f11Go
+
+// c11EJ -- nEJ.
+// -1EJ is the machine, 7; every other n, and EJ, is 0.
+// Entered by jmp from c11E, ends by jmp v11Int.
+c11EJ, cli
+    jsp i [argOr:0]
+    SKIP_NEXT_IF_SAME [-1]
+    jmp ejNo
+    lio [FL_EJ1]
+    jmp v11Int
+ejNo, cli
+    jmp v11Int
+
+// f11Go -- a flag's command, its three words at the full address in AC.
+// Alone it is the flag's value, n sets it to n, and m,n clears m's bits and sets n's.
+// ET's 1024, the 340, stays set, and its 512 stays as vt11.ac's type has it.
+// Entered by jmp from c11E's flag entries, ends by jmp rsLoop.
+f11Go, dac fP
+    add [1]
+    dac fP1
+    add [1]
+    dac fP2
+    lac i [have:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fRead
+    lac i [comma:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fMN
+fSet, lac i [val:0]
+    dac i fP
+    lac i [val:0+1]
+    dac i fP1
+    lac i [val:0+2]
+    dac i fP2
+    jmp fKeep
+fMN, lac i [mval:0]
+    cma
+    and i fP
+    ior i [val:0]
+    and [07777]
+    dac i fP
+    lac i [mval:0+1]
+    cma
+    and i fP1
+    ior i [val:0+1]
+    and [07777]
+    dac i fP1
+    lac i [mval:0+2]
+    cma
+    and i fP2
+    ior i [val:0+2]
+    and [07777]
+    dac i fP2
+fKeep, lac flET+2
+    and [0777777-VT_ET]
+    ior [02000]
+    ior i [vtEt:VT_BANK]    // 512 while a video terminal's type is set (vt11.ac)
+    dac flET+2
+fDone, jsp clr11
+    jmp i [rsLoop:0]
+fRead, lac i fP
+    dac i [ra:0]
+    lac i fP1
+    dac i [ra:0+1]
+    lac i fP2
+    dac i [ra:0+2]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+
+// v11Int -- make the count in IO the command's value.
+// Reached by jmp, from any bank, ends by jmp rsLoop.
+v11Int, jsp i [fromInt:0]
+    jsp i [opnd:0]
+    jmp i [rsLoop:0]
+
+// c11F -- F and its letter.
+// FR is in edit11.ac, F> F< F' F| are in control11.ac, and FB FC FS FN F_ in
+// search11.ac; any other is IFC.
+// Entered by jmp from the dispatch, ends by jmp to the letter's handler.
+c11F, jsp up11
+    dio i [eArg:0]
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp c11FR
+    SKIP_NEXT_IF_DIFFERENT [0102]
+    jmp c11FB
+    SKIP_NEXT_IF_DIFFERENT [0103]
+    jmp c11FC
+    SKIP_NEXT_IF_DIFFERENT [0123]
+    jmp c11FS
+    SKIP_NEXT_IF_DIFFERENT [0116]
+    jmp c11FN
+    SKIP_NEXT_IF_DIFFERENT [CH_LARROW]
+    jmp c11FU
+    SKIP_NEXT_IF_DIFFERENT [CH_GT]
+    jmp c11FGt
+    SKIP_NEXT_IF_DIFFERENT [CH_LT]
+    jmp c11FLt
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp c11FAp
+    SKIP_NEXT_IF_DIFFERENT [CH_VBAR]
+    jmp c11FBr
+    ERR11(EC_IFC)
+
+p1X, 0                      // the return addresses
+e2X, 0
+e2cX, 0
+eaX, 0
+ecX, 0
+e3X, 0
+uX, 0
+clX, 0
+p1P, 0
+p1K, 0
+e1K, 0                      // err11's AC, how it was entered
+e1C, 0                      //   the code
+e1A, 0                      //   the character its message names
+e1L, 0                      //   the characters of the message left to type
+e1P, 0
+e1I, 0
+e2P, 0
+e2Wd, 0
+e2C, 0
+eaI, 0
+eaN, 0
+ecC, 0
+ecL, 0                      // c11E's eLet entry, then its handler
+e3P, 0
+e3Wd, 0
+crC, 0
+uC, 0
+fP, 0                       // f11Go's addresses of the flag's three words
+fP1, 0
+fP2, 0
+endloc
+
+// The flags, three words each, as values are (expr.ac), ED EH ES ET EU EV EO ^X in this
+// order, FL_WORDS words that p11Init clears.
+flED, 0
+    0
+    0
+flEH, 0
+    0
+    0
+flES, 0
+    0
+    0
+flET, 0
+    0
+    0
+flEU, 0
+    0
+    0
+flEV, 0
+    0
+    0
+flEO, 0
+    0
+    0
+flCX, 0
+    0
+    0
+
+// The names typed for control characters in an error's argument (e1Chr).
+nmNul, ascii "NUL"
+    0
+nmTab, ascii "TAB"
+    0
+nmLf, ascii "LF"
+    0
+nmVt, ascii "VT"
+    0
+nmFf, ascii "FF"
+    0
+nmCr, ascii "CR"
+    0
+nmEsc, ascii "ESC"
+    0

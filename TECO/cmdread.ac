@@ -1,0 +1,371 @@
+// cmdread.ac -- typing in a command string.
+// Every character is echoed (ALT MODE as $, a control character with no visible
+// effect as up arrow and its letter), RETURN is stored and echoed as CR LF, RUBOUT
+// (DEL or BS) erases the last character and echoes it, and RUBOUTs with no
+// pause erase the whole string, then CR LF when they cease; two ALT MODEs in a row
+// end the string.
+// On the typewriter, which prints what is typed, nothing is echoed but the CR LF
+// after the two ALT MODEs and what RUBOUT erases.
+//
+// The string is typed into one of two areas in bank 10 and, when it ends, that area
+// becomes the command string and the other the typing area, so nothing is copied.
+// Characters are two to a word, the first in the high 9 bits.
+// The command string is kept until the next one ends.
+// After an error (cmdErr), ? typed as the first character types it through the bad
+// command, then CR LF, and nothing runs.
+//
+// Every routine is called via jsp, from any bank, with the extend window open, and
+// returns by jmp i with it open.
+// The file goes in bank 1, beside termio.ac; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, termio.ac, and clkTick in bank 0 (teco.am1).
+
+local ciX, crX, crLoop, crPoll, crKey, crPut, crFull, crRet, crAlt, crAlt1, \
+    crEnd, crSwap, crRub, crRubE, crRun, crShow, crSh1, crShL, crShE, \
+    crC, crT, crI, rbPend, rbRun, rbMs, reX, ceX, \
+    tsX, tsC, tsP, tsLow, tsDone, cgX, cgB, cgI, cgP, cgCom, cgLow, \
+    ecX, ecC, ecPlain, ecAlt, ecCtl
+
+// cmdInit -- set no command string and no error pending, with TY_A the typing area.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+cmdInit, dac ciX
+    lac [TY_A]
+    dac tyBase
+    lac [TY_B]
+    dac csBase
+    dzm tyLen
+    dzm csLen
+    dzm csPos
+    dzm errPend
+    dzm errPos
+    jmp i ciX
+
+// cmdRead -- read a command string, echoing it, and return once two ALT MODEs in a
+// row have ended it.
+// A string longer than TY_TEXT characters rings the bell and takes no more but
+// RUBOUT and ALT MODE.
+// A break is not armed here, so Ctrl-C is text.
+// A lost DCS2 caller leaves through tmErr (brkChk).
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// The string read becomes the command string, csBase, csLen characters with the two
+// ALT MODEs included, and csPos 0.
+// Called via jsp.
+cmdRead, dac crX
+    dzm tyLen
+    dzm rbPend
+    dzm rbRun
+    jsp i [clkTick:0]       // the RUBOUT clock's interval starts now
+
+// the time since the last RUBOUT, where RUB_MS with none ends a run of them
+crLoop, jsp i [clkTick:0]
+    lac rbPend
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp crPoll
+    dio crT
+    lac crT
+    add rbMs
+    dac rbMs
+    sub [RUB_MS]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp crPoll
+    dzm rbPend
+    jsp rbEnd
+crPoll, jsp pollc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp crLoop
+    dio crC
+    lac crC
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp crRub
+    SKIP_NEXT_IF_DIFFERENT [CH_BS]
+    jmp crRub
+    // any other key ends a run of RUBOUTs, and a ? first after an error shows it
+    dzm rbPend
+    jsp rbEnd
+    lac errPend
+    dzm errPend
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp crKey
+    lac crC
+    SKIP_NEXT_IF_DIFFERENT [CH_QMARK]
+    jmp crShow
+crKey, lac crC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp crRet
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp crRet
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp crAlt
+    lac tyLen
+    sub [TY_TEXT]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp crFull
+crPut, lio crC
+    jsp tyStore
+    lac useTty
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crLoop              // the typewriter printed the key itself
+    lio crC
+    jsp echoCh
+    jmp crLoop
+crFull, jsp ringBell
+    jmp crLoop
+
+// RETURN, which reads as LF over DCS2 and from the typewriter, or a bare
+// CR, stores CR and the LF TECO imagines after it
+crRet, lac tyLen
+    sub [TY_RET]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp crFull
+    lio [CH_CR]
+    jsp tyStore
+    lio [CH_LF]
+    jsp tyStore
+    lac useTty
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crLoop
+    jsp newline
+    jmp crLoop
+
+// ALT MODE, the second in a row ending the string; a first one needs room
+// for itself and the second
+crAlt, lac tyLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp crAlt1
+    sub [1]
+    lia
+    jsp tyGet
+    dio crT
+    lac crT
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp crEnd
+crAlt1, lac tyLen
+    sub [TY_MAX-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp crFull
+    jmp crPut
+crEnd, lio crC
+    jsp tyStore
+    lac useTty
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crSwap
+    lio [CH_DOLLAR]
+    jsp putc
+crSwap, jsp newline
+    lac tyBase
+    lio csBase
+    dac csBase
+    dio tyBase
+    lac tyLen
+    dac csLen
+    dzm csPos
+    jmp i crX
+
+// RUBOUT, the first erasing one character and echoing it, or on an empty
+// string typing CR LF; one within RUB_MS of the last erases the rest
+crRub, dzm errPend
+    lac rbPend
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crRun
+    law 1
+    dac rbPend
+    dzm rbMs
+    lac tyLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp crRubE
+    sub [1]
+    dac tyLen
+    lia
+    jsp tyGet
+    jsp echoCh
+    jmp crLoop
+crRubE, jsp newline
+    jmp crLoop
+crRun, dzm rbMs
+    lac rbRun
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crLoop
+    law 1
+    dac rbRun
+    dzm tyLen
+    jmp crLoop
+
+// ? after an error echoes the ?, CR LF, the command string through the
+// bad command as it echoed, and CR LF
+crShow, lac useTty
+    SKIP_NEXT_IF_AC_ZERO
+    jmp crSh1
+    lio [CH_QMARK]
+    jsp putc
+crSh1, jsp newline
+    dzm crI
+crShL, lac crI
+    sub errPos
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp crShE
+    lac crI
+    sub csLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp crShE
+    lio crI
+    jsp csGet
+    jsp echoCh
+    idx crI
+    jmp crShL
+crShE, jsp newline
+    jmp crLoop
+
+// rbEnd -- end a run of RUBOUTs, if one was on, with CR LF.
+// Has no arguments and no return values.
+// Does not preserve AC or IO.
+// Called via jsp.
+rbEnd, dac reX
+    lac rbRun
+    dzm rbRun
+    SKIP_NEXT_IF_AC_ZERO
+    jsp newline
+    jmp i reX
+
+// cmdErr -- record an error at the command string's character whose index is in IO,
+// for ? (crShow).
+// The error path itself is interp.ac's.
+// IO is the index.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Sets errPos and errPend.
+// Called via jsp.
+cmdErr, dac ceX
+    dio errPos
+    law 1
+    dac errPend
+    jmp i ceX
+
+// tyStore -- add the character in IO to the typing area; the caller has made sure
+// there is room.
+// IO is the character.
+// No return value.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+tyStore, dac tsX
+    dio tsC
+    lac tyLen
+    rar 1s
+    and [PK_WORD]
+    add tyBase
+    dac tsP
+    lac tyLen
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tsLow
+    lac tsC
+    ral 9s
+    dac i tsP
+    jmp tsDone
+tsLow, lac i tsP
+    and [PK_HI]
+    ior tsC
+    dac i tsP
+tsDone, idx tyLen
+    jmp i tsX
+
+// csGet, tyGet -- get the character whose index is in IO, of the command string or
+// the typing area.
+// IO is the index.
+// Returns the character in both AC and IO.
+// Called via jsp.
+csGet, dac cgX
+    lac csBase
+    dac cgB
+    jmp cgCom
+tyGet, dac cgX
+    lac tyBase
+    dac cgB
+cgCom, dio cgI
+    lac cgI
+    rar 1s
+    and [PK_WORD]
+    add cgB
+    dac cgP
+    lac cgI
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cgLow
+    lac i cgP
+    rar 9s
+    and [PK_LO]
+    lia
+    jmp i cgX
+cgLow, lac i cgP
+    and [PK_LO]
+    lia
+    jmp i cgX
+
+// echoCh -- type the character in IO as typing it echoes, ALT MODE as $, a
+// control character other than TAB, LF, VT, FF and CR as up arrow and its letter,
+// the rest as itself; on the typewriter, as putc types it.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+echoCh, dac ecX
+    dio ecC
+    lac useTty
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ecPlain
+    lac ecC
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp ecAlt
+    sub [040]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ecPlain             // a printing character
+    lac ecC
+    sub [CH_TAB]
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    jmp ecCtl               // below TAB
+    sub [CH_CR-CH_TAB+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ecCtl               // above CR
+ecPlain, lio ecC
+    jsp putc
+    jmp i ecX
+ecAlt, lio [CH_DOLLAR]
+    jsp putc
+    jmp i ecX
+ecCtl, lio [CH_UPARROW]
+    jsp putc
+    lac ecC
+    add [0100]
+    lia
+    jsp putc
+    jmp i ecX
+
+ciX, 0                      // the return addresses
+crX, 0
+reX, 0
+ceX, 0
+tsX, 0
+cgX, 0
+ecX, 0
+crC, 0
+crT, 0
+crI, 0
+rbPend, 0                   // 1 within RUB_MS of the last RUBOUT
+rbRun, 0                    // 1 while RUBOUTs come with no pause
+rbMs, 0                     // milliseconds since the last RUBOUT
+tsC, 0
+tsP, 0
+cgB, 0
+cgI, 0
+cgP, 0
+ecC, 0
+endloc
+
+tyBase, 0                   // the typing area's first word, TY_A or TY_B
+csBase, 0                   // the command string's, the other
+tyLen, 0                    // characters typed so far
+csLen, 0                    // characters in the command string
+csPos, 0                    // the command being run, an index (interp.ac keeps it)
+errPend, 0                  // 1 from an error until the next key
+errPos, 0                   // the bad command's index in the command string

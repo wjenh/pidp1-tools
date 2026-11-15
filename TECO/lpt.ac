@@ -1,0 +1,145 @@
+// lpt.ac -- the line printer, for /E and /B.
+// It is the Type 62 by default, the Type 64 when TECO is built with LPT_TYPE64 1,
+// which must agree with lptType64 in pidp1.config, since the two printers
+// share IOT 45's codes for different functions.
+// The printer runs in ASCII mode, set at the start.
+//
+// A line is gathered in the printer's buffer and printed at its LF, single
+// spaced; a FORM prints the line and starts a new page.
+// CR is passed over, so the buffer's CR LF is one line end; TAB goes to the
+// next multiple of 8 columns; ALT MODE prints as $, as T types it; any other
+// control character has no glyph and is passed over.
+// A line longer than LPT_COLS, the printer's 120, goes on in the next line.
+//
+// Every routine is entered by jsp from bank 1 with the extend window open
+// and returns by jmp i.
+// The file goes in bank 1; its data words follow its code.
+// Needs teco.ah, <AIDS/skipmacros.ah>, and the printer's definitions
+// (teco.am1 includes <LPT/type62defs.ah> or <LPT/type64defs.ah>).
+
+local liX, lpX, lpTab, lpTabL, lpChar, lpEsc, lpNl, lpFf, loX, lnX, lfX, leX, lpC
+
+// lpInit -- put the printer in ASCII mode, at a line's start.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+lpInit, dac liX
+    dio lpC
+    lio [1]
+    lpm
+    dzm lpCol
+    lio lpC
+    jmp i liX
+
+// lpPut -- print an ASCII character.
+// IO is the character.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp.
+lpPut, dac lpX
+    dio lpC
+    lac lpC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp lpNl
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp lpFf
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp lpTab
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp lpEsc
+    sub [040]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i lpX               // a control character, which has no glyph
+    lac lpC
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp i lpX
+    jmp lpChar
+lpEsc, law CH_DOLLAR
+    dac lpC
+lpChar, jsp lpOne
+    jmp i lpX
+// TAB spaces to the next multiple of 8 columns, at least one space
+lpTab, law 040
+    dac lpC
+lpTabL, jsp lpOne
+    lac lpCol
+    and [TAB_STOP-1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lpTabL
+    jmp i lpX
+lpNl, jsp lpLine
+    jmp i lpX
+lpFf, jsp lpPage
+    jmp i lpX
+
+// lpOne -- put lpC into the printer's buffer, the line printed first when it
+// is full.
+// Reads lpC.
+// No return value.
+// Does not preserve AC or IO.
+// Called via jsp, within this file.
+lpOne, dac loX
+    lac lpCol
+    sub [LPT_COLS]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jsp lpLine
+    // both printers take the character from IO's low 9 bits, the high 9
+    // NUL, which they pass over
+    lio lpC
+#if LPT_TYPE64
+    lpb
+#else
+    flb
+#endif
+    idx lpCol
+    jmp i loX
+
+// lpLine -- print the line and space one line.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+lpLine, dac lnX
+#if LPT_TYPE64
+    pas i LPT_SP1           // SP0 is the Type 64's overstrike
+#else
+    prl                     // the Type 62 latches the line, slp writes it
+    slp i LPT_SP0
+#endif
+    dzm lpCol
+    jmp i lnX
+
+// lpPage -- print the line and start a new page.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+lpPage, dac lfX
+#if LPT_TYPE64
+    pas i LPT_SP7
+#else
+    prl
+    slp i LPT_SP7
+#endif
+    dzm lpCol
+    jmp i lfX
+
+// lpEnd -- end an output command by printing a line begun, so what was
+// sent shows in the printer's file at once.
+// Has no arguments and no return values.
+// AC is not preserved, IO is preserved.
+// Called via jsp.
+lpEnd, dac leX
+    lac lpCol
+    SKIP_NEXT_IF_AC_ZERO
+    jsp lpLine
+    jmp i leX
+
+liX, 0                      // the return addresses
+lpX, 0
+loX, 0
+lnX, 0
+lfX, 0
+leX, 0
+lpC, 0                      // the character being printed
+endloc
+
+lpCol, 0                    // characters in the printer's line so far
