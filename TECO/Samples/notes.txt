@@ -1,0 +1,2 @@
+A read-only file with a two-part name.
+EF cannot replace it.
