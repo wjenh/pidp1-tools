@@ -13,6 +13,8 @@ The suggested install process is to install into /opt:
 ```
 cd /opt
 sudo mkdir pidp1-tools
-sudo git clone --depth 1 https://github.com/wjenh/pidp1-mods.git
+sudo chown youruser pidp1-tools
+git clone --depth 1 https://github.com/wjenh/pidp1-tools.git
 ```
-This avoids checking out all the history that will just use up space.
+This avoids checking out all the history that will just use up space
+and sets ownership to you.
