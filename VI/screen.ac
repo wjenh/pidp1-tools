@@ -1,0 +1,1994 @@
+// screen.ac -- vi's screen on a VT100 or VT102: the
+// window's rows kept by keys, the update that sends only what changed, the
+// scrolling region, ex's output on the status line, and 3.7's rules for the
+// window's top (ex_vwind.c: vmoveto's context, vup, vdown, vback, vfit).
+//
+// The window is rows 1 to scW (lines less one), inside the VT100's
+// scrolling region; row scW+1 is the status line. scTop is the line on the
+// window's first row; a line takes as many rows as its width needs, a ~ row
+// is past the end, and @ rows fill the bottom when the next line does not
+// fit. 3.7's vcnt (the lines wholly shown) and vcline (dot's place among
+// them) follow from scTop and dot. A line partly scrolled off the top is not
+// kept, as 3.7 keeps it: the top is always a line's first row.
+//
+// The update (scRefresh), unless keys wait to be read (scRfNow regardless,
+// for a line insert mode opens): the rows wanted, as
+// keys (vi.ah's ROW_KEYS), from scTop down; then, at the first row that
+// differs, rows that moved are moved (IL and DL on a VT102, else the region
+// narrowed to them and RI or IND); then each row whose key differs from what
+// it shows is painted (CUP, EL, its text); then the cursor is placed. A
+// line's width comes from its record: its length when the record is plain,
+// else from its text, cached in the record's second header word (compaction's
+// forwarding word, otherwise unused) while tabstop is 8: REC_MARK set, 0200000
+// for list, and the text's columns.
+//
+// A character is shown as 3.7 shows it: a TAB as blanks to the next stop
+// (^I under list), another control character or DEL as ^ and its letter;
+// number puts the line's number in 6 columns and 2 blanks before it, list a $
+// after it. The cursor is on the last column of its character, after the
+// number on an empty line, as 3.7's vsetcurs.
+//
+// While exOut is set, putc gives each character of ex's output to scOutC:
+// the first goes to the status line, a new line is held until more follows;
+// when a second line starts, the region is reset so the whole screen
+// scrolls, and scExDone reports it, for [Hit return to continue] (scHitRet).
+//
+// Routines are entered by jsp with the extend window open and return by jmp
+// i; their arguments are named words. In bank SCR_BANK. Needs vi.ah,
+// <AIDS/skipmacros.ah>, termio.ac and keys.ac (bank TERM_BANK), lines.ac
+// (bank 0), options.ac (bank EX_BANK) and vmain.ac's vCurs and vPeek (bank
+// VI_BANK).
+
+local giL, gi1, gnTab, gnPend, gnChar, gnLo, gnGot, gnT, gnCtl, gnEnd, \
+    gnNone, gnOut, wdL1, wdL2, wdW, wdHit, wdSum, wdFull, wdF, rwOne, coL, \
+    coEnd, fcL, fcG, fcE, op1, op2, op3, op4, op5, op6, unL, scRgnSet, \
+    scWinRgn, scCup, cuOne, scEl, scCsi, scDec, sdL, sdO, lyLoop, lyRec, \
+    lyRk, lyDot, lyTil, lyAt, lyAtL, lyPut, rf0, rf1, rfBl, rfCx, rfLy, rfLoop, \
+    rfNext, rfCur, \
+    scPaint, ppText, ppSkL, ppOut, ppFl, ppG, ppSpL, ppC1, ppB, scEq, eqY, \
+    eqN, shSA, shWA, shCp, scShift, shFind, shGot, shT1, shS0, shSL, shUp, \
+    shUp1, shUp2, shUpL, shUpK, shUpKL, shZ, shDn, shDn1, shDn2, shDnL, \
+    shDnK, shDnKL, shDnZ, shDnZL, shRun, rnL, rnE, ocTx, ocPos, ocFl, ocLf, \
+    scCrLf, clfX, \
+    edL, edY, edN, bkL, bk1, bkE, cxUp, cxBot, cxMid, cxSet, scFit, ftJ, ftE, \
+    scThird, dn1, dn2, dnRoll, dn3, dn4, dn5, dnCx0, dnCx, scBeep0, up1, up2, \
+    upRoll, upCx0, upCx, up3, upBeep, hoCx, giX, giP, giD, giV, gnX, gnG, \
+    gnC, dvX, dvD, wdX, wdR, wdH, wdT, wdP, wdK, rwX, coX, fcX, fcCol, fcCp, \
+    opX, opChg, clX, unX, unP, unN, rsX, rsT, rsB, csX, cuX, cuR, cuC, elX, \
+    csiX, sdX, sdV, sdN, sdP, lyX, lyR, lyL, lyP, lyD, lyK, lyRc, lyKey, \
+    lyKey1, lyKey2, lyKX, rfX, rfR, rfS, rfW, rfP, rfLen, rfCol, ppX, ppR, \
+    ppK, ppSk, ppN, ppSp, ppC, eqX, eqA, eqB, saX, saT, waX, cpX, shX, shR, \
+    shS, shT, shA, shB, shI, shM, shN, shP, shQ, rnX, rnM, rnA, rnB, rnC, \
+    enX, quX, stX, oaX, ocX, ocC, ocP, ocF, edX, hrX, hrK, bkX, bkT, bkD, \
+    cxX, cxA, cxD, ftX, ftT, ftC, tdX, dnX, dnT, upX, upT, twX, hoX, hoV, \
+    rwP, rwW, rfC1, spL, rkL, rkS, spX, spT, rkX, rkP, rkN, ivX, shwL, shwG, \
+    shwX, shwLn, shwR, shwC
+
+// --- the glyphs of a line
+
+// gsInit -- start the glyphs of the record whose address is in IO: with
+// gsLine not 0, number's prefix first, showing gsLine; with gsDolOn set and
+// list on, list's $ last. AC and IO are clobbered.
+gsInit, dac giX
+    dio gsP
+    lac i gsP
+    and [REC_LEN]
+    dac gsN
+    dac gsLen
+    lac gsP
+    add [REC_HDR]
+    dac gsP
+    dzm gsHalf
+    dzm gsI
+    dzm gsTab
+    dzm gsPend
+    dzm gsCol
+    dzm gsTc
+    dzm gsPreN
+    lac scList
+    dac gsLst
+    and gsDolOn
+    dac gsDol
+    lac scTs
+    dac gsTs
+    lac gsLine
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i giX
+// the prefix: the number right-justified in NUM_W columns, blanks to NUM_COLS
+    lac [gsPre:SCR_BANK]
+    dac giP
+    law NUM_COLS
+    dac giD
+giL, law CH_SP
+    dac i giP
+    idx giP
+    lac giD
+    sub [1]
+    dac giD
+    SKIP_NEXT_IF_AC_ZERO
+    jmp giL
+    lac [gsPre:SCR_BANK]
+    add [NUM_W-1]
+    dac giP
+    lac gsLine
+    dac giV
+gi1, lio giV
+    law 0d10
+    dac dvD
+    jsp scDiv
+    dac giV
+    lai
+    add [CH_0]
+    dac i giP
+    lac giP
+    sub [1]
+    dac giP
+    lac giV
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gi1
+    lac [gsPre:SCR_BANK]
+    dac gsPreP
+    law NUM_COLS
+    dac gsPreN
+    jmp i giX
+
+// gsNext -- the next glyph. AC is its character, or -1 past the end; gsCh is
+// the index of the character it shows (-1 for the prefix, the length for
+// $), gsLast 1 when it is that character's last glyph; gsCol counts the
+// glyphs given. IO is clobbered.
+gsNext, dac gnX
+    lac gsPreN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gnTab
+    sub [1]
+    dac gsPreN
+    lac [0777776]
+    dac gsCh
+    dzm gsLast
+    lac i gsPreP
+    dac gnG
+    idx gsPreP
+    lac gnG
+    jmp gnOut
+// the blanks of a TAB
+gnTab, lac gsTab
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gnPend
+    sub [1]
+    dac gsTab
+    dzm gsLast
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx gsLast
+    law CH_SP
+    jmp gnOut
+// the letter of a ^X
+gnPend, lac gsPend
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gnChar
+    dac gnG
+    dzm gsPend
+    law 1
+    dac gsLast
+    lac gnG
+    jmp gnOut
+// the next character: the high half of a word, then the low
+gnChar, lac gsN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gnEnd
+    sub [1]
+    dac gsN
+    lac gsI
+    dac gsCh
+    idx gsI
+    lac gsHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gnLo
+    lac i gsP
+    rar 9s
+    and [PK_LO]
+    dac gnC
+    law 1
+    dac gsHalf
+    jmp gnGot
+gnLo, lac i gsP
+    and [PK_LO]
+    dac gnC
+    dzm gsHalf
+    idx gsP
+gnGot, lac gnC
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp gnT
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp gnCtl
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp gnCtl
+    law 1
+    dac gsLast
+    lac gnC
+    jmp gnOut
+// a TAB: blanks to the next stop, or ^I under list
+gnT, lac gsLst
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gnCtl
+    lac gsTs
+    sub gsTc
+    sub [1]
+    dac gsTab
+    dzm gsLast
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx gsLast
+    law CH_SP
+    jmp gnOut
+gnCtl, lac gnC
+    xor [0100]
+    dac gsPend
+    dzm gsLast
+    law CH_CARET
+    jmp gnOut
+// the end: list's $, then nothing
+gnEnd, lac gsDol
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gnNone
+    dzm gsDol
+    lac gsI
+    dac gsCh
+    law 1
+    dac gsLast
+    law CH_DOLLAR
+    jmp gnOut
+gnNone, lac [0777776]
+    jmp i gnX
+// each glyph is a column: gsTc keeps the column within a tab stop
+gnOut, dac gnG
+    idx gsCol
+    idx gsTc
+    sub gsTs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    dzm gsTc
+    lac gnG
+    jmp i gnX
+
+// scDiv -- the number in IO, 0 to 0377777, divided by dvD. AC is the
+// quotient, IO the remainder.
+scDiv, dac dvX
+    cla
+    scl 1s
+    div dvD
+    hlt                     // no overflow: dvD is not 0
+    jmp i dvX
+
+// scWid -- the columns of the record whose address is in IO: number's
+// prefix, its text, list's $. AC is the columns; IO is clobbered.
+scWid, dac wdX
+    dio wdR
+    lac i wdR
+    dac wdH
+    and [REC_LEN]
+    dac wdT
+    lac wdH
+    and [REC_PLAIN]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wdSum               // plain: its length
+    lac scTs
+    SKIP_NEXT_IF_SAME [TAB_STOP]
+    jmp wdFull
+// tabstop 8: the text's columns, cached for list on or off
+    lac wdR
+    add [1]
+    dac wdP
+    lac scList
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wdL1
+    lac [REC_MARK]
+    jmp wdL2
+wdL1, lac [REC_MARK 0200000]
+wdL2, dac wdK
+    lac i wdP
+    and [REC_MARK 0200000]
+    SKIP_NEXT_IF_DIFFERENT wdK
+    jmp wdHit
+    lio wdR
+    dzm gsLine
+    dzm gsDolOn
+    jsp gsInit
+wdW, jsp gsNext
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp wdW
+    lac gsCol
+    dac wdT
+    ior wdK
+    dac i wdP
+    jmp wdSum
+wdHit, lac i wdP
+    and [0177777]
+    dac wdT
+wdSum, lac wdT
+    add scPre
+    add scList
+    jmp i wdX
+// another tabstop: the prefix moves the stops, so the whole line is walked
+wdFull, lio wdR
+    lac scPre
+    dac gsLine
+    law 1
+    dac gsDolOn
+    jsp gsInit
+wdF, jsp gsNext
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp wdF
+    lac gsCol
+    jmp i wdX
+
+// scRows -- 3.7's vdepth: the rows line IO takes, at least 1; while insert
+// mode shows it, a column more for the cursor after the text.
+// AC is the rows; IO is clobbered.
+scRows, dac rwX
+    jsp scPtr
+    dac rwP
+    lia
+    jsp scWid
+    dac rwW
+    lac rwP
+    sub [ED_REC]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx rwW
+    lac rwW
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rwOne
+    add scCols
+    sub [1]
+    lia
+    lac scCols
+    dac dvD
+    jsp scDiv
+    jmp i rwX
+rwOne, law 1
+    jmp i rwX
+
+// scColOf -- 3.7's column(cursor): the columns line IO takes up to the end
+// of its character scIdx, number's prefix included; scIdx -1 is the prefix
+// alone, and an index past the end the whole line.
+// AC is the column count; IO is clobbered.
+scColOf, dac coX
+    jsp scPtr
+    lia
+    lac scPre
+    dac gsLine
+    dzm gsDolOn
+    jsp gsInit
+    lac scIdx
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp coL
+    lac scPre
+    jmp i coX
+coL, jsp gsNext
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp coEnd
+    lac gsLast
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp coL
+    lac gsCh
+    SKIP_NEXT_IF_SAME scIdx
+    jmp coL
+coEnd, lac gsCol
+    jmp i coX
+
+// scShowAt -- the cursor on the last column of character scIdx of line IO,
+// a line shown from scTop to dot, the screen up to date (showmatch's match,
+// vinsert.ac's vaMat). AC and IO are clobbered.
+scShowAt, dac shwX
+    dio shwLn
+    jsp scColOf
+    sub [1]
+    lia
+    lac scCols
+    dac dvD
+    jsp scDiv
+    add scDotR
+    dac shwR
+    dio shwC
+shwL, lac shwLn             // up by the rows of the lines down to dot's
+    SKIP_NEXT_IF_DIFFERENT DOT
+    jmp shwG
+    lio shwLn
+    jsp scRows
+    cma
+    add shwR
+    dac shwR
+    idx shwLn
+    jmp shwL
+shwG, lac shwR
+    add [1]
+    dac cuR
+    lac shwC
+    add [1]
+    dac cuC
+    jsp scCup
+    jmp i shwX
+
+// scFindCol -- 3.7's vfindcol(scN) on line IO: the first character whose
+// last column reaches scN, or the last character.
+// AC is its index; IO is clobbered.
+scFindCol, dac fcX
+    jsp scPtr
+    lia
+    lac scPre
+    dac gsLine
+    dzm gsDolOn
+    jsp gsInit
+    lac scPre
+    dac fcCol
+    dzm fcCp
+fcL, lac fcCp
+    SKIP_NEXT_IF_DIFFERENT gsLen
+    jmp fcE
+    lac fcCol
+    sub scN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp fcE
+fcG, jsp gsNext
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp fcE
+    lac gsCh
+    SKIP_NEXT_IF_SAME fcCp
+    jmp fcG
+    lac gsLast
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fcG
+    lac gsCol
+    dac fcCol
+    idx fcCp
+    jmp fcL
+fcE, lac fcCp
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    jmp i fcX
+
+// scPtr -- lnPtr, except that while insert mode shows dot's line (scEdit)
+// its record is ED_REC, the line as typed so far (vinsert.ac).
+// AC is the record's address; IO is clobbered.
+scPtr, dac spX
+    dio spT
+    lac scEdit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp spL
+    lac spT
+    SKIP_NEXT_IF_SAME DOT
+    jmp spL
+    lac [ED_REC]
+    jmp i spX
+spL, lio spT
+    jsp i [lnPtr:0]
+    jmp i spX
+
+// scRekey -- each row the screen shows from record scRkF now said to show
+// scRkT: KEY_NONE (0) to have it painted again. AC and IO are clobbered.
+scRekey, dac rkX
+    lac [ROW_KEYS]
+    dac rkP
+    lac scW
+    dac rkN
+rkL, lac rkN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp i rkX
+    lac i rkP
+    SKIP_NEXT_IF_SAME scRkF
+    jmp rkS
+    lac scRkT
+    dac i rkP
+rkS, lac rkP
+    add [ROW_W]
+    dac rkP
+    lac rkN
+    sub [1]
+    dac rkN
+    jmp rkL
+
+// scInval -- the rows that show ED_REC painted again at the next update.
+// AC and IO are clobbered.
+scInval, dac ivX
+    lac [ED_REC]
+    dac scRkF
+    dzm scRkT
+    jsp scRekey
+    jmp i ivX
+
+// --- the options, the terminal's sequences
+
+// scOpts -- the layout's options read again: the window's rows (lines less
+// one), the columns, number, list, tabstop; and whether the terminal is a
+// VT102. lines or columns changed clears the screen; the others make every
+// row unknown. AC and IO are clobbered.
+scOpts, dac opX
+    dzm opChg
+    lac i [oLines:EX_BANK]
+    sub [1]
+    SKIP_NEXT_IF_DIFFERENT scW
+    jmp op1
+    dac scW
+    law 2
+    dac opChg
+op1, lac i [oColumns:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT scCols
+    jmp op2
+    dac scCols
+    law 2
+    dac opChg
+op2, lac i [oNumber:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    law NUM_COLS
+    SKIP_NEXT_IF_DIFFERENT scPre
+    jmp op3
+    dac scPre
+    lac opChg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law 1
+    dac opChg
+op3, lac i [oList:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    SKIP_NEXT_IF_DIFFERENT scList
+    jmp op4
+    dac scList
+    lac opChg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law 1
+    dac opChg
+op4, lac i [oTabStop:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT scTs
+    jmp op5
+    dac scTs
+    lac opChg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law 1
+    dac opChg
+op5, dzm scVt2
+    lac i [oTerm:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [TERM_VT102]
+    idx scVt2
+    lac opChg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i opX
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp op6
+    jsp scClr
+    jmp i opX
+op6, jsp scUnk
+    jmp i opX
+
+// scClr -- the screen cleared, every row unknown, the region to be set
+// again. AC and IO are clobbered.
+scClr, dac clX
+    jsp scCsi
+    lio ['H']
+    jsp i [rawc:TERM_BANK]
+    jsp scCsi
+    lio ['2']
+    jsp i [rawc:TERM_BANK]
+    lio ['J']
+    jsp i [rawc:TERM_BANK]
+    jsp scUnk
+    dzm scRgn
+    jmp i clX
+
+// scUnk -- every row of the window unknown. AC is clobbered, IO preserved.
+scUnk, dac unX
+    lac [ROW_KEYS]
+    dac unP
+    law ROW_MAX
+    dac unN
+unL, dzm i unP
+    lac unP
+    add [ROW_W]
+    dac unP
+    lac unN
+    sub [1]
+    dac unN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp unL
+    jmp i unX
+
+// scRgnSet -- the scrolling region, rows rsT to rsB; the cursor goes home.
+// AC and IO are clobbered.
+scRgnSet, dac rsX
+    jsp scCsi
+    lio rsT
+    jsp scDec
+    lio [CH_SEMI]
+    jsp i [rawc:TERM_BANK]
+    lio rsB
+    jsp scDec
+    lio ['r']
+    jsp i [rawc:TERM_BANK]
+    jmp i rsX
+
+// scWinRgn -- the region the window's rows, 1 to scW. AC and IO are
+// clobbered.
+scWinRgn, dac csX
+    law 1
+    dac rsT
+    lac scW
+    dac rsB
+    jsp scRgnSet
+    law 1
+    dac scRgn
+    jmp i csX
+
+// scCup -- the cursor to row cuR, column cuC, both from 1.
+// AC and IO are clobbered.
+scCup, dac cuX
+    jsp scCsi
+    lio cuR
+    jsp scDec
+    lac cuC
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp cuOne
+    lio [CH_SEMI]
+    jsp i [rawc:TERM_BANK]
+    lio cuC
+    jsp scDec
+cuOne, lio ['H']
+    jsp i [rawc:TERM_BANK]
+    jmp i cuX
+
+// scEl -- erase to the line's end. AC and IO are clobbered.
+scEl, dac elX
+    jsp scCsi
+    lio ['K']
+    jsp i [rawc:TERM_BANK]
+    jmp i elX
+
+// scCsi -- ESC [. AC and IO are clobbered.
+scCsi, dac csiX
+    lio [CH_ESC]
+    jsp i [rawc:TERM_BANK]
+    lio [CH_LBRK]
+    jsp i [rawc:TERM_BANK]
+    jmp i csiX
+
+// scDec -- the number in IO, 0 to 0377777, in decimal. AC and IO are
+// clobbered.
+scDec, dac sdX
+    dio sdV
+    dzm sdN
+    lac [sdBuf:SCR_BANK]
+    dac sdP
+sdL, lio sdV
+    law 0d10
+    dac dvD
+    jsp scDiv
+    dac sdV
+    lai
+    add [CH_0]
+    dac i sdP
+    idx sdP
+    idx sdN
+    lac sdV
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sdL
+sdO, lac sdP
+    sub [1]
+    dac sdP
+    lio i sdP
+    jsp i [rawc:TERM_BANK]
+    lac sdN
+    sub [1]
+    dac sdN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sdO
+    jmp i sdX
+
+// --- the layout and the update
+
+// scLayout -- the keys wanted for the window's rows, from scTop down, into
+// scWant; scCnt the lines wholly shown (3.7's vcnt); scDotR the row dot's
+// line starts on, -1 when it is not shown. AC and IO are clobbered.
+scLayout, dac lyX
+    dzm lyR
+    lac scTop
+    dac lyL
+    dzm scCnt
+    lac [0777776]
+    dac scDotR
+    lac [scWant:SCR_BANK]
+    dac lyP
+lyLoop, lac lyR
+    SKIP_NEXT_IF_DIFFERENT scW
+    jmp i lyX
+    lac lyL
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp lyTil
+    lio lyL
+    jsp scRows
+    dac lyD
+    add lyR
+    sub scW
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp lyAt
+    lac lyL
+    SKIP_NEXT_IF_DIFFERENT DOT
+    jmp lyDot
+lyRec, lio lyL
+    jsp scPtr
+    dac lyRc
+    dzm lyK
+lyRk, lac lyRc
+    dac lyKey
+    lac lyK
+    dac lyKey1
+    dzm lyKey2
+    lac scPre
+    SKIP_NEXT_IF_AC_ZERO
+    lac lyL
+    dac lyKey2
+    jsp lyPut
+    idx lyK
+    SKIP_NEXT_IF_SAME lyD
+    jmp lyRk
+    idx lyL
+    idx scCnt
+    jmp lyLoop
+lyDot, lac lyR
+    dac scDotR
+    jmp lyRec
+lyTil, law KEY_TILDE
+    dac lyKey
+    dzm lyKey1
+    dzm lyKey2
+    jsp lyPut
+    jmp lyLoop
+// the next line does not fit: @ rows to the window's end
+lyAt, law KEY_AT
+    dac lyKey
+    dzm lyKey1
+    dzm lyKey2
+lyAtL, lac lyR
+    SKIP_NEXT_IF_DIFFERENT scW
+    jmp i lyX
+    jsp lyPut
+    jmp lyAtL
+
+// lyPut -- lyKey as the next row's key, lyR and lyP past it.
+// AC is clobbered, IO preserved.
+lyPut, dac lyKX
+    lac lyKey
+    dac i lyP
+    idx lyP
+    lac lyKey1
+    dac i lyP
+    idx lyP
+    lac lyKey2
+    dac i lyP
+    idx lyP
+    idx lyR
+    jmp i lyKX
+
+// scRefresh -- the screen made to show the window from scTop and the cursor
+// at dot's character vCurs, unless keys wait to be read. AC and IO are
+// clobbered.
+scRefresh, dac rfX
+    lac i [taCnt:TERM_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i rfX
+    lac i [vPeek:VI_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i rfX
+    jsp i [kyMacW:TERM_BANK] // nor while a map's keys wait
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i rfX
+    jmp rf0
+
+// scRfNow -- scRefresh whether keys wait or not: insert mode's line just
+// opened, which 3.7 shows as it opens it (vinsert.ac's vaTop). AC and IO are
+// clobbered.
+scRfNow, dac rfX
+rf0, jsp scOpts
+    lac scRgn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp scWinRgn
+    jsp scLayout
+    lac scDotR
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rf1
+// dot not shown (3.7's vrepaint): the line just past the window's last
+// whole line scrolls onto the bottom row; any other is put in the middle,
+// as vcontext(dot, '.')
+    lac DOT
+    sub scTop
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp rfBl
+    jmp rfCx
+rfBl, lac DOT
+    sub [1]
+    dac ftL
+    lio scTop
+    jsp scFit
+    sub scW
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp rfCx
+    lio DOT
+    jsp scRows
+    cma
+    add scW
+    dac bkC
+    lio DOT
+    jsp scBack
+    dac scTop
+    jmp rfLy
+rfCx, law CH_DOT
+    dac scCtx
+    lio DOT
+    jsp scContext
+rfLy, jsp scLayout
+rf1,
+#ifndef VICTL_KEYS
+    jsp scShift
+#endif
+// each row whose key is not the one wanted
+    dzm rfR
+    lac [ROW_KEYS]
+    dac rfS
+    lac [scWant:SCR_BANK]
+    dac rfW
+rfLoop, lac rfR
+    SKIP_NEXT_IF_DIFFERENT scW
+    jmp rfCur
+#ifndef VICTL_KEYS                  // the control leg's build paints every row
+    lac rfS
+    dac eqA
+    lac rfW
+    dac eqB
+    jsp scEq
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rfNext
+#endif
+    lac rfR
+    dac ppR
+    lac rfW
+    dac ppK
+    jsp scPaint
+    lac rfW                 // it shows that key now
+    dac rfP
+    lac i rfP
+    dac i rfS
+    idx rfP
+    idx rfS
+    lac i rfP
+    dac i rfS
+    idx rfP
+    idx rfS
+    lac i rfP
+    dac i rfS
+    lac rfS
+    sub [2]
+    dac rfS
+rfNext, lac rfS
+    add [ROW_W]
+    dac rfS
+    lac rfW
+    add [ROW_W]
+    dac rfW
+    idx rfR
+    jmp rfLoop
+// the cursor: the last column of its character, after the prefix when the
+// line is empty (3.7's vsetcurs); in insert mode, the column after the
+// character before it
+rfCur, lio DOT
+    jsp scPtr
+    dac rfP
+    lac i rfP
+    and [REC_LEN]
+    dac rfLen
+    lac i [vCurs:VI_BANK]
+    dac scIdx
+    lac scEdit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rfC1
+    lac scIdx
+    sub [1]
+    dac scIdx
+    dzm rfLen
+rfC1, lio DOT
+    jsp scColOf
+    dac rfCol
+    lac rfLen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp .+3
+    lac rfCol
+    jmp .+3
+    lac rfCol
+    sub [1]
+    lia
+    lac scCols
+    dac dvD
+    jsp scDiv
+    add scDotR
+    add [1]
+    dac cuR
+    lai
+    add [1]
+    dac cuC
+    jsp scCup
+    jmp i rfX
+
+// scPaint -- row ppR (0 the first) painted as the key at ppK wants it: the
+// cursor to its start, the row erased, then its text. AC and IO are
+// clobbered.
+scPaint, dac ppX
+    lac ppR
+    add [1]
+    dac cuR
+    law 1
+    dac cuC
+    jsp scCup
+    jsp scEl
+    lac i ppK
+    SKIP_NEXT_IF_SAME [KEY_TILDE]
+    jmp .+4
+    lio [CH_TILDE]
+    jsp i [rawc:TERM_BANK]
+    jmp i ppX
+    SKIP_NEXT_IF_SAME [KEY_AT]
+    jmp .+4
+    lio ['@']
+    jsp i [rawc:TERM_BANK]
+    jmp i ppX
+    SKIP_NEXT_IF_DIFFERENT [KEY_NONE]
+    jmp i ppX
+// a line's row: its glyphs from its row's first column, blanks held until
+// something follows them
+ppText, lac ppK
+    add [2]
+    dac ppSk
+    lac i ppSk
+    dac gsLine
+    law 1
+    dac gsDolOn
+    lio i ppK
+    jsp gsInit
+    lac ppK
+    add [1]
+    dac ppSk
+    lac i ppSk
+    dac ppN                 // the line's rows to pass over
+    dzm ppSk
+ppSkL, lac ppN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppOut
+    sub [1]
+    dac ppN
+    lac scCols
+    add ppSk
+    dac ppSk
+    jmp ppSkL
+ppOut, lac ppSk             // ppSk glyphs passed over
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppFl
+    jsp gsNext
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i ppX
+    lac ppSk
+    sub [1]
+    dac ppSk
+    jmp ppOut
+ppFl, lac scCols
+    dac ppN
+    dzm ppSp
+ppG, lac ppN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ppX
+    sub [1]
+    dac ppN
+    jsp gsNext
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i ppX
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp ppB
+    dac ppC
+ppSpL, lac ppSp             // the blanks held, now that something follows
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppC1
+    sub [1]
+    dac ppSp
+    lio [CH_SP]
+    jsp i [rawc:TERM_BANK]
+    jmp ppSpL
+ppC1, lio ppC
+    jsp i [rawc:TERM_BANK]
+    jmp ppG
+ppB, idx ppSp
+    jmp ppG
+
+// scEq -- whether the keys at eqA and eqB are the same.
+// AC is 1 or 0; IO is clobbered.
+scEq, dac eqX
+    lac i eqA
+    SKIP_NEXT_IF_SAME i eqB
+    jmp eqN
+    idx eqA
+    idx eqB
+    lac i eqA
+    SKIP_NEXT_IF_SAME i eqB
+    jmp eqN
+    idx eqA
+    idx eqB
+    lac i eqA
+    SKIP_NEXT_IF_SAME i eqB
+    jmp eqN
+eqY, law 1
+    jmp i eqX
+eqN, cla
+    jmp i eqX
+
+// shSA, shWA -- the address of row IO's key: shown (ROW_KEYS), or wanted
+// (scWant). AC is the address; IO is clobbered.
+shSA, dac saX
+    dio saT
+    lac saT
+    add saT
+    add saT
+    add [ROW_KEYS]
+    jmp i saX
+shWA, dac waX
+    dio saT
+    lac saT
+    add saT
+    add saT
+    add [scWant:SCR_BANK]
+    jmp i waX
+
+// shCp -- the key at shQ copied to shP. AC is clobbered, IO preserved.
+shCp, dac cpX
+    lac i shQ
+    dac i shP
+    idx shQ
+    idx shP
+    lac i shQ
+    dac i shP
+    idx shQ
+    idx shP
+    lac i shQ
+    dac i shP
+    jmp i cpX
+
+// scShift -- rows that moved, moved on the screen: at the first row r that
+// differs, the least s for which the rows shown from r+s are those wanted
+// from r (lines deleted or scrolled off the top), or those wanted from r+s
+// are those shown from r (lines inserted, scrolled on at the top), over a
+// run of rows of lines: 1 row at the window's top or on a VT102, else 2. A
+// VT102 deletes or inserts s lines at row r; a VT100 narrows the region to
+// rows r to the window's end, then scrolls it with IND at its bottom or RI
+// at its top. The keys move as the rows did; the rows left blank are
+// unknown. AC and IO are clobbered.
+scShift, dac shX
+    dzm shR
+shFind, lac shR
+    SKIP_NEXT_IF_DIFFERENT scW
+    jmp i shX               // every row as wanted
+    lio shR
+    jsp shSA
+    dac eqA
+    lio shR
+    jsp shWA
+    dac eqB
+    jsp scEq
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shGot
+    idx shR
+    jmp shFind
+shGot, law 2
+    dac shT
+    lac shR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shT1
+    lac scVt2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shS0
+shT1, law 1
+    dac shT
+shS0, law 1
+    dac shS
+shSL, lac shR
+    add shS
+    sub scW
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i shX               // nothing moved
+    lac shR                 // deleted: shown from r+s, wanted from r
+    add shS
+    dac shA
+    lac shR
+    dac shB
+    jsp shRun
+    sub shT
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp shUp
+    lac shR                 // inserted: shown from r, wanted from r+s
+    dac shA
+    add shS
+    dac shB
+    jsp shRun
+    sub shT
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp shDn
+    idx shS
+    jmp shSL
+
+// rows r+s on move up s
+shUp, lac scVt2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shUp1
+    lac shR
+    add [1]
+    dac cuR
+    law 1
+    dac cuC
+    jsp scCup
+    jsp scCsi
+    lio shS
+    jsp scDec
+    lio ['M']
+    jsp i [rawc:TERM_BANK]
+    jmp shUpK
+shUp1, lac shR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shUp2
+    add [1]
+    dac rsT
+    lac scW
+    dac rsB
+    jsp scRgnSet
+shUp2, lac scW
+    dac cuR
+    law 1
+    dac cuC
+    jsp scCup
+    lac shS
+    dac shN
+shUpL, lio [CH_ESC]
+    jsp i [rawc:TERM_BANK]
+    lio ['D']
+    jsp i [rawc:TERM_BANK]
+    lac shN
+    sub [1]
+    dac shN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp shUpL
+    lac shR
+    SKIP_NEXT_IF_AC_ZERO
+    jsp scWinRgn
+shUpK, lac shR
+    dac shI
+shUpKL, lac shI
+    add shS
+    sub scW
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp shZ
+    lio shI
+    jsp shSA
+    dac shP
+    lac shI
+    add shS
+    lia
+    jsp shSA
+    dac shQ
+    jsp shCp
+    idx shI
+    jmp shUpKL
+// the rows from shI to the window's end unknown
+shZ, lac shI
+    sub scW
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i shX
+    lio shI
+    jsp shSA
+    dac shP
+    dzm i shP
+    idx shI
+    jmp shZ
+
+// rows r on move down s
+shDn, lac scVt2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shDn1
+    lac shR
+    add [1]
+    dac cuR
+    law 1
+    dac cuC
+    jsp scCup
+    jsp scCsi
+    lio shS
+    jsp scDec
+    lio ['L']
+    jsp i [rawc:TERM_BANK]
+    jmp shDnK
+shDn1, lac shR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shDn2
+    add [1]
+    dac rsT
+    lac scW
+    dac rsB
+    jsp scRgnSet
+shDn2, lac shR
+    add [1]
+    dac cuR
+    law 1
+    dac cuC
+    jsp scCup
+    lac shS
+    dac shN
+shDnL, lio [CH_ESC]
+    jsp i [rawc:TERM_BANK]
+    lio ['M']
+    jsp i [rawc:TERM_BANK]
+    lac shN
+    sub [1]
+    dac shN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp shDnL
+    lac shR
+    SKIP_NEXT_IF_AC_ZERO
+    jsp scWinRgn
+// the keys, from the window's end up: row i takes row i-s's
+shDnK, lac scW
+    sub [1]
+    dac shI
+shDnKL, lac shI
+    sub shR
+    sub shS
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp shDnZ
+    lio shI
+    jsp shSA
+    dac shP
+    lac shI
+    sub shS
+    lia
+    jsp shSA
+    dac shQ
+    jsp shCp
+    lac shI
+    sub [1]
+    dac shI
+    jmp shDnKL
+shDnZ, lac shR
+    dac shI
+    add shS
+    dac shM
+shDnZL, lac shI
+    SKIP_NEXT_IF_DIFFERENT shM
+    jmp i shX
+    lio shI
+    jsp shSA
+    dac shP
+    dzm i shP
+    idx shI
+    jmp shDnZL
+
+// shRun -- how many rows from shown row shA and wanted row shB on are the
+// same, each a row of a line. AC is the count; IO is clobbered.
+shRun, dac rnX
+    dzm rnM
+rnL, lac shA
+    add rnM
+    dac rnA
+    sub scW
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rnE
+    lac shB
+    add rnM
+    dac rnB
+    sub scW
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rnE
+    lio rnA
+    jsp shSA
+    dac eqA
+    dac rnC
+    lac i rnC
+    sub [HEAP_BASE]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rnE                 // ~, @ or unknown: no anchor
+    lio rnB
+    jsp shWA
+    dac eqB
+    jsp scEq
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rnE
+    idx rnM
+    jmp rnL
+rnE, lac rnM
+    jmp i rnX
+
+// --- entering and leaving, ex's output
+
+// scEnter -- visual mode's screen: the options read, the screen cleared,
+// every row unknown. AC and IO are clobbered.
+scEnter, dac enX
+    dzm scW
+    jsp scOpts
+    jsp scClr
+    dzm soState
+    jmp i enX
+
+// scQuit -- the terminal left as ex expects it: the region the whole
+// screen, the cursor at the start of the last line, erased. Called by Q and
+// by termio.ac's tmQuit. AC and IO are clobbered.
+scQuit, dac quX
+    dzm i [exOut:TERM_BANK]
+    dzm soState
+    jsp scCsi
+    lio ['r']
+    jsp i [rawc:TERM_BANK]
+    dzm scRgn
+    lac i [oLines:EX_BANK]
+    dac cuR
+    law 1
+    dac cuC
+    jsp scCup
+    jsp scEl
+    dzm i [outCol:TERM_BANK]
+    jmp i quX
+
+// scStat -- the cursor to the status line's start, the line erased.
+// AC and IO are clobbered.
+scStat, dac stX
+    lac scW
+    add [1]
+    dac cuR
+    law 1
+    dac cuC
+    jsp scCup
+    jsp scEl
+    dzm i [outCol:TERM_BANK]
+    jmp i stX
+
+// scExArm -- ex's output, from now on, to the status line (scOutC).
+// AC is clobbered, IO preserved.
+scExArm, dac oaX
+    law 1
+    dac soState
+    dzm soMore
+    dac i [exOut:TERM_BANK]
+    jmp i oaX
+
+// scOutC -- a character of ex's output, in IO, as putc gives it. The first
+// goes to the status line; a new line is held; when more follows it, the
+// region is reset and the screen scrolls, every row now unknown. AC is 1
+// when putc is to send the character, 0 when it is held; IO is clobbered.
+scOutC, dac ocX
+    dio ocC
+    lac soState
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jsp ocPos
+    lac soState
+    SKIP_NEXT_IF_DIFFERENT [3]
+    jsp ocFl
+    lac ocC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp ocTx
+    law 3                   // a new line, held
+    dac soState
+    cla
+    jmp i ocX
+ocTx, law 1
+    jmp i ocX
+// the first: the status line
+ocPos, dac ocP
+    jsp scStat
+    law 2
+    dac soState
+    jmp i ocP
+// a held new line, sent: the first time, the region reset (the cursor
+// saved around it, as setting it homes the cursor)
+ocFl, dac ocF
+    lac soMore
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ocLf
+    lio [CH_ESC]
+    jsp i [rawc:TERM_BANK]
+    lio ['7']
+    jsp i [rawc:TERM_BANK]
+    jsp scCsi
+    lio ['r']
+    jsp i [rawc:TERM_BANK]
+    lio [CH_ESC]
+    jsp i [rawc:TERM_BANK]
+    lio ['8']
+    jsp i [rawc:TERM_BANK]
+    dzm scRgn
+    jsp scUnk
+    law 1
+    dac soMore
+ocLf, jsp scCrLf
+    law 2
+    dac soState
+    jmp i ocF
+
+// scCrLf -- CR LF sent raw, the cursor then at column 0.
+// AC and IO are clobbered.
+scCrLf, dac clfX
+    lio [CH_CR]
+    jsp i [rawc:TERM_BANK]
+    lio [CH_LF]
+    jsp i [rawc:TERM_BANK]
+    dzm i [outCol:TERM_BANK]
+    jmp i clfX
+
+// scExDone -- ex's output ended. AC is 1 when it took more than the status
+// line, the cursor then at the start of a new line; else 0, a last new
+// line dropped. IO is clobbered.
+scExDone, dac edX
+    dzm i [exOut:TERM_BANK]
+    lac soMore
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp edN
+    lac soState
+    SKIP_NEXT_IF_SAME [3]
+    jmp edL
+    lac i [outCol:TERM_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp edY
+edL, jsp scCrLf
+edY, dzm soState
+    law 1
+    jmp i edX
+edN, dzm soState
+    cla
+    jmp i edX
+
+// scHitRet -- [Hit return to continue], then a key; the screen cleared to
+// be painted again. IO is the key; AC is clobbered.
+scHitRet, dac hrX
+    lio [mHitRet:SCR_BANK]
+    jsp i [putStr:TERM_BANK]
+    jsp i [kyGet:TERM_BANK]
+    dio hrK
+    jsp scClr
+    lio hrK
+    jmp i hrX
+
+// --- the window (ex_vwind.c)
+
+// scBack -- 3.7's vback: from line IO, back over whole lines while their
+// rows come to no more than bkC. AC is the line reached; IO is clobbered.
+scBack, dac bkX
+    dio bkT
+bkL, lac bkT
+    sub [1]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp bk1
+    lac bkT
+    jmp i bkX
+bk1, lia
+    jsp scRows
+    dac bkD
+    sub bkC
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp bkE                 // the line before does not fit
+    lac bkC
+    sub bkD
+    dac bkC
+    lac bkT
+    sub [1]
+    dac bkT
+    jmp bkL
+bkE, lac bkT
+    jmp i bkX
+
+// scContext -- 3.7's vcontext: dot to line IO, the window's top placed as
+// scCtx says: CH_CARET the window before the one ending at the line,
+// CH_MINUS the line at the bottom, CH_DOT the line in the middle, else at the
+// top. AC and IO are clobbered.
+scContext, dac cxX
+    dio cxA
+    jsp scOpts
+    lac scCtx
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp cxUp
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp cxBot
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp cxMid
+    lac cxA
+    jmp cxSet
+cxUp, lio cxA
+    jsp scRows
+    cma
+    add scW
+    dac bkC
+    lio cxA
+    jsp scBack
+    dac cxA
+cxBot, lio cxA
+    jsp scRows
+    cma
+    add scW
+    dac bkC
+    lio cxA
+    jsp scBack
+    jmp cxSet
+cxMid, lio cxA
+    jsp scRows
+    dac cxD
+    lio scW
+    law 2
+    dac dvD
+    jsp scDiv
+    sub cxD
+    dac bkC
+    lio cxA
+    jsp scBack
+cxSet, dac scTop
+    lac cxA
+    dac DOT
+    jmp i cxX
+
+// scFit -- 3.7's vfit: the rows lines IO to ftL take, counting stopped once
+// past the window. AC is the rows; IO is clobbered.
+scFit, dac ftX
+    dio ftT
+    dzm ftC
+ftJ, lac ftT
+    sub ftL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ftE
+    lio ftT
+    jsp scRows
+    add ftC
+    dac ftC
+    sub scW
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ftE
+    idx ftT
+    jmp ftJ
+ftE, lac ftC
+    jmp i ftX
+
+// scThird -- the most rows 3.7 scrolls rather than redraws: the window's
+// third, and one. AC is that; IO is clobbered.
+scThird, dac tdX
+    lio scW
+    law 3
+    dac dvD
+    jsp scDiv
+    add [1]
+    jmp i tdX
+
+// scDown -- 3.7's vdown(scN, scInd, scScr): dot down scN lines, no further
+// than dol. Without scScr, within the window only the cursor moves; past
+// it the window scrolls to put the line at its bottom, when the lines past
+// are no more than the window and their rows no more than a third of it,
+// and one; else the line goes to the window's middle. With scScr the
+// window scrolls by the lines past, and dot goes back scInd lines, no
+// higher than the top. At dol already, the bell. AC and IO are clobbered.
+scDown, dac dnX
+    jsp scOpts
+    jsp scLayout
+    lac DOT
+    SKIP_NEXT_IF_DIFFERENT DOL
+    jmp scBeep0
+    lac DOL                 // no further than dol
+    sub DOT
+    dac dnT
+    sub scN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp dn1
+    add scInd               // ind less the lines cut, no less than 0
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    cla
+    dac scInd
+    lac dnT
+    dac scN
+dn1, lac scDotR
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dnCx0               // dot not shown
+    lac scTop               // i: the lines shown below dot
+    add scCnt
+    sub DOT
+    sub [1]
+    dac dnT
+    lac scScr
+    SKIP_NEXT_IF_AC_ZERO
+    jmp dn2
+    lac dnT
+    sub scN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dn2
+    lac DOT                 // within the window
+    add scN
+    dac DOT
+    jmp i dnX
+dn2, lac scN                // dot to the last line shown
+    sub dnT
+    dac scN
+    lac DOT
+    add dnT
+    dac DOT
+    lac scScr
+    SKIP_NEXT_IF_AC_ZERO
+    jmp dnRoll
+    lac scN
+    sub scW
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp dnCx
+    lac DOT                 // vfit(dot, cnt)
+    add scN
+    sub [1]
+    dac ftL
+    lio DOT
+    jsp scFit
+    dac dnT
+    jsp scThird
+    sub dnT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dnCx
+dnRoll, lac scN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp dn3
+    jmp dn4
+dn3, lac DOT                // rolled: the line scN on at the bottom
+    add scN
+    dac DOT
+    lio DOT
+    jsp scRows
+    cma
+    add scW
+    dac bkC
+    lio DOT
+    jsp scBack
+    dac scTop
+dn4, lac scScr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i dnX
+    lac DOT                 // back ind lines, no higher than the top
+    sub scInd
+    dac DOT
+    sub scTop
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dn5
+    jmp i dnX
+dn5, lac scTop
+    dac DOT
+    jmp i dnX
+dnCx0, lac DOT
+    add scN
+    dac DOT
+    cla
+    dac scN
+dnCx, lac DOT
+    add scN
+    lia
+    law CH_DOT
+    dac scCtx
+    jsp scContext
+    jmp i dnX
+scBeep0, jsp i [ringBell:TERM_BANK]
+    jmp i dnX
+
+// scUp -- 3.7's vup(scN, scInd, scScr): dot up scN lines, no further than
+// line 1, as scDown, the lines scrolled on at the window's top; with scScr
+// dot then goes down scInd lines, no lower than the last line shown. At line
+// 1 already, the bell. AC and IO are clobbered.
+scUp, dac upX
+    jsp scOpts
+    jsp scLayout
+    lac DOT
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp upBeep
+    lac DOT                 // no further than line 1
+    sub [1]
+    dac upT
+    sub scN
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp up1
+    add scInd
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    cla
+    dac scInd
+    lac upT
+    dac scN
+up1, lac scDotR
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp upCx0
+    lac DOT                 // vcline
+    sub scTop
+    dac upT
+    lac scScr
+    SKIP_NEXT_IF_AC_ZERO
+    jmp up2
+    lac upT
+    sub scN
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp up2
+    lac DOT                 // within the window
+    sub scN
+    dac DOT
+    jmp i upX
+up2, lac scN                // dot to the top
+    sub upT
+    dac scN
+    lac scTop
+    dac DOT
+    lac scScr
+    SKIP_NEXT_IF_AC_ZERO
+    jmp upRoll
+    lac scN
+    sub scW
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp upCx
+    lac DOT                 // vfit(dot - cnt, cnt)
+    sub [1]
+    dac ftL
+    lac DOT
+    sub scN
+    lia
+    jsp scFit
+    dac upT
+    jsp scThird
+    sub upT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp upCx
+upRoll, lac DOT             // rolled back: the line scN up at the top
+    sub scN
+    dac DOT
+    dac scTop
+    lac scScr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i upX
+    jsp scLayout            // down ind lines, no lower than the last shown
+    lac DOT
+    add scInd
+    dac DOT
+    lac scTop
+    add scCnt
+    sub [1]
+    dac upT
+    sub DOT
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i upX
+    lac upT
+    dac DOT
+    jmp i upX
+upCx0, lac DOT
+    sub scN
+    dac DOT
+    dzm scN
+    dzm scInd
+upCx, lio scW               // an ind over half the window is a third
+    law 2
+    dac dvD
+    jsp scDiv
+    sub scInd
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp up3
+    jsp scThirdW
+    dac scInd
+up3, lac DOT
+    add scInd
+    sub scN
+    lia
+    law CH_DOT
+    dac scCtx
+    jsp scContext
+    jmp i upX
+upBeep, jsp i [ringBell:TERM_BANK]
+    jmp i upX
+
+// scThirdW -- the window's third. AC is that; IO is clobbered.
+scThirdW, dac twX
+    lio scW
+    law 3
+    dac dvD
+    jsp scDiv
+    jmp i twX
+
+// scHold -- dot to line IO, which stays where it is when shown, else goes
+// to the window's middle (3.7's HOLDWIG). AC and IO are clobbered.
+scHold, dac hoX
+    dio hoV
+    jsp scOpts
+    jsp scLayout
+    lac hoV
+    sub scTop
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp hoCx
+    lac scTop               // past the last line wholly shown: the middle
+    add scCnt
+    sub hoV
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp hoCx
+    lac hoV
+    dac DOT
+    jmp i hoX
+hoCx, law CH_DOT
+    dac scCtx
+    lio hoV
+    jsp scContext
+    jmp i hoX
+
+giX, 0
+giP, 0
+giD, 0
+giV, 0
+gnX, 0
+gnG, 0
+gnC, 0
+dvX, 0
+dvD, 0
+wdX, 0
+wdR, 0
+wdH, 0
+wdT, 0
+wdP, 0
+wdK, 0
+rwX, 0
+coX, 0
+fcX, 0
+fcCol, 0
+fcCp, 0
+opX, 0
+opChg, 0
+clX, 0
+unX, 0
+unP, 0
+unN, 0
+rsX, 0
+rsT, 0
+rsB, 0
+csX, 0
+cuX, 0
+cuR, 0
+cuC, 0
+elX, 0
+csiX, 0
+sdX, 0
+sdV, 0
+sdN, 0
+sdP, 0
+sdBuf,
+    table 6, 0
+lyX, 0
+lyR, 0
+lyL, 0
+lyP, 0
+lyD, 0
+lyK, 0
+lyRc, 0
+lyKey, 0
+lyKey1, 0
+lyKey2, 0
+lyKX, 0
+rfX, 0
+rfR, 0
+rfS, 0
+rfW, 0
+rfP, 0
+rfLen, 0
+rfCol, 0
+ppX, 0
+ppR, 0
+ppK, 0
+ppSk, 0
+ppN, 0
+ppSp, 0
+ppC, 0
+eqX, 0
+eqA, 0
+eqB, 0
+saX, 0
+saT, 0
+waX, 0
+cpX, 0
+shX, 0
+shR, 0
+shS, 0
+shT, 0
+shA, 0
+shB, 0
+shI, 0
+shM, 0
+shN, 0
+shP, 0
+shQ, 0
+rnX, 0
+rnM, 0
+rnA, 0
+rnB, 0
+rnC, 0
+enX, 0
+quX, 0
+stX, 0
+oaX, 0
+ocX, 0
+ocC, 0
+ocP, 0
+ocF, 0
+clfX, 0
+edX, 0
+hrX, 0
+hrK, 0
+bkX, 0
+bkT, 0
+bkD, 0
+cxX, 0
+cxA, 0
+cxD, 0
+ftX, 0
+ftT, 0
+ftC, 0
+tdX, 0
+dnX, 0
+dnT, 0
+upX, 0
+upT, 0
+twX, 0
+hoX, 0
+hoV, 0
+rwP, 0
+rwW, 0
+spX, 0
+spT, 0
+rkX, 0
+rkP, 0
+rkN, 0
+ivX, 0
+shwX, 0
+shwLn, 0
+shwR, 0
+shwC, 0
+mHitRet, ascii "[Hit return to continue] "
+endloc
+
+// the glyph walker's state (gsInit, gsNext)
+gsP, 0                      // the next word of text
+gsN, 0                      // characters left
+gsLen, 0                    // the line's length
+gsHalf, 0                   // 1 when the next is the low half
+gsI, 0                      // the next character's index
+gsTab, 0                    // a TAB's blanks left
+gsPend, 0                   // a ^X's letter to come, or 0
+gsCol, 0                    // glyphs given
+gsTc, 0                     // the column within a tab stop
+gsPreN, 0                   // prefix glyphs left
+gsPreP, 0                   // the next prefix glyph
+gsPre,                      // number's prefix, NUM_COLS glyphs
+    table NUM_COLS, 0
+gsLst, 0                    // list
+gsDol, 0                    // list's $ still to come
+gsDolOn, 0                  // gsInit's argument: $ wanted
+gsLine, 0                   // gsInit's argument: the number shown, or 0
+gsTs, 0                     // tabstop
+gsCh, 0                     // gsNext's: the glyph's character index
+gsLast, 0                   // gsNext's: 1 on a character's last glyph
+
+// the layout's options and state
+scW, 0                      // the window's rows: lines less one
+scCols, 0                   // columns
+scPre, 0                    // number's prefix columns, 0 or NUM_COLS
+scList, 0                   // list, 0 or 1
+scEdit, 0                   // 1 while insert mode shows dot's line as ED_REC
+scRkF, 0                    // scRekey's arguments: the record shown,
+scRkT, 0                    //   and what the rows show instead
+scTs, 0                     // tabstop
+scVt2, 0                    // 1 on a VT102
+scRgn, 0                    // 1 while the region is the window's
+scTop, 1                    // the window's first line (3.7's top of vcnt)
+scCnt, 0                    // the lines wholly shown (3.7's vcnt)
+scDotR, 0                   // the row dot starts on, or -1
+scCtx, 0                    // scContext's argument
+bkC, 0                     // scBack's argument: the rows to go back over
+ftL, 0                     // scFit's argument: the last line
+scIdx, 0                    // scColOf's argument
+scN, 0                      // scFindCol's argument; scDown's and scUp's count
+scInd, 0                    // scDown's and scUp's ind
+scScr, 0                    // scDown's and scUp's scroll
+soState, 0                  // ex's output: 0 off, 1 armed, 2 text, 3 a new line held
+soMore, 0                   // 1 when ex's output took more than the status line
+scWant,                     // the keys wanted, ROW_W words a row
+    table ROW_W*ROW_MAX, 0

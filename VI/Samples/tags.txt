@@ -1,0 +1,4 @@
+count	DR:PROG.C	/^int count;/
+main	DR:PROG.C	/^int main(/
+square	DR:PROG.C	/^int square(/
+sum	DR:PROG.C	/^int sum(/

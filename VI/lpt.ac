@@ -1,0 +1,123 @@
+// lpt.ac -- the line printer for LP:, after TECO's lpt.ac: the Type 62
+// by default, the Type 64 when vi is built with LPT_TYPE64 1, which must
+// agree with lptType64 in pidp1.config, since the two printers share IOT
+// 45's codes for different functions. The printer runs in ASCII mode, set by
+// lpInit before each write.
+//
+// A line is gathered in the printer's buffer and printed at its LF, single
+// spaced; a FORM prints the line and starts a new page. TAB goes to the next
+// multiple of 8 columns; any other control character has no glyph and is
+// passed over. A line longer than LPT_COLS, the printer's 120, goes on in the
+// next line.
+//
+// Every routine is entered by jsp with the extend window open and returns by
+// jmp i. In bank FILE_BANK, for files.ac; its data words follow its code.
+// Needs vi.ah, <AIDS/skipmacros.ah>, and the printer's definitions (vi.am1
+// includes <LPT/type62defs.ah> or <LPT/type64defs.ah>).
+
+local liX, lpX, lpTab, lpTabL, lpChar, lpNl, lpFf, loX, lnX, lfX, leX, lpC, \
+    lpOne, lpLine, lpPage
+
+// lpInit -- the printer in ASCII mode, at a line's start.
+// AC is clobbered, IO preserved.
+lpInit, dac liX
+    dio lpC
+    lio [1]
+    lpm
+    dzm lpCol
+    lio lpC
+    jmp i liX
+
+// lpPut -- print the ASCII character in IO.
+// AC and IO are clobbered.
+lpPut, dac lpX
+    dio lpC
+    lac lpC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp lpNl
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp lpFf
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp lpTab
+    sub [040]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i lpX               // a control character: no glyph
+    lac lpC
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp i lpX
+lpChar, jsp lpOne
+    jmp i lpX
+// TAB: spaces to the next multiple of 8 columns, at least one
+lpTab, law 040
+    dac lpC
+lpTabL, jsp lpOne
+    lac lpCol
+    and [TAB_STOP-1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lpTabL
+    jmp i lpX
+lpNl, jsp lpLine
+    jmp i lpX
+lpFf, jsp lpPage
+    jmp i lpX
+
+// lpOne -- lpC into the printer's buffer, the line printed first when it
+// is full. AC and IO are clobbered.
+lpOne, dac loX
+    lac lpCol
+    sub [LPT_COLS]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jsp lpLine
+    // both printers take the character from IO's low 9 bits, the high 9
+    // NUL, which they pass over
+    lio lpC
+#if LPT_TYPE64
+    lpb
+#else
+    flb
+#endif
+    idx lpCol
+    jmp i loX
+
+// lpLine -- print the line and space one line.
+// AC is clobbered, IO preserved.
+lpLine, dac lnX
+#if LPT_TYPE64
+    pas i LPT_SP1           // SP0 is the Type 64's overstrike
+#else
+    prl                     // the Type 62 latches the line, slp writes it
+    slp i LPT_SP0
+#endif
+    dzm lpCol
+    jmp i lnX
+
+// lpPage -- print the line and start a new page.
+// AC is clobbered, IO preserved.
+lpPage, dac lfX
+#if LPT_TYPE64
+    pas i LPT_SP7
+#else
+    prl
+    slp i LPT_SP7
+#endif
+    dzm lpCol
+    jmp i lfX
+
+// lpEnd -- a write is done: a line begun is printed, so what was sent shows
+// in the printer's file at once. AC is clobbered, IO preserved.
+lpEnd, dac leX
+    lac lpCol
+    SKIP_NEXT_IF_AC_ZERO
+    jsp lpLine
+    jmp i leX
+
+liX, 0                      // the return addresses
+lpX, 0
+loX, 0
+lnX, 0
+lfX, 0
+leX, 0
+lpC, 0
+endloc
+
+lpCol, 0                    // characters in the printer's line so far

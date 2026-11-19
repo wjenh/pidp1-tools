@@ -1,0 +1,147 @@
+// vaddr.ac -- the rest of vi's / and ? after the expression's closing
+// delimiter, which 3.7's vi leaves to address() (ex_voper.c, ex_addr.c):
+// + - ^ and numbers make the line found another line, and the motion one
+// of whole lines (3.7's loc1 = 0). vmotion.ac's search calls srOffs after
+// the delimiter, and comes to srLine when srOLn is not 0 and no operator
+// waits. Kept in bank FILE_BANK for room.
+//
+// In bank FILE_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, excmd.ac (bank
+// EX_BANK), vmain.ac and vmotion.ac (bank VI_BANK), screen.ac (bank
+// SCR_BANK), lines.ac (bank 0) and messages.ac (bank MSG_BANK).
+
+local soX, soV, soS, soO, soC, soL, soNd, soMi, soSg, soPl, soMin, soSet, \
+    soEnd, soNeg, soMany, soBad, slZ, slMv
+
+// srOffs -- 3.7's address() on from the line a search found, in IO: blanks
+// passed over; + and - (or ^) one line on or back each, or the number
+// after them; a number alone that many on. The character that ends it is
+// left to be read again; . / $ ' or \ there is Badly formed address, as
+// ex's. srOLn is the line the offsets give, or 0 when there were none (a
+// number, even +0, makes one). A line before the first or after the last
+// is ex's error. AC and IO are clobbered.
+srOffs, dac soX
+    dio soV
+    dzm soS                 // the last sign: 1, -1 or 0
+    dzm soO                 // the offset
+    dzm srOLn
+soL, jsp i [peekCd:EX_BANK]
+    lia
+    jsp i [isDigit:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp soNd
+    law 1                   // a number: a line's address now
+    dac srOLn
+    lac soV
+    add soO
+    dac soV
+    jsp i [getNum:EX_BANK]
+    dac soO
+    lac soS
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp soMi
+    lac soV
+    add soO
+    jmp soSg
+soMi, lac soV
+    sub soO
+soSg, dac soV
+    dzm soS
+    dzm soO
+soNd, jsp i [getCd:EX_BANK]
+    dac soC
+    SKIP_NEXT_IF_DIFFERENT [CH_SLASH]
+    jmp soBad
+    SKIP_NEXT_IF_DIFFERENT [CH_DOLLAR]
+    jmp soBad
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp soBad
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp soBad
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp soBad
+    lac soO                 // a sign with no number after it: one line
+    add soS
+    dac soO
+    dzm soS
+    lac soC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp soL
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp soL
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp soPl
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp soMin
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp soMin
+    jsp i [unGetChar:EX_BANK]
+    lac soO
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp soEnd
+    law 1
+    dac srOLn
+    lac soV
+    add soO
+    dac soV
+soEnd, lac srOLn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i soX
+    lac soV                 // between the first line and the last
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp soNeg
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp soMany
+    lac soV
+    dac srOLn
+    jmp i soX
+soPl, law 1
+    jmp soSet
+soMin, lac [-1]
+soSet, dac soS
+    jmp soL
+soNeg, lac [mNegAddr:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+soMany, lac [mNotMany:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+soBad, lac [mBadAddr:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// srLine -- a search moving to the line its offsets gave (srOLn), with no
+// operator: the previous context marked, as 3.7 always marks it then; the
+// cursor on the line's first character that is not white. IO is
+// vmotion.ac's srZ: 0, or LF or one of ^ - . for z's placing of the
+// window. Reached by jmp; ends at vMove or viLoop.
+srLine, dio slZ
+    jsp i [vMarkDot:VI_BANK]
+    lac slZ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp slMv
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    cla
+    dac i [scCtx:SCR_BANK]
+    lio srOLn
+    jsp i [scContext:SCR_BANK]
+    jsp i [vFirst:VI_BANK]
+    dac i [vCurs:VI_BANK]
+    dzm i [vMoving:VI_BANK]
+    jmp i [viLoop:VI_BANK]
+slMv, lac srOLn
+    dac i [wDot:VI_BANK]
+    law 1
+    dac i [wSet:VI_BANK]
+    lac [0777776]
+    dac i [wCur:VI_BANK]
+    dzm i [vMoving:VI_BANK]
+    jmp i [vMove:VI_BANK]
+
+soX, 0
+soV, 0
+soS, 0
+soO, 0
+soC, 0
+slZ, 0
+endloc
+
+srOLn, 0                    // the line a search's offsets gave, 0 none

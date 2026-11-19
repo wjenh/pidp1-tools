@@ -1,0 +1,239 @@
+// messages.ac -- ex's messages in 3.7's text (ex_cmds.c, ex_cmds2.c,
+// ex_cmdsub.c, ex_addr.c, ex_set.c, ex_subr.c, ex_get.c), and msgPut, which
+// types one as 3.7's mesg and printf do (ex_subr.c):
+//   'xxx@yyy' is 'xxx' when terse is set, else 'xxx yyy';
+//   'xxx|yyy' is 'xxx' when terse is set, else 'yyy';
+//   %s is the string at msgS, a character a word; %d the number msgN;
+//   %c the character msgC.
+// Each message is am1's ascii, two characters a word ending in a 0
+// character; a caller names it by its full address ([mFoo:MSG_BANK]).
+// In bank MSG_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, termio.ac (bank
+// TERM_BANK) and options.ac's oTerse (bank EX_BANK).
+
+local mpX, mpP, mpH, mpC, mpS, mpTerse, mpScan, mpRew, mpLoop0, mpLoop, \
+    mpOut, mpAt, mpPct, mpStr, mpSLoop, mpD, mpChr, mpGet, mgX, mgW, mpLow
+
+// msgPut -- type the message at the full address in IO. No new line.
+// AC and IO are clobbered.
+msgPut, dac mpX
+    dio mpP
+    dio mpS
+    lac i [oTerse:EX_BANK]
+    dac mpTerse
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mpLoop0
+// verbose: the form of 'xxx|yyy' is what follows the bar
+    dzm mpH
+mpScan, jsp mpGet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mpRew               // no bar: the whole of it
+    SKIP_NEXT_IF_DIFFERENT [CH_VBAR]
+    jmp mpLoop
+    jmp mpScan
+mpRew, lac mpS
+    dac mpP
+mpLoop0, dzm mpH
+mpLoop, jsp mpGet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i mpX
+    SKIP_NEXT_IF_DIFFERENT [CH_VBAR]
+    jmp i mpX               // terse: what precedes the bar
+    SKIP_NEXT_IF_DIFFERENT ['@']
+    jmp mpAt
+    SKIP_NEXT_IF_DIFFERENT [CH_PCT]
+    jmp mpPct
+mpOut, lia
+    jsp i [putc:TERM_BANK]
+    jmp mpLoop
+mpAt, lac mpTerse
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i mpX
+    law CH_SP
+    jmp mpOut
+mpPct, jsp mpGet
+    SKIP_NEXT_IF_DIFFERENT ['s']
+    jmp mpStr
+    SKIP_NEXT_IF_DIFFERENT ['d']
+    jmp mpD
+    SKIP_NEXT_IF_DIFFERENT ['c']
+    jmp mpChr
+    jmp mpOut               // %% and the like: the character itself
+mpStr, lac msgS
+    dac mpC
+mpSLoop, lac i mpC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mpLoop
+    lia
+    jsp i [putc:TERM_BANK]
+    idx mpC
+    jmp mpSLoop
+mpD, lio msgN
+    jsp i [putDec:TERM_BANK]
+    jmp mpLoop
+mpChr, lio msgC
+    jsp i [putc:TERM_BANK]
+    jmp mpLoop
+
+// mpGet -- the next character of the message at mpP, mpH saying which half.
+// AC is the character, 0 at the end; IO is preserved.
+mpGet, dac mgX
+    lac mpH
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mpLow
+    law 1
+    dac mpH
+    lac i mpP
+    rar 9s
+    and [0177]
+    jmp i mgX
+mpLow, dzm mpH
+    lac i mpP
+    and [0177]
+    dac mgW
+    idx mpP
+    lac mgW
+    jmp i mgX
+mgX, 0
+mgW, 0
+mpX, 0
+mpP, 0
+mpH, 0
+mpC, 0
+mpS, 0
+mpTerse, 0
+endloc
+
+msgS, 0                     // %s: a string's full address, a character a word
+msgN, 0                     // %d
+msgC, 0                     // %c
+
+mFirst,     ascii "Addr1 > addr2|First address exceeds second"
+mNotMany,   ascii "Not that many lines@in buffer"
+mUndefMk,   ascii "Undefined mark@referenced"
+mMarkWhat,  ascii "Mark what?|%s requires following letter"
+mBadMark,   ascii "Bad mark|Mark must specify a letter"
+mNotCmd,    ascii "What?|%s: Not an editor command"
+mNoLines,   ascii "No lines@in the buffer"
+mNonzero,   ascii "Nonzero address required@on this command"
+mExtraCmd,  ascii "Extra chars|Extra characters at end of \042%s\042 command"
+mExtra,     ascii "Extra chars|Extra characters at end of command"
+mNoReg,     ascii "Nothing in register %c"
+mNoUndo,    ascii "Nothing to undo"
+mSame,      ascii "Nothing changed|Last undoable command didn't change anything"
+mUndoGlob,  ascii "Can't undo in global@commands"
+mAtEof,     ascii "At EOF|At end-of-file"
+mAtEofNl,   ascii "\nAt EOF"
+mAtEofZ,    ascii "At EOF"
+mHitTop,    ascii "Hit TOP"
+mHitBot,    ascii "Hit BOTTOM"
+mNothing,   ascii "That move would do nothing!"
+mMoved,     ascii "Move to a moved line"
+mWhere,     ascii "%s where?|%s requires a trailing address"
+mNoWrite,   ascii "No write@since last change (:%s! overrides)"
+mNegAddr,   ascii "Negative address@- first buffer line is 1"
+mOffset,    ascii "Offset out-of-bounds|Offset after command too large"
+mJoinLong,  ascii "Line overflow|Result line of join would be too long"
+mShiftLong, ascii "Line too long|Result line after shift would be too long"
+mVLong,     ascii "Line too long"
+mNoVis,     ascii "Visual needs addressible cursor or upline capability"
+nmDel,      ascii "deleted"
+nmChg,      ascii "changed"
+nmYank,     ascii "yanked"
+nmLines,    ascii "lines"
+vsAmp,      ascii "&"
+mBadCount,  ascii "Bad count|Nonzero count required"
+mNoAddr,    ascii "No address allowed@on this command"
+mBadAddr,   ascii "Badly formed address"
+mMarks,     ascii "Marks are ' and a-z"
+mUnknown,   ascii "What?|Unknown command character '%c'"
+mTooMany,   ascii "Out of memory@- too many lines in file"
+mOutUndo,   ascii "Out of memory@saving lines for undo"
+mOutMem,    ascii "Out of memory"
+mNoOpt,     ascii "%s: No such option@- 'set all' gives all option values"
+mNotTog,    ascii "Option %s is not a toggle"
+mMissEq,    ascii "Missing =@in assignment to option %s"
+mDigits,    ascii "Digits required@after ="
+mStrLong,   ascii "String too long@in option assignment"
+mTermType,  ascii "%s: Unknown terminal type"
+mInLong,    ascii "Input line too long"
+mNoFile,    ascii "No current filename"
+mIntr,      ascii "\nInterrupt"
+mNetChg,    ascii "lines@in file after %s"
+mMore,      ascii "more "
+mFewer,     ascii "fewer "
+mVersion,   ascii "Version 3.7 PDP-1, 6/7/85"
+
+// The maps' messages (keys.ac): 3.7's (ex_cmdsub.c, ex_vget.c, ex_vmain.c).
+mMissLhs,   ascii "Missing lhs"
+mMissRhs,   ascii "Missing rhs"
+mTailRec,   ascii "No tail recursion"
+mDanger,    ascii "Too dangerous to map that"
+mNotMap,    ascii "Not mapped|That macro wasn't mapped"
+mTooMacs,   ascii "Too many macros"
+mMacText,   ascii "Too much macro text"
+mMacLong,   ascii "Macro too long@ - maybe recursive?"
+mRegLong,   ascii "Register too long@to fit in memory"
+mInfLoop,   ascii "Infinite macro loop"
+// their commands' names, for ex's table (excmd.ac), out of bank 2 for room
+nmAbbr,     ascii "abbreviate"
+nmMap,      ascii "map"
+nmUnabbr,   ascii "unabbreviate"
+nmUnmap,    ascii "unmap"
+
+// The files' messages (files.ac): 3.7's (ex_io.c, ex_cmds2.c), and for the
+// library's codes and the names' devices vi's own in 3.7's form. One that
+// follows a file's quoted name starts with a blank.
+mQName,     ascii "\042%s\042"
+mStr,       ascii "%s"
+mNoFileT,   ascii "No file|No current filename"
+mMissFn,    ascii "Missing filename"
+mTooManyF,  ascii "Ambiguous|Too many file names"
+mFnLong,    ascii "Filename too long"
+mBadName,   ascii "Bad file name"
+mUnkDev,    ascii "Unknown device"
+mNoAlt,     ascii "No alternate filename@to substitute for #"
+mNoCurS,    ascii "No current filename@to substitute for %%"
+mArgOvf,    ascii "Argument buffer overflow"
+mArgLong,   ascii "Arg list too long"
+// "chage" is 3.7's own spelling (ex_cmds.c).
+mRewChg,    ascii "No write@since last chage (:rewind! overrides)"
+mRecov,     ascii "Recovered"
+mPatLong,   ascii "Pattern too long"
+mNoMore,    ascii "No more files@to edit"
+mMoreF,     ascii "%d more file%s@to edit"
+mFilesTo,   ascii "%d files@to edit"
+mNested,    ascii "Too many nested sources"
+mWForms,    ascii "Write forms are 'w' and 'w>>'"
+mFileEx,    ascii " File exists| File exists - use \042w! %s\042 to overwrite"
+mRoFile,    ascii " File is read only"
+mPartBuf,   ascii " Use \042w!\042 to write partial buffer"
+mLineLong,  ascii " Line too long"
+mIncompl,   ascii " [Incomplete last line]"
+mNewFile,   ascii " [New file]"
+mExistF,    ascii " [Existing file]"
+mRoTag,     ascii " [Read only]"
+mNotEd,     ascii " [Not edited]"
+mModif,     ascii " [Modified]"
+mNoFileF,   ascii "No file "
+mLineOf,    ascii " line %d of "
+mPctA,      ascii "%d --"
+mPctB,      ascii "%d%%--"
+mTooLarge,  ascii " File too large, %d lines read"
+mLineW,     ascii " line"
+mCharW,     ascii ", %d character"
+mNoEnt,     ascii " No such file or directory"
+mNoEntR,    ascii "No such file or directory"
+mUnitNR,    ascii " Unit not ready"
+mLocked,    ascii " Unit locked"
+mBadDir,    ascii " Bad directory"
+mExists,    ascii " File exists"
+mDirFull,   ascii " Directory full"
+mTapeFull,  ascii " Tape full"
+mDrumFull,  ascii " Drum full"
+mPerm,      ascii " Permission denied"
+mDrumFail,  ascii " Drum failed"
+mIoErr,     ascii " I/O error"
+// format's, vi's own.
+mFormatted, ascii " formatted"
+mFmFull,    ascii " Volume not empty (use \042format!\042)"
+mFmForeign, ascii " Bad directory (use \042format!\042)"

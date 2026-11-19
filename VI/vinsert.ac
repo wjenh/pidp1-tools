@@ -1,0 +1,1433 @@
+// vinsert.ac -- vi's insert mode, after 3.7's vappend,
+// vgetline, vmaxrep and addtext (ex_vops2.c, ex_vget.c): the text typed for
+// i a I A R o O c s S C and r, the count's copies of it, a line broken by
+// LF, and INS, the last insert's text, which . and ^@ put in again. DEL,
+// the text of the last change within a line, is kept here too.
+//
+// vops.ac sets the insert up (viCh, viCnt, viS0, viDol, viUnd, viRet) with
+// dot's line in LINEBUF, which is also its record's text, and the cursor at
+// the insert's place. The typed text goes to GENBUF; the characters at the
+// cursor that it goes over (viS0: what c changes, shown with a $ on its
+// last character, what r replaces, or R's whole tail) stay in LINEBUF until
+// the line is put together, at ESC or LF: its head, the typed text the
+// count's times, its tail. The line first put is undoable as a change of
+// it (vops.ac's vCommit), unless the insert's lines were put in already
+// (o, O, c of lines); a line broken by LF puts its tail in after it.
+//
+// While it runs, the line as it should look is a record at ED_REC, which
+// the screen shows for dot's line (screen.ac's scEdit): its head, what was
+// typed (characters backed over stay shown, as 3.7's), the rest past what
+// was typed over. A character typed at the shown line's end, or over a
+// character of one column, is sent as it is; anything else paints the
+// line's rows again when no key waits (vaTop). A line the insert opens, at
+// its start or by LF, is shown at once, keys waiting or not, as 3.7's.
+//
+// Under autoindent (3.7's vappend and vgetline) the indent comes first in
+// GENBUF, before vaOg, where this insert's own typing starts: o, O and c of
+// lines take it from the line they open beside or change (vaInd0), a line
+// broken by LF from the line before. ^D, ^T, 0^D and ^^D change it while
+// nothing else is typed (vaBt), and INS keeps them as 3.7's does (CH_CDREC
+// for each ^D); the line's white is made again of TABs and blanks when it
+// is put (vaFix). wrapmargin moves the word that crosses the margin to a new
+// line through keys.ac's kyPush (vaWrap); showmatch shows the match of a )
+// or } typed for a second (vaMat); beautify drops the control characters
+// 3.7's junk drops.
+//
+// Reached by jmp i from vops.ac (vaGo), ending at the full address viRet.
+// In bank SCR_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, screen.ac, vmain.ac
+// and vops.ac (bank VI_BANK), lines.ac (bank 0), termio.ac (bank
+// TERM_BANK) and messages.ac (bank MSG_BANK).
+
+local vaPk, vaRe, vaOv, vaIn, vaRd, vaQt, vaCr, vaEsc, vaNul, vaBrk, vaBs, \
+    vaKill, vaWd, vw1, vw2, vw3, vaMv, vaBell, vaLit, vaPut, vaS1, vaS3, \
+    vaCk, vaS4, vaS2, vaSt, vaS5, vaS6, vaMd, vaGen, vaEnd, veNo, veR, veK, \
+    vaNl, vnC, vnT, vaMem, vaFull, vaRep, vaR1, vaRcr, vaTop, vt1, vaQuiet, \
+    vqN, vaPrt, vpN, vaShow, vsT, vsT1, vsE, vsRun, vsrL, vsPut, vsp2, \
+    vaAdd, vaAL, vaAe, vaAo, vaMax, vmR, vmL, vmC, vmE, vaLong, vaBld, vbE1, \
+    vbE2, vbF, vbB, vbBL, vbT, vaTyp, vty1, vty2, vty3, vaCmt, vcm1, vt2, vt3, \
+    vaCh, vaCnt, vaS0, vaDol, vaUnd, vaCur, vaGc, vaHw, vaSe, vaE, vaTl, \
+    vaK, vaK2, vaBsl, vaPb, vaOk, vaInv, vaRf, vaFrc, vaClean, vaP, vaT, vsD, \
+    vsS, vsN, vsC, vsW, vwsF, vsLen, vsHalf, atS, atN, vbS, vbD, vbN, vbK, \
+    vtX, vqX, vpX, vwsX, vrnX, vspX, vadX, vmX, vbX, vtyX, vcmX, voX, i1X, \
+    vaKy, vaAbr, vaOwn, vowX, vaOg, \
+    vaG1, vaAb, vaW0, vaCtD, vaS7, vnS, vnS1, vnI0, vnI1, vnR, vaBt, vaBd, \
+    vaBz, vaBz0, vaBz1, vaBr, vaBs1, vaBk, vaWrap, vaW7, vaOcol, aiOcL, \
+    vaWc, vaFix, aiFxU, vaPre, aiPr1, aiPr2, aiPr3, aiPr4, vaAd1, vaMat, \
+    smNo, \
+    vaInd, vaIf, vaIw, vaCd, vaUp, vaZr, vaGd, vaGbl, vaSm, vaPw, aiWcS, \
+    aiWcN, aiWcX, aiFxX, aiFxI, aiPrX, aiPrC, aiA1X, smX, aiOcX
+
+// vaGo -- insert mode, as above. Reached by jmp i.
+vaGo, lac i [viCh:VI_BANK]
+    dac vaCh
+    lac i [viCnt:VI_BANK]
+    dac vaCnt
+    lac i [viS0:VI_BANK]
+    dac vaS0
+    lac i [viDol:VI_BANK]
+    dac vaDol
+    lac i [viUnd:VI_BANK]
+    dac vaUnd
+    lac i [vCurs:VI_BANK]
+    dac vaCur
+    dzm vaGc
+    dzm vaOg
+    dzm vaHw
+    dzm vaBsl
+    dzm vaClean
+    dzm vaInv
+    dzm vaCd
+    dzm vaUp
+    dzm vaZr
+    dzm vaGd
+    dzm vaGbl
+    dzm vaSm
+    dzm vaIw
+// the indent given (o, O, c of lines), generated under autoindent; 3.7's
+// vaifirst when none was given
+    lac vaInd0
+    dac vaInd
+    dzm vaInd0
+    dzm vaIf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx vaIf
+    lac i [oAutoInd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaG1
+    lac vaInd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaG1
+    dac vaIw
+    lia
+    jsp i [ivGi:FILE_BANK]
+    dac vaGc
+    dac vaOg
+    dac vaHw
+// dot's rows show ED_REC from now on: the same text, unless c's $ is on it
+vaG1, law 1
+    dac scEdit
+    dac vaRf
+    jsp vaShow
+    lio DOT
+    jsp i [lnPtr:0]
+    dac scRkF
+    lac [ED_REC]
+    dac scRkT
+    lac vaDol
+    SKIP_NEXT_IF_AC_ZERO
+    dzm scRkT               // KEY_NONE: painted again
+    jsp scRekey
+    law 1                   // shown before a key is read, keys waiting or not
+    dac vaFrc
+    jsp vaTop
+// INS put in again when . replays an insert to its end, or ^@ is typed
+// first; else INS begins again, unless keys are replayed (p's DEL)
+    lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaPk
+    dac vaP
+    lac i vaP
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaIn
+    jmp vaRe
+vaPk, jsp i [vGetKey:VI_BANK]
+    dio vaK
+    lac vaK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaRe
+    dac i [vPeek:VI_BANK]
+    dzm vInsN
+    dzm vINS
+    jmp vaIn
+vaRe, lac vINS
+    SKIP_NEXT_IF_DIFFERENT [OVERBUF]
+    jmp vaOv
+    lac [vINS:SCR_BANK]
+    dac i [vGlob:VI_BANK]
+    jmp vaIn
+// INS too long to keep: the bell, and u to take back what came before
+vaOv, law 0165
+    dac i [vPeek:VI_BANK]
+    jsp i [ringBell:TERM_BANK]
+    jsp vaOff
+    jmp i [viLoop:VI_BANK]
+vaIn, lac vaCh
+    SKIP_NEXT_IF_DIFFERENT [0162]
+    jmp vaRep
+
+// each key, mapped by :map! unless replayed (keys.ac's kyIns): ESC ends
+// the insert, LF breaks the line; BS, ^W and ^U back over what this insert
+// typed (\ before BS or ^U types it); ^V and ^Q type the next key; DEL, ^C
+// and an arrow end the insert and are read again. Any key but the
+// editing keys may end an abbreviation first (keys.ac's kyAbbr), which
+// backs over its word, the key coming again after the expansion. Before
+// that, past wrapmargin's margin, the key may break the line (vaWrap).
+// ^D and ^T work on the indent (vaBt); replayed they are text.
+vaRd, jsp vaTop
+    lac vaSm                // showmatch's match, once the ) or } is shown
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vaMat
+    lac vaGbl               // 3.7's gobblebl counts keys down
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac vaGbl
+    lac vaBsl
+    dac vaPb
+    dzm vaBsl
+    jsp i [vGetKey:VI_BANK]
+    dio vaK
+    lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaKy
+    lio vaK
+    jsp i [kyIns:TERM_BANK]
+    dio vaK
+vaKy, lac vaK
+    SKIP_NEXT_IF_DIFFERENT [CH_BS]
+    jmp vaBs
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLU]
+    jmp vaKill
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLW]
+    jmp vaWd
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp vaQt
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLQ]
+    jmp vaQt
+    SKIP_NEXT_IF_DIFFERENT [CH_NUL]
+    jmp vaNul
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp vaBrk
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLC]
+    jmp vaBrk
+// a blank just after wrapmargin's break is gobbled; past the margin any key
+// but LF may break the line
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vaAb
+    sub [KY_UP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaAb
+    lac vaK
+    SKIP_NEXT_IF_SAME [CH_SP]
+    jmp vaW0
+    lac vaGbl
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaW0
+    law 1
+    dac vaGd
+    jmp vaRd
+vaW0, lac i [oWrapMarg:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaAb
+    jsp vaOcol
+    dac i [ivOc:FILE_BANK]
+    add i [oWrapMarg:EX_BANK]
+    sub scCols
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaWrap
+vaAb, lac vaGc
+    dac i [kaGc:TERM_BANK]
+    lac vaOg
+    dac i [kaOg:TERM_BANK]
+    lio vaK
+    jsp i [kyAbbr:TERM_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaAbr
+    lac vaK
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vaNl
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp vaCr
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp vaEsc
+    SKIP_NEXT_IF_DIFFERENT [CH_CDREC]
+    jmp vaBt
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLD]
+    jmp vaCtD
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLT]
+    jmp vaCtD
+    sub [KY_UP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaBrk
+// beautify: a control character typed, but TAB and FF, dropped with the
+// bell (3.7's junk)
+    lac i [oBeautify:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaPut
+    lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaPut
+    lio vaK
+    jsp vaPrt
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaPut
+    lac vaK
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp vaPut
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp vaPut
+    jmp vaBell
+vaCtD, lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaPut
+    jmp vaBt
+vaAbr, dac vaGc
+    jmp vaMv
+vaQt, jsp i [vGetKey:VI_BANK]
+    dio vaK
+    lac vaK
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vaNl
+    sub [KY_UP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaBrk
+    jmp vaPut
+// CR is LF typed, a character when replayed; ESC replayed is a character
+vaCr, lac i [vLastVg:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaPut
+    jmp vaNl
+vaEsc, lac i [vLastVg:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaPut
+    jmp vaEnd
+vaNul, jsp i [ringBell:TERM_BANK]
+    jmp vaRd
+vaBrk, lac vaK
+    dac i [vPeek:VI_BANK]
+    jmp vaEnd
+vaBs, lac vaPb
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaLit
+    lac vaGc
+    SKIP_NEXT_IF_DIFFERENT vaOg
+    jmp vaBell
+    sub [1]
+    dac vaGc
+    jmp vaMv
+vaKill, lac vaPb
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaLit
+    lac vaGc                // nothing to kill: 3.7's beep
+    SKIP_NEXT_IF_DIFFERENT vaOg
+    jmp vaBell
+    lac vaOg
+    dac vaGc
+    jmp vaMv
+// ^W: back over blanks, then over the word before them
+vaWd, lac vaGc
+    SKIP_NEXT_IF_DIFFERENT vaOg
+    jmp vaBell
+vw1, lac vaGc
+    SKIP_NEXT_IF_DIFFERENT vaOg
+    jmp vaMv
+    add [GENBUF-1]
+    dac vaP
+    lac i vaP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp vw2
+    SKIP_NEXT_IF_SAME [CH_TAB]
+    jmp vw3
+vw2, lac vaGc
+    sub [1]
+    dac vaGc
+    jmp vw1
+vw3, lac vaGc
+    SKIP_NEXT_IF_DIFFERENT vaOg
+    jmp vaMv
+    add [GENBUF-1]
+    dac vaP
+    lac i vaP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp vaMv
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp vaMv
+    lac vaGc
+    sub [1]
+    dac vaGc
+    jmp vw3
+vaMv, law 1                 // the cursor moved, the text did not
+    dac vaRf
+    jmp vaRd
+vaBell, jsp i [ringBell:TERM_BANK]
+    jmp vaRd
+// \ then BS or ^U: that key in the \'s place
+vaLit, lac vaGc
+    add [GENBUF-1]
+    dac vaP
+    lac vaK
+    dac i vaP
+    jsp vaShow
+    jmp vaGen
+
+// ^D and ^T (3.7's vgetline), only while all typed is white from GENBUF's
+// start (vaPw at vaGc): ^T a new indent a shiftwidth on; ^D, at the end of
+// the indent generated, one back (counted for INS), or after 0 or ^ the
+// margin, 0^D staying there and ^^D only for this line. Anything else
+// does nothing, but a 0 or ^ replayed with no indent to take is backed over.
+vaBt, lac [GENBUF]
+    dac aiWcS
+    lac vaGc
+    dac aiWcN
+    jsp vaWc
+    dac vaT
+    lac vaK
+    SKIP_NEXT_IF_SAME [CH_CTLT]
+    jmp vaBd
+    lac vaPw
+    SKIP_NEXT_IF_SAME vaGc
+    jmp vaRd
+    lac vaT
+    add i [oShiftW:EX_BANK]
+    add [1]
+    lia
+    jsp i [ivBkt:FILE_BANK]
+    dac vaIw
+    lia
+    jsp i [ivGi:FILE_BANK]
+    dac vaOg
+    jmp vaBk
+vaBd, lac vaT
+    SKIP_NEXT_IF_SAME vaIw
+    jmp vaBr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaBr
+    lac vaPw
+    SKIP_NEXT_IF_SAME vaGc
+    jmp vaBz
+    lio vaT
+    jsp i [ivBkt:FILE_BANK]
+    dac vaIw
+    idx vaCd
+    lio vaIw
+    jsp i [ivGi:FILE_BANK]
+    dac vaOg
+    jmp vaBk
+vaBz, add [1]
+    SKIP_NEXT_IF_SAME vaGc
+    jmp vaBr
+    lac vaPw
+    add [GENBUF]
+    dac vaP
+    lac i vaP
+    SKIP_NEXT_IF_DIFFERENT [CH_0]
+    jmp vaBz0
+    SKIP_NEXT_IF_SAME [CH_CARET]
+    jmp vaBr
+    law 1
+    dac vaUp
+    jmp vaBz1
+vaBz0, law 1
+    dac vaZr
+vaBz1, law 1
+    dac vaCd
+    dzm vaOg
+    cla
+    jmp vaBk
+vaBr, lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaRd
+    lac vaOg
+    add [1]
+    SKIP_NEXT_IF_SAME vaGc
+    jmp vaRd
+    lac vaOg
+    add [GENBUF]
+    dac vaP
+    lac i vaP
+    SKIP_NEXT_IF_DIFFERENT [CH_0]
+    jmp vaBs1
+    SKIP_NEXT_IF_SAME [CH_CARET]
+    jmp vaRd
+vaBs1, lac vaOg
+    dac vaGc
+    jmp vaMv
+// 3.7's vbackup to the indent just made, AC long: the bell when the typing
+// is there already
+vaBk, SKIP_NEXT_IF_DIFFERENT vaGc
+    jmp vaBell
+    dac vaGc
+    dac vaHw
+    jsp vaShow
+    jmp vaGen
+
+// wrapmargin (3.7's vgetline), the key's column past the margin: the break
+// is vindent.ac's ivWrap, the typing going back to where it says, and
+// blanks in the next two keys are gobbled. A word that alone reaches the
+// margin stays, with the bell.
+vaWrap, lac vaGc
+    dac i [ivGc:FILE_BANK]
+    lac vaOg
+    dac i [ivOg:FILE_BANK]
+    lac vaK
+    dac i [ivK:FILE_BANK]
+    jsp i [ivWrap:FILE_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaW7
+    jsp i [ringBell:TERM_BANK]
+    jmp vaAb
+vaW7, dac vaGc
+    law 3
+    dac vaGbl
+    jmp vaMv
+
+// a character typed: kept, and sent as it is when the screen is up to date
+// and it goes over one column's character or after the line's end
+vaPut, lac LBLEN
+    add vaGc
+    sub [LB_SIZE-2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaBell
+    lac vaK
+    SKIP_NEXT_IF_SAME [CH_BSL]
+    jmp .+3
+    law 1
+    dac vaBsl
+    dzm vaOk
+    lac vaClean
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaSt
+    lac vaRf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaSt
+    lio vaK
+    jsp vaPrt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaSt
+    jsp vaQuiet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaSt
+    lac vaGc                // over a character typed and backed over
+    sub vaHw
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaS1
+    lac vaGc
+    add [GENBUF]
+    dac vaP
+    lio i vaP
+    jmp vaCk
+vaS1, lac vaHw              // over what c, r or R goes over
+    sub vaS0
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaS2
+    add [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaS3
+    lac vaDol               // c's $
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaS4
+vaS3, lac vaCur
+    add vaHw
+    add [LINEBUF]
+    dac vaP
+    lio i vaP
+vaCk, jsp vaPrt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaSt
+vaS4, law 2
+    dac vaOk
+    jmp vaSt
+vaS2, lac LBLEN             // after the line's end, list's $ not shown
+    sub vaCur
+    sub vaS0
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaSt
+    lac scList
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaSt
+    law 1
+    dac vaOk
+vaSt, lac vaGc
+    add [GENBUF]
+    dac vaP
+    lac vaK
+    dac i vaP
+    idx vaGc
+    sub vaHw
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vaS5
+    jmp vaS6
+vaS5, lac vaGc
+    dac vaHw
+vaS6, jsp vaShow
+    lac i [oShowMat:EX_BANK] // showmatch: ) or } typed, not replayed
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaS7
+    lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaS7
+    lac vaK
+    SKIP_NEXT_IF_DIFFERENT [CH_RPAR]
+    dac vaSm
+    SKIP_NEXT_IF_DIFFERENT [0175]
+    dac vaSm
+vaS7, lac vaOk
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaGen
+    lio vaK
+    jsp i [rawc:TERM_BANK]
+// on a plain line the next column is known: at a row's end, the cursor is
+// placed again; on another line, always
+    lac i [ED_REC]
+    and [REC_PLAIN]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaMv
+    lac scPre
+    add vaCur
+    add vaGc
+vaMd, sub scCols
+    SKIP_NEXT_IF_AC_ZERO
+    jmp .+2
+    jmp vaMv
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vaMd
+    jmp vaRd
+vaGen, law 1                // the line's rows painted again
+    dac vaInv
+    dac vaRf
+    jmp vaRd
+
+// ESC: the line put together and put in; the cursor on the last character
+// put in; the line's rows keep showing it when they show just it
+vaEnd, jsp vaPre
+    jsp vaOwn
+    jsp vaAdd
+    jsp vaFix
+    jsp vaMax
+    jsp vaBld
+    jsp vaCmt
+    dzm scEdit
+    lac [ED_REC]
+    dac scRkF
+    lio DOT
+    jsp i [lnPtr:0]
+    dac scRkT
+    lac vaGc                // shown as put: all typed text kept, once, and
+    SKIP_NEXT_IF_SAME vaHw  // all that was gone over typed over
+    jmp veNo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp veR
+    lac vaCnt
+    SKIP_NEXT_IF_SAME [1]
+    jmp veNo
+veR, lac vaCh
+    SKIP_NEXT_IF_DIFFERENT [0122]
+    jmp veK
+    lac vaHw
+    sub vaS0
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp veNo
+    jmp veK
+veNo, dzm scRkT
+veK, jsp scRekey
+    lac vaE
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac i [vCurs:VI_BANK]
+    jsp i [vURec:VI_BANK]
+    lac i [viRet:VI_BANK]
+    dac vaT
+    jmp i vaT
+
+// LF: the line put together to where the typing went, its tail the next
+// line, and the insert goes on at that line's start; r ends there. Under
+// autoindent the tail's leading white goes, and the new line starts with
+// the indent: this line's the first time, after that the last one made.
+// INS has a blank for the LF of wrapmargin's break, as 3.7's.
+vaNl, jsp vaPre
+    jsp vaOwn
+    jsp vaAdd
+    lio [CH_LF]
+    lac vaGbl
+    SKIP_NEXT_IF_AC_ZERO
+    lio [CH_SP]
+    jsp vaAd1
+    jsp vaFix
+    jsp vaMax
+    lac vaCur               // the tail as a record, held meanwhile
+    add vaSe
+    add [LINEBUF]
+    dac vbS
+    lac [LINEBUF]
+    dac vbD
+    lac LBLEN
+    sub vaCur
+    sub vaSe
+    dac vaTl
+    dac vbN
+    lac i [oAutoInd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnC
+vnS, lac vbN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnC
+    lac i vbS
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp vnS1
+    SKIP_NEXT_IF_SAME [CH_TAB]
+    jmp vnC
+vnS1, idx vbS
+    lac vbN
+    sub [1]
+    dac vbN
+    dac vaTl
+    jmp vnS
+vnC, lac vbN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnT
+    lac i vbS
+    dac i vbD
+    idx vbS
+    idx vbD
+    lac vbN
+    sub [1]
+    dac vbN
+    jmp vnC
+vnT, lac vaTl
+    dac LBLEN
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaMem
+    dac i [hpHold2:0]
+    lio DOT                 // dot's line again: its head, then the typing
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    jsp vaTyp
+    lac vbD
+    sub [LINEBUF]
+    dac LBLEN
+    dzm i vbD
+    lac i [oAutoInd:EX_BANK] // the first time, the next indent this line's
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnI0
+    lac vaIf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnI1
+    lac [LINEBUF]
+    dac aiWcS
+    lac LBLEN
+    dac aiWcN
+    jsp vaWc
+    dac vaInd
+vnI1, dzm vaIf
+vnI0, jsp vaCmt
+    lio i [hpHold2:0]
+    jsp i [lnInsert:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaFull
+    dzm i [hpHold2:0]
+    law VU_MINS
+    dac i [vUndK:VI_BANK]
+    dzm i [uLnum:0]         // vops.ac's vKillU
+    dzm i [vSyncLn:VI_BANK]
+    jsp scInval             // the line done painted from its record
+    lio DOT
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    dzm vaCur
+    dzm vaGc
+    dzm vaOg
+    dzm vaHw
+    dzm vaDol
+    dzm vaCd
+    dzm vaUp
+    dzm vaZr
+    dzm vaGd
+    dzm vaIw
+    law 1
+    dac vaCnt
+    dzm vaS0
+    lac i [oAutoInd:EX_BANK] // the indent, unless the line would be too long
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnR
+    lio vaInd
+    jsp i [ivGi:FILE_BANK]
+    add LBLEN
+    sub [LB_SIZE-2]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vnR
+    add [LB_SIZE-2]
+    sub LBLEN
+    dac vaGc
+    dac vaOg
+    dac vaHw
+    lac vaInd
+    dac vaIw
+vnR, lac vaCh
+    SKIP_NEXT_IF_SAME [0122]
+    jmp .+3
+    lac LBLEN               // R goes on over the next line
+    dac vaS0
+    jsp vaShow
+    lac vaCh
+    SKIP_NEXT_IF_DIFFERENT [0162]
+    jmp vaEnd
+    law 1
+    dac vaInv
+    dac vaRf
+    dac vaFrc               // the line opened shown at once, as 3.7's vopen
+    jmp vaRd
+vaMem, lac [mOutMem:MSG_BANK]
+    jmp i [vErr:VI_BANK]
+vaFull, dzm i [hpHold2:0]
+    lac [mTooMany:MSG_BANK]
+    jmp i [vErr:VI_BANK]
+
+// r: one key, put in the count's times over as many characters; LF breaks
+// the line there instead
+vaRep, jsp i [vGetKey:VI_BANK]
+    dio vaK
+    lac vaK
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vaNl
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp vaRcr
+vaR1, lac vaK
+    dac i [GENBUF]
+    law 1
+    dac vaGc
+    dzm vaHw                // never shown: vaEnd has dot's rows painted
+    jmp vaEnd
+vaRcr, lac i [vLastVg:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vaR1
+    jmp vaNl
+
+// vaTop -- before a key is read: the cursor at the typing's place (vmain.ac's
+// vCurs); the line's rows marked to be painted again when it changed; the
+// screen brought up to date when no key waits, or at once after a line is
+// opened (vaFrc). 3.7 scrolls each line it opens onto the screen as it
+// opens it, so a burst that opens two below the window's bottom ends with
+// both scrolled on, not with the window put about dot as a deferred update
+// would. AC and IO are clobbered.
+vaTop, dac vtX
+    lac vaCur
+    add vaGc
+    dac i [vCurs:VI_BANK]
+    lac vaInv
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vt1
+    dzm vaInv
+    jsp scInval
+vt1, lac vaRf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i vtX
+    dzm vaClean
+    lac vaFrc
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vt2
+    jsp vaQuiet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i vtX
+    jsp scRefresh
+    jmp vt3
+vt2, dzm vaFrc
+    jsp scRfNow
+vt3, dzm vaRf
+    law 1
+    dac vaClean
+    jmp i vtX
+
+// vaOwn -- what this insert typed, from vaOg to vaGc, as vaAdd's text (an
+// autoindent is not kept in INS). AC is clobbered.
+vaOwn, dac vowX
+    lac vaOg
+    add [GENBUF]
+    dac atS
+    lac vaGc
+    sub vaOg
+    dac atN
+    jmp i vowX
+
+// vaPre -- what INS keeps before a line's own typing (3.7's vappend): ^ for
+// ^^D, else 0 for 0^D; CH_CDREC for each ^D that backtabbed; a blank when
+// one was gobbled after wrapmargin's break. AC and IO are clobbered.
+vaPre, dac aiPrX
+    lio [CH_CARET]
+    lac vaUp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp aiPr1
+    lio [CH_0]
+    lac vaZr
+    SKIP_NEXT_IF_AC_ZERO
+aiPr1, jsp vaAd1
+    lac vaCd
+    dac aiPrC
+aiPr2, lac aiPrC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp aiPr3
+    sub [1]
+    dac aiPrC
+    lio [CH_CDREC]
+    jsp vaAd1
+    jmp aiPr2
+aiPr3, lac vaGd
+    SKIP_NEXT_IF_AC_ZERO
+    jmp aiPr4
+    jmp i aiPrX
+aiPr4, lio [CH_SP]
+    jsp vaAd1
+    jmp i aiPrX
+
+// vaAd1 -- the character in IO added to INS (vaAdd). AC and IO are
+// clobbered.
+vaAd1, dac aiA1X
+    dio vaOne
+    lac [vaOne:SCR_BANK]
+    dac atS
+    law 1
+    dac atN
+    jsp vaAdd
+    jmp i aiA1X
+
+// vaFix -- 3.7's fixindent (vindent.ac's ivFix), after a line typed under
+// autoindent with an indent given or made; vaInd follows its white unless
+// ^^D was typed. When the text changed, vaHw no longer matches vaGc, so
+// vaEnd paints the line again. AC and IO are clobbered.
+vaFix, dac aiFxX
+    lac vaIf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i aiFxX
+    lac i [oAutoInd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i aiFxX
+    lac vaGc
+    dac i [ivGc:FILE_BANK]
+    lac vaInd
+    dac i [ivInd:FILE_BANK]
+    jsp i [ivFix:FILE_BANK]
+    dac aiFxI
+    lac i [ivGc:FILE_BANK]
+    dac vaGc
+    lac i [ivCh:FILE_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp aiFxU
+    lac [0777776]
+    dac vaHw
+aiFxU, lac vaUp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i aiFxX
+    lac aiFxI
+    dac vaInd
+    jmp i aiFxX
+
+// vaWc -- vindent.ac's ivWc (3.7's whitecnt and vpastwh) over the aiWcN
+// characters at aiWcS, how many of them are white into vaPw.
+// AC is the columns; IO is clobbered.
+vaWc, dac aiWcX
+    lac aiWcS
+    dac i [ivS:FILE_BANK]
+    lac aiWcN
+    dac i [ivN:FILE_BANK]
+    jsp i [ivWc:FILE_BANK]
+    lio i [ivPw:FILE_BANK]
+    dio vaPw
+    jmp i aiWcX
+
+// vaOcol -- 3.7's outcol: the column the typing has reached on its row of
+// the screen, number's prefix counted. AC is it; IO is clobbered.
+vaOcol, dac aiOcX
+    lac vaCur
+    add vaGc
+    sub [1]
+    dac scIdx
+    lio DOT
+    jsp scColOf
+aiOcL, sub scCols
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp aiOcL
+    add scCols
+    jmp i aiOcX
+
+// vaMat -- showmatch (3.7's lsmatch): the bracket vaSm just typed matched
+// back through the line and the lines before (vindent.ac's ivMat). A match
+// on the screen is shown for a second, then the cursor goes back at the
+// next update; none in the buffer is the bell. A match is not shown while
+// keys wait. AC and IO are clobbered.
+vaMat, dac smX
+    lac vaSm
+    dac i [ivBr:FILE_BANK]
+    dzm vaSm
+    lac vaCur
+    dac i [ivCur:FILE_BANK]
+    lac vaGc
+    dac i [ivGc:FILE_BANK]
+    jsp i [ivMat:FILE_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp smNo
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i smX               // given up for a key typed
+    lac i [ivL:FILE_BANK]
+    sub scTop
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i smX
+    jsp vaQuiet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i smX
+    lac i [ivJ:FILE_BANK]
+    dac scIdx
+    lio i [ivL:FILE_BANK]
+    jsp scShowAt
+    jsp i [ivSec:FILE_BANK]
+    law 1
+    dac vaRf
+    jsp vaTop
+    jmp i smX
+smNo, jsp i [ringBell:TERM_BANK]
+    jmp i smX
+
+// vaQuiet -- whether no key waits: none typed ahead, none put back, none
+// replayed, none of a map's. AC is 1 or 0; IO is preserved.
+vaQuiet, dac vqX
+    lac i [taCnt:TERM_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vqN
+    lac i [vPeek:VI_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vqN
+    lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vqN
+    jsp i [kyMacW:TERM_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vqN
+    law 1
+    jmp i vqX
+vqN, cla
+    jmp i vqX
+
+// vaPrt -- whether the character in IO takes one column: a blank to ~.
+// AC is 1 or 0; IO is clobbered.
+vaPrt, dac vpX
+    dio vaT
+    lac vaT
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vpN
+    sub [CH_DEL-CH_SP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vpN
+    law 1
+    jmp i vpX
+vpN, cla
+    jmp i vpX
+
+// vaShow -- the line as it should look, as a record at ED_REC: the head,
+// the typed text to its high-water mark, the rest from past what was typed
+// over, c's $ on the last character still to be typed over. AC and IO are
+// clobbered.
+vaShow, dac vwsX
+    lac [ED_REC+REC_HDR]
+    dac vsD
+    dzm vsHalf
+    dzm vsLen
+    lac [REC_PLAIN]
+    dac vwsF
+    lac [LINEBUF]
+    dac vsS
+    lac vaCur
+    dac vsN
+    jsp vsRun
+    lac [GENBUF]
+    dac vsS
+    lac vaHw
+    dac vsN
+    jsp vsRun
+    lac vaHw
+    sub vaS0
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vsT
+    lac vaHw                // some still to be typed over
+    add vaCur
+    add [LINEBUF]
+    dac vsS
+    lac vaDol
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vsT1
+    lac vaS0
+    sub vaHw
+    sub [1]
+    dac vsN
+    jsp vsRun
+    lio [CH_DOLLAR]
+    jsp vsPut
+    idx vsS
+    jmp vsT1
+vsT, lac vaCur
+    add vaS0
+    add [LINEBUF]
+    dac vsS
+vsT1, lac LBLEN
+    add [LINEBUF]
+    sub vsS
+    dac vsN
+    jsp vsRun
+    lac vsHalf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vsE
+    lac vsW
+    dac i vsD
+vsE, lac vsLen
+    ior vwsF
+    dac i [ED_REC]
+    dzm i [ED_REC+1]
+    jmp i vwsX
+
+// vsRun -- vsN characters from vsS (advanced past them) into the record.
+// AC and IO are clobbered.
+vsRun, dac vrnX
+vsrL, lac vsN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp i vrnX
+    lio i vsS
+    jsp vsPut
+    idx vsS
+    lac vsN
+    sub [1]
+    dac vsN
+    jmp vsrL
+
+// vsPut -- the character in IO into the record, two a word; REC_PLAIN
+// dropped for a TAB, a control character or DEL, as putLine does.
+// AC is clobbered, IO preserved.
+vsPut, dac vspX
+    dio vsC
+    lac vsC
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    dzm vwsF
+    lac vsC
+    sub [CH_DEL]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dzm vwsF
+    idx vsLen
+    lac vsHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vsp2
+    lac vsC
+    ral 9s
+    dac vsW
+    law 1
+    dac vsHalf
+    jmp i vspX
+vsp2, lac vsC
+    ior vsW
+    dac i vsD
+    idx vsD
+    dzm vsHalf
+    jmp i vspX
+
+// vaAdd -- 3.7's addtext: atN characters from atS added to INS, unless keys
+// are replayed; more than VBSIZE marks INS OVERBUF and forgets the last
+// change's keys. AC and IO are clobbered.
+vaAdd, dac vadX
+    lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i vadX
+    lac vINS
+    SKIP_NEXT_IF_DIFFERENT [OVERBUF]
+    jmp i vadX
+    lac vInsN
+    add atN
+    sub [VBSIZE]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vaAo
+    lac vInsN
+    add [vINS:SCR_BANK]
+    dac vaP
+vaAL, lac atN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaAe
+    lac i atS
+    dac i vaP
+    idx atS
+    idx vaP
+    idx vInsN
+    lac atN
+    sub [1]
+    dac atN
+    jmp vaAL
+vaAe, dzm i vaP
+    jmp i vadX
+vaAo, law OVERBUF
+    dac vINS
+    dzm i [vLcmd:VI_BANK]
+    jmp i vadX
+
+// vaMax -- 3.7's vmaxrep: vaSe the characters at the cursor that go (R's
+// no more than were typed); the count cut so that the line stays shorter
+// than LB_SIZE-1, none fitting being Line too long. AC and IO are
+// clobbered.
+vaMax, dac vmX
+    lac vaCnt
+    sub [LB_SIZE-2]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vmR
+    lac [LB_SIZE-2]
+    dac vaCnt
+vmR, lac vaS0
+    dac vaSe
+    lac vaCh
+    SKIP_NEXT_IF_SAME [0122]
+    jmp vmL
+    lac vaGc
+    sub vaS0
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vmL
+    lac vaGc
+    dac vaSe
+vmL, lac vaGc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i vmX
+    lac LBLEN
+    sub vaSe
+    dac vaT
+    dzm vaK2
+vmC, lac vaK2
+    SKIP_NEXT_IF_DIFFERENT vaCnt
+    jmp vmE
+    lac vaT
+    add vaGc
+    sub [LB_SIZE-2]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vmE
+    add [LB_SIZE-2]
+    dac vaT
+    idx vaK2
+    jmp vmC
+vmE, lac vaK2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaLong
+    dac vaCnt
+    jmp i vmX
+vaLong, lac [mVLong:MSG_BANK]
+    jmp i [vErr:VI_BANK]
+
+// vaBld -- the line put together in LINEBUF: its tail, past vaSe characters
+// at the cursor, moved to follow the typed text's copies (vaE), then the
+// copies. AC and IO are clobbered.
+vaBld, dac vbX
+    lac vaCur
+    dac vaE
+    lac vaCnt
+    dac vbK
+vbE1, lac vbK
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vbE2
+    lac vaE
+    add vaGc
+    dac vaE
+    lac vbK
+    sub [1]
+    dac vbK
+    jmp vbE1
+vbE2, lac LBLEN
+    sub vaCur
+    sub vaSe
+    dac vaTl
+    dac vbN
+    lac vaCur
+    add vaSe
+    add [LINEBUF]
+    dac vbS
+    lac vaE
+    add [LINEBUF]
+    dac vbD
+    sub vbS
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vbB
+vbF, lac vbN                // to the left: from its start
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vbT
+    lac i vbS
+    dac i vbD
+    idx vbS
+    idx vbD
+    lac vbN
+    sub [1]
+    dac vbN
+    jmp vbF
+vbB, lac vbS                // to the right: from its end
+    add vaTl
+    dac vbS
+    lac vbD
+    add vaTl
+    dac vbD
+vbBL, lac vbN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vbT
+    lac vbS
+    sub [1]
+    dac vbS
+    lac vbD
+    sub [1]
+    dac vbD
+    lac i vbS
+    dac i vbD
+    lac vbN
+    sub [1]
+    dac vbN
+    jmp vbBL
+vbT, lac vaE
+    add vaTl
+    dac LBLEN
+    add [LINEBUF]
+    dac vbD
+    dzm i vbD
+    jsp vaTyp
+    jmp i vbX
+
+// vaTyp -- the typed text vaCnt times into LINEBUF at the cursor; vbD past
+// the last copy. AC and IO are clobbered.
+vaTyp, dac vtyX
+    lac vaCur
+    add [LINEBUF]
+    dac vbD
+    lac vaCnt
+    dac vbK
+vty1, lac vbK
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp i vtyX
+    lac [GENBUF]
+    dac vbS
+    lac vaGc
+    dac vbN
+vty2, lac vbN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vty3
+    lac i vbS
+    dac i vbD
+    idx vbS
+    idx vbD
+    lac vbN
+    sub [1]
+    dac vbN
+    jmp vty2
+vty3, lac vbK
+    sub [1]
+    dac vbK
+    jmp vty1
+
+// vaCmt -- LINEBUF as dot's line: the first time, as a change undo takes
+// back (vops.ac's vCommit), unless the insert's lines were put in already;
+// after, in place of the record. AC and IO are clobbered.
+vaCmt, dac vcmX
+    lac vaUnd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcm1
+    dzm vaUnd
+    jsp i [vCommit:VI_BANK]
+    jmp i vcmX
+vcm1, jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vaMem
+    dac i [lnR:0]
+    lio DOT
+    jsp i [lnPutMark:0]
+    jmp i vcmX
+
+// vaOff -- after an error, insert mode's screen ended: dot's rows painted
+// from its record, the held tail let go. AC and IO are clobbered.
+vaOff, dac voX
+    lac scEdit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i voX
+    dzm scEdit
+    dzm i [hpHold2:0]
+    jsp scInval
+    jmp i voX
+
+// vaIns1 -- INS the one character in IO (~, as 3.7's r of it).
+// AC is clobbered, IO preserved.
+vaIns1, dac i1X
+    dio vINS
+    dzm vINS+1
+    law 1
+    dac vInsN
+    jmp i i1X
+
+vaCh, 0
+vaCnt, 0
+vaS0, 0
+vaDol, 0
+vaUnd, 0
+vaCur, 0
+vaGc, 0
+vaOg, 0                     // where this insert's own typing starts (3.7's ogcursor)
+vaHw, 0
+vaSe, 0
+vaE, 0
+vaTl, 0
+vaK, 0
+vaK2, 0
+vaBsl, 0
+vaPb, 0
+vaOk, 0
+vaInv, 0
+vaRf, 0
+vaFrc, 0                    // vaTop's update made though keys wait
+vaClean, 0
+vaP, 0
+vaT, 0
+vsD, 0
+vsS, 0
+vsN, 0
+vsC, 0
+vsW, 0
+vwsF, 0
+vsLen, 0
+vsHalf, 0
+atS, 0
+atN, 0
+vbS, 0
+vbD, 0
+vbN, 0
+vbK, 0
+vtX, 0
+vqX, 0
+vpX, 0
+vwsX, 0
+vrnX, 0
+vspX, 0
+vadX, 0
+vmX, 0
+vbX, 0
+vtyX, 0
+vcmX, 0
+voX, 0
+i1X, 0
+vowX, 0
+vaInd, 0                    // autoindent's indent for the next line, columns
+vaIf, 0                     // 3.7's vaifirst: no indent was given
+vaIw, 0                     // 3.7's iwhite: the indent ^D works on
+vaCd, 0                     // 3.7's CDCNT, HADUP, HADZERO, gobbled: INS's
+vaUp, 0                     //   record of the line's ^D, ^^D, 0^D, and a
+vaZr, 0                     //   blank gobbled
+vaGd, 0
+vaGbl, 0                    // 3.7's gobblebl: keys left to gobble a blank
+vaSm, 0                     // showmatch's ) or } waiting to be matched
+vaPw, 0
+aiWcS, 0
+aiWcN, 0
+aiWcX, 0
+aiFxX, 0
+aiFxI, 0
+aiPrX, 0
+aiPrC, 0
+aiA1X, 0
+smX, 0
+aiOcX, 0
+endloc
+
+vaInd0, 0                   // the indent o, O and c of lines give insert mode
+vaOne, 0                    // a character for INS (vaAd1)
+vInsN, 0                    // INS's length
+vINS,                       // INS: the last insert's text, a character a word
+    table VBSIZE+1, 0       //   ending in a 0 word; OVERBUF first when too long
+vDEL,                       // DEL: the last change's text within a line, as INS
+    table VBSIZE+1, 0

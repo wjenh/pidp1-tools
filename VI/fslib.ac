@@ -1,0 +1,14 @@
+// fslib.ac -- the file system library, 2.1 (Am1Includes/FILESYSTEM/), with the
+// Microtape's and the drum's layers: the calls files.ac makes. The formats,
+// for :format, are in bank FILE_BANK, at files.ac's end, for room; what they
+// include comes in here. In bank FS_BANK, before the messages and the
+// greeting (MSG_BANK is FS_BANK); every routine is reached by farjda from
+// bank FILE_BANK. Needs <MICROTAPE/microtape.ah> and <DRUM/drum.ah>, which
+// vi.am1 includes.
+
+#include <FILESYSTEM/fsio.ac>
+#include <FILESYSTEM/fscreate.ac>
+#include <FILESYSTEM/fsdelete.ac>
+#include <FILESYSTEM/fsrename.ac>
+#include <MICROTAPE/mtmount.ac>
+#include <DRUM/drmount.ac>

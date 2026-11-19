@@ -1,0 +1,100 @@
+// ptape.ac -- the paper tape reader and punch for PC:, in FOCAL's ASCII
+// form, after TECO's ptape.ac with its buffer, its Microtape input and its
+// check character left out: every character punched with its eighth hole;
+// read with or without it, blank tape (NUL) and rubbed-out frames (DEL)
+// passed over. The tape's end is RD_MS with no character, FOCAL's rule.
+//
+// The reader is polled with a time limit, a read that does not wait, since at
+// the end of a tape no character comes and the flag never sets; while it
+// waits, the break is looked for (brkChk) and the BBN clock read, which
+// restart enables.
+//
+// Every routine is entered by jsp with the extend window open and returns by
+// jmp i. In bank FILE_BANK, for files.ac; its data words follow its code.
+// Needs vi.ah, <AIDS/skipmacros.ah> and termio.ac's brkChk (bank TERM_BANK).
+
+// A difference of two clock readings, in AC, brought into 0 to 59,999, where
+// the clock wraps.
+#define PT_MSWRAP    SKIP_NEXT_IF_AC_NOT_NEGATIVE; add [CLK_WRAP]
+
+local piX, psX, psNew, psGo, pgX, pgAsk, pgWait, pgTime, ppX
+
+// ptInit -- no read asked for. AC is clobbered, IO preserved.
+ptInit, dac piX
+    dzm ptReq
+    jmp i piX
+
+// ptStart -- a read begins: the time limit starts now. A character a request
+// has already brought in is kept; otherwise a new request is made, so a tape
+// put in since the last one ran out is read.
+// AC and IO are clobbered.
+ptStart, dac psX
+    lac ptReq
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp psNew
+    cks
+    ril 1s
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp psNew
+    jmp psGo                // the character is in: keep it
+psNew, rpa-i
+    law 1
+    dac ptReq
+psGo, rck
+    dio ptT0
+    jmp i psX
+
+// ptGet -- the next character from the tape, its eighth bit dropped, NUL and
+// DEL passed over. AC is the character, or 0 at the tape's end (RD_MS with
+// no character); IO is clobbered. A break leaves through tmErr (brkChk).
+ptGet, dac pgX
+    lac ptReq
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pgWait
+pgAsk, rpa-i
+    law 1
+    dac ptReq
+    rck
+    dio ptT0
+pgWait, cks
+    ril 1s
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp pgTime
+    rrb
+    dzm ptReq
+    lai
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pgAsk               // blank tape
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp pgAsk               // a rubbed-out frame
+    jmp i pgX
+// nothing in yet: look for a break, read the clock; past the limit, the end
+pgTime, jsp i [brkChk:TERM_BANK]
+    rck
+    lai
+    sub ptT0
+    PT_MSWRAP
+    sub [RD_MS]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp pgWait
+    cla
+    jmp i pgX
+
+// ptPut -- punch the ASCII character in IO with its eighth hole. Waits for
+// the punch. AC and IO are clobbered.
+ptPut, dac ppX
+    lai
+    ior [0200]
+    lia
+    ppa
+    jmp i ppX
+
+piX, 0                      // the return addresses
+psX, 0
+pgX, 0
+ppX, 0
+endloc
+
+ptReq, 0                    // a read has been asked for and not yet taken
+ptT0, 0                     // the clock when it was asked for, in ms

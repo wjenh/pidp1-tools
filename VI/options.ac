@@ -1,0 +1,929 @@
+// options.ac -- the options and :set, as 3.7's ex_set.c and ex_data.c: the
+// table of those vi keeps, in 3.7's order with lines and columns in theirs.
+// An entry is OPT_WORDS words: the name's and the abbreviation's full
+// addresses (am1's ascii; 0 for none), the kind, the default, the value,
+// and a string option's default text. A string option's value is the full
+// address of its text in bank 10, a character a word; its
+// default word is 3.7's odefault, set once the option is assigned. term and
+// ttytype are one value, oTerm, a TERM_ code. Values a command reads are
+// labeled (oTerse, oReport, ...). In bank EX_BANK, with the rest of ex.
+// Needs vi.ah, <AIDS/skipmacros.ah>, excmd.ac, termio.ac and messages.ac.
+
+#define O_ONOFF     0
+#define O_NUM       1
+#define O_STR       2
+#define O_TERM      3
+#define OPT_WORDS   6
+#define OPT_NAME    0
+#define OPT_ABBR    1
+#define OPT_KIND    2
+#define OPT_DFLT    3
+#define OPT_VAL     4
+#define OPT_SDEF    5
+#define NOPTS       0d35
+#define OPT_NMAX    0d62                  // 3.7's ONMSZ-2: an option's name
+#define LINES_MIN   0d12
+#define LINES_MAX   0d66
+#define COLS_MIN    0d20
+#define COLS_MAX    0d132
+
+local oiX, oiP, oiN, oiS, oiD, oiLoop, oiNext, oiStr, oiSL, seAll, seNo, \
+    seName, seNmL, seNmOk, seFind, seF1, seFNx, seGot, seOne, seOnOff, \
+    seNum, seNumOk, seWin, seLines, seCols, seStr, seStrL, seStrE, seTerm, \
+    seTermOk, seNext, seOp, seVal, seN, seP, seC, seWh, seBad, ptX, ptOp, \
+    ptK, ptV, ptName, ptNum, ptStrL, ptTerm, paX, paR, paOp, paLoop, paEnd, \
+    psX, psOp, psN, psLoop, psNext, psShow, sdX, sdC, sdYes, teX, teP, teN, \
+    teLoop, teHit, seEq, seWinF, seLnLo, seLnHi, seLnSet, seCoLo, seCoHi, \
+    seStrC, seLong, seStrK, seStrD, onLoop, teNone, psStr, onX, onP, onN, \
+    ptP, psP, psD
+
+// optInit -- every option at its default, as a caller finds them.
+// AC and IO are clobbered.
+optInit, dac oiX
+    lac [optTab:EX_BANK]
+    dac oiP
+    law NOPTS
+    dac oiN
+oiLoop, lac oiP
+    add [OPT_KIND]
+    dac oiS
+    lac i oiS
+    SKIP_NEXT_IF_DIFFERENT [O_STR]
+    jmp oiStr
+    lac oiP
+    add [OPT_DFLT]
+    dac oiS
+    lac i oiS
+    dac oiD
+    lac oiP
+    add [OPT_VAL]
+    dac oiS
+    lac oiD
+    dac i oiS
+    jmp oiNext
+// a string: not assigned, its default text in its buffer
+oiStr, lac oiP
+    add [OPT_DFLT]
+    dac oiS
+    dzm i oiS
+    lac oiP
+    add [OPT_VAL]
+    dac oiS
+    lac i oiS
+    dac oiD                 // the buffer
+    lac oiP
+    add [OPT_SDEF]
+    dac oiS
+    lac i oiS
+    dac pkStr
+    dzm oiS
+oiSL, lio oiS
+    jsp pkChr
+    dac i oiD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp oiNext
+    idx oiD
+    idx oiS
+    jmp oiSL
+oiNext, lac oiP
+    add [OPT_WORDS]
+    dac oiP
+    lac oiN
+    sub [1]
+    dac oiN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp oiLoop
+    law TERM_DUMB
+    dac oTerm
+    jmp i oiX
+
+// cSet -- :set. With nothing after it, the options not at their defaults;
+// else each of its words: all, name, noname, name?, name=value. Reached by
+// jmp from the dispatch; it goes back to exNext.
+cSet, jsp setNoAddr
+    jsp skipEnd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp seName
+    jsp ignChar
+    jsp prOpts
+    jmp exNext
+// the option's name: at least one character, then letters and digits
+seName, dzm seN
+seNmL, jsp getChar
+    lia
+    lac seN
+    sub [OPT_NMAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp seNmOk
+    lac seN
+    add [OPTNAME:EX_BANK]
+    dac seP
+    dio i seP
+    idx seN
+seNmOk, jsp peekChar
+    lia
+    jsp isAlnum
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seNmL
+    lac seN
+    add [OPTNAME:EX_BANK]
+    dac seP
+    dzm i seP
+// all
+    lac [nAll:EX_BANK]
+    dac pkStr
+    lac [OPTNAME:EX_BANK]
+    dac cwStr
+    jsp pkCmp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seAll
+// no
+    dzm seNo
+    lac [OPTNAME:EX_BANK]
+    dac cwStr
+    lac i cwStr
+    SKIP_NEXT_IF_SAME ['n']
+    jmp seFind
+    idx cwStr
+    lac i cwStr
+    SKIP_NEXT_IF_SAME ['o']
+    jmp seBad
+    idx cwStr
+    law 1
+    dac seNo
+    jmp seFind
+seBad, lac [OPTNAME:EX_BANK]
+    dac cwStr
+// the entry: its name or its abbreviation
+seFind, lac [optTab:EX_BANK]
+    dac seOp
+    law NOPTS
+    dac seN
+seF1, lac seOp
+    add [OPT_NAME]
+    dac seP
+    lac i seP
+    dac pkStr
+    jsp pkCmp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seGot
+    lac seOp
+    add [OPT_ABBR]
+    dac seP
+    lac i seP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp seFNx
+    dac pkStr
+    jsp pkCmp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seGot
+seFNx, lac seOp
+    add [OPT_WORDS]
+    dac seOp
+    lac seN
+    sub [1]
+    dac seN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seF1
+    lac cwStr
+    dac i [msgS:MSG_BANK]
+    lac [mNoOpt:MSG_BANK]
+    jmp exErr
+seGot, jsp skipWh
+    dac seWh
+    jsp peekChar
+    SKIP_NEXT_IF_SAME ['?']
+    jmp seOnOff
+    jsp ignChar
+seOne, lio seOp
+    jsp prOpt
+    jsp i [newline:TERM_BANK]
+    jmp seNext
+seOnOff, lac seOp
+    add [OPT_KIND]
+    dac seP
+    lac i seP
+    dac seC
+    SKIP_NEXT_IF_SAME [O_ONOFF]
+    jmp seVal
+    lac seOp
+    add [OPT_VAL]
+    dac seP
+    law 1
+    sub seNo
+    dac i seP
+    jmp seNext
+seVal, lac seNo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp seEq
+    lio seOp
+    jsp opName
+    lac [mNotTog:MSG_BANK]
+    jmp exErr
+seEq, lac seWh
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seOne
+    jsp setEnd
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seOne
+    jsp getChar
+    SKIP_NEXT_IF_DIFFERENT [CH_EQ]
+    jmp seNum
+    lio seOp
+    jsp opName
+    lac [mMissEq:MSG_BANK]
+    jmp exErr
+seNum, lac seC
+    SKIP_NEXT_IF_SAME [O_NUM]
+    jmp seStr
+    jsp peekChar
+    lia
+    jsp isDigit
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seNumOk
+    lac [mDigits:MSG_BANK]
+    jmp exErr
+seNumOk, jsp getNum
+    lia
+    lac seOp
+    add [OPT_VAL]
+    dac seP
+    dio i seP
+// 3.7's repairs: no tab of 0, a window less than the screen; lines and
+// columns kept in their ranges, the window and the scroll following lines
+    lac oTabStop
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+3
+    law TAB_STOP
+    dac oTabStop
+    lac oHardTabs
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+3
+    law TAB_STOP
+    dac oHardTabs
+    lac seOp
+    SKIP_NEXT_IF_DIFFERENT [opWin:EX_BANK]
+    jmp seWin
+    SKIP_NEXT_IF_DIFFERENT [opLines:EX_BANK]
+    jmp seLines
+    SKIP_NEXT_IF_DIFFERENT [opCols:EX_BANK]
+    jmp seCols
+    jmp seNext
+seWin, lac oWindow
+    sub oLines
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp seWinF
+    jmp seNext
+seWinF, lac oLines
+    sub [1]
+    dac oWindow
+    jmp seNext
+seLines, lac oLines
+    sub [LINES_MIN]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp seLnLo
+    lac oLines
+    sub [LINES_MAX+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp seLnHi
+    jmp seLnSet
+seLnLo, law LINES_MIN
+    dac oLines
+    jmp seLnSet
+seLnHi, law LINES_MAX
+    dac oLines
+seLnSet, lac oLines
+    sub [1]
+    dac oWindow
+    rar 1s
+    and [0377]
+    dac oScroll
+    jmp seNext
+seCols, lac oColumns
+    sub [COLS_MIN]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp seCoLo
+    lac oColumns
+    sub [COLS_MAX+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp seCoHi
+    jmp seNext
+seCoLo, law COLS_MIN
+    dac oColumns
+    jmp seNext
+seCoHi, law COLS_MAX
+    dac oColumns
+    jmp seNext
+// a string or a terminal: up to a blank or the command's end, \ quoting
+seStr, dzm seN
+seStrL, jsp setEnd
+    SKIP_NEXT_IF_AC_ZERO
+    jmp seStrE
+    lac seN
+    sub [OPT_SMAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp seLong
+    jsp getChar
+    SKIP_NEXT_IF_SAME [CH_BSL]
+    jmp seStrC
+    jsp getChar
+seStrC, lia
+    lac seN
+    add [OPTNAME:EX_BANK]
+    dac seP
+    dio i seP
+    idx seN
+    jmp seStrL
+seLong, lac [mStrLong:MSG_BANK]
+    jmp exErr
+seStrE, lac seN
+    add [OPTNAME:EX_BANK]
+    dac seP
+    dzm i seP
+    lac seC
+    SKIP_NEXT_IF_DIFFERENT [O_TERM]
+    jmp seTerm
+// a string: into its buffer, and marked assigned
+    lac seOp
+    add [OPT_VAL]
+    dac seP
+    lac i seP
+    dac seP
+    lac [OPTNAME:EX_BANK]
+    dac cwStr
+seStrK, lac i cwStr
+    dac i seP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp seStrD
+    idx cwStr
+    idx seP
+    jmp seStrK
+seStrD, lac seOp
+    add [OPT_DFLT]
+    dac seP
+    law 1
+    dac i seP
+    jmp seNext
+// a terminal: dumb, vt100 or vt102
+seTerm, lac [OPTNAME:EX_BANK]
+    dac cwStr
+    jsp termCode
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp seTermOk
+    lac [OPTNAME:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mTermType:MSG_BANK]
+    jmp exErr
+seTermOk, dac oTerm
+seNext, jsp skipEnd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp seName
+    jsp eol
+    jmp exNext
+// set all
+seAll, jsp prAll
+    jmp seNext
+
+// setEnd -- 3.7's setend: whether the next character is a blank or ends the
+// command. AC is 1 or 0; IO is clobbered.
+setEnd, dac sdX
+    jsp peekChar
+    dac sdC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp sdYes
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp sdYes
+    lio sdC
+    jsp endCmd
+    jmp i sdX
+sdYes, law 1
+    jmp i sdX
+
+// opName -- the name of the option whose entry is at IO into OPTNAME, as %s.
+// AC and IO are clobbered.
+opName, dac onX
+    dio onP
+    lac onP
+    add [OPT_NAME]
+    dac onP
+    lac i onP
+    dac pkStr
+    dzm onN
+onLoop, lio onN
+    jsp pkChr
+    lia
+    lac onN
+    add [OPTNAME:EX_BANK]
+    dac onP
+    dio i onP
+    idx onN
+    lai
+    SKIP_NEXT_IF_AC_ZERO
+    jmp onLoop
+    lac [OPTNAME:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    jmp i onX
+
+// termCode -- the TERM_ code of the terminal named at cwStr, -1 for none.
+// AC is the code; IO is clobbered.
+termCode, dac teX
+    law TERM_DUMB
+    dac teN
+    lac [termNames:EX_BANK]
+    dac teP
+teLoop, lac i teP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp teNone
+    dac pkStr
+    jsp pkCmp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp teHit
+    idx teP
+    idx teN
+    jmp teLoop
+teHit, lac teN
+    jmp i teX
+teNone, lac [-1]
+    jmp i teX
+
+// prOpt -- 3.7's propt: the option whose entry's address is in IO, as
+// name, noname, name=n or name=text. AC and IO are clobbered.
+prOpt, dac ptX
+    dio ptOp
+    lac ptOp
+    add [OPT_KIND]
+    dac ptK
+    lac i ptK
+    dac ptK
+    lac ptOp
+    add [OPT_VAL]
+    dac ptV
+    lac i ptV
+    dac ptV
+    lac ptK
+    SKIP_NEXT_IF_SAME [O_ONOFF]
+    jmp ptName
+    lac ptV
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ptName
+    lio [noStr:EX_BANK]
+    jsp i [putStr:TERM_BANK]
+ptName, lac ptOp
+    add [OPT_NAME]
+    dac ptP
+    lio i ptP
+    jsp i [putStr:TERM_BANK]
+    lac ptK
+    SKIP_NEXT_IF_DIFFERENT [O_ONOFF]
+    jmp i ptX
+    lio [CH_EQ]
+    jsp i [putc:TERM_BANK]
+    lac ptK
+    SKIP_NEXT_IF_DIFFERENT [O_NUM]
+    jmp ptNum
+    SKIP_NEXT_IF_DIFFERENT [O_TERM]
+    jmp ptTerm
+// a string: its text, a character a word
+ptStrL, lac i ptV
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ptX
+    lia
+    jsp i [putc:TERM_BANK]
+    idx ptV
+    jmp ptStrL
+ptNum, lio ptV
+    jsp i [putDec:TERM_BANK]
+    jmp i ptX
+ptTerm, lac oTerm
+    add [termNames:EX_BANK]
+    dac ptP
+    lio i ptP
+    jsp i [putStr:TERM_BANK]
+    jmp i ptX
+
+// prAll -- 3.7's prall: every option in three columns, down then across.
+// AC and IO are clobbered.
+    assert (NOPTS+2)/3*2 < NOPTS, "the third column is shorter"
+prAll, dac paX
+    law (NOPTS+2)/3
+    dac paR
+    lac [optTab:EX_BANK]
+    dac paOp
+paLoop, lio paOp
+    jsp prOpt
+    law 0d24
+    lia
+    jsp i [tabTo:TERM_BANK]
+    lac paOp
+    add [(NOPTS+2)/3*OPT_WORDS]
+    lia
+    jsp prOpt
+    lac paOp
+    add [(NOPTS+2)/3*2*OPT_WORDS]
+    sub [optEnd:EX_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp paEnd
+    law 0d56
+    lia
+    jsp i [tabTo:TERM_BANK]
+    lac paOp
+    add [(NOPTS+2)/3*2*OPT_WORDS]
+    lia
+    jsp prOpt
+paEnd, jsp i [newline:TERM_BANK]
+    lac paOp
+    add [OPT_WORDS]
+    dac paOp
+    lac paR
+    sub [1]
+    dac paR
+    SKIP_NEXT_IF_AC_ZERO
+    jmp paLoop
+    jmp i paX
+
+// prOpts -- 3.7's propts: the options not at their defaults, term always,
+// ttytype never, each followed by a blank, then a new line.
+// AC and IO are clobbered.
+prOpts, dac psX
+    lac [optTab:EX_BANK]
+    dac psOp
+    law NOPTS
+    dac psN
+psLoop, lac psOp
+    SKIP_NEXT_IF_DIFFERENT [opTty:EX_BANK]
+    jmp psNext
+    add [OPT_KIND]
+    dac psP
+    lac i psP
+    SKIP_NEXT_IF_DIFFERENT [O_TERM]
+    jmp psShow
+    SKIP_NEXT_IF_DIFFERENT [O_STR]
+    jmp psStr
+    lac psOp
+    add [OPT_DFLT]
+    dac psP
+    lac i psP
+    dac psD
+    lac psOp
+    add [OPT_VAL]
+    dac psP
+    lac i psP
+    SKIP_NEXT_IF_DIFFERENT psD
+    jmp psNext
+    jmp psShow
+psStr, lac psOp
+    add [OPT_DFLT]
+    dac psP
+    lac i psP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp psNext
+psShow, lio psOp
+    jsp prOpt
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+psNext, lac psOp
+    add [OPT_WORDS]
+    dac psOp
+    lac psN
+    sub [1]
+    dac psN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp psLoop
+    jsp i [newline:TERM_BANK]
+    jmp i psX
+
+oiX, 0
+oiP, 0
+oiN, 0
+oiS, 0
+oiD, 0
+seOp, 0
+seN, 0
+seP, 0
+seC, 0
+seNo, 0
+seWh, 0
+sdX, 0
+sdC, 0
+onX, 0
+onP, 0
+onN, 0
+teX, 0
+teP, 0
+teN, 0
+ptX, 0
+ptOp, 0
+ptK, 0
+ptV, 0
+ptP, 0
+paX, 0
+paR, 0
+paOp, 0
+psX, 0
+psOp, 0
+psN, 0
+psP, 0
+psD, 0
+endloc
+
+// The option table: name, abbreviation, kind, default, value, string default.
+optTab,
+    nAi:EX_BANK
+    aAi:EX_BANK
+    O_ONOFF
+    0
+oAutoInd, 0
+    0
+    nAp:EX_BANK
+    aAp:EX_BANK
+    O_ONOFF
+    1
+oAutoPr, 1
+    0
+    nAw:EX_BANK
+    aAw:EX_BANK
+    O_ONOFF
+    0
+oAutoWr, 0
+    0
+    nBf:EX_BANK
+    aBf:EX_BANK
+    O_ONOFF
+    0
+oBeautify, 0
+    0
+opCols,
+    nCo:EX_BANK
+    0
+    O_NUM
+    0d80
+oColumns, 0d80
+    0
+    nEd:EX_BANK
+    aEd:EX_BANK
+    O_ONOFF
+    0
+oEdComp, 0
+    0
+    nEb:EX_BANK
+    aEb:EX_BANK
+    O_ONOFF
+    0
+oErrBells, 0
+    0
+    nHt:EX_BANK
+    aHt:EX_BANK
+    O_NUM
+    TAB_STOP
+oHardTabs, TAB_STOP
+    0
+    nIc:EX_BANK
+    aIc:EX_BANK
+    O_ONOFF
+    0
+oIgnCase, 0
+    0
+opLines,
+    nLines:EX_BANK
+    0
+    O_NUM
+    0d24
+oLines, 0d24
+    0
+    nList:EX_BANK
+    0
+    O_ONOFF
+    0
+oList, 0
+    0
+    nMagic:EX_BANK
+    0
+    O_ONOFF
+    1
+oMagic, 1
+    0
+    nNu:EX_BANK
+    aNu:EX_BANK
+    O_ONOFF
+    0
+oNumber, 0
+    0
+    nPara:EX_BANK
+    aPara:EX_BANK
+    O_STR
+    0
+    OPT_STR
+    dPara:EX_BANK
+    nPrompt:EX_BANK
+    0
+    O_ONOFF
+    1
+oPrompt, 1
+    0
+    nRo:EX_BANK
+    aRo:EX_BANK
+    O_ONOFF
+    0
+oReadOnly, 0
+    0
+    nRemap:EX_BANK
+    0
+    O_ONOFF
+    1
+oRemap, 1
+    0
+    nReport:EX_BANK
+    0
+    O_NUM
+    5
+oReport, 5
+    0
+    nScr:EX_BANK
+    aScr:EX_BANK
+    O_NUM
+    0d11
+oScroll, 0d11
+    0
+    nSect:EX_BANK
+    aSect:EX_BANK
+    O_STR
+    0
+    OPT_STR+OPT_SLEN
+    dSect:EX_BANK
+    nSw:EX_BANK
+    aSw:EX_BANK
+    O_NUM
+    TAB_STOP
+oShiftW, TAB_STOP
+    0
+    nSm:EX_BANK
+    aSm:EX_BANK
+    O_ONOFF
+    0
+oShowMat, 0
+    0
+    nSlow:EX_BANK
+    aSlow:EX_BANK
+    O_ONOFF
+    0
+oSlowOpen, 0
+    0
+    nTs:EX_BANK
+    aTs:EX_BANK
+    O_NUM
+    TAB_STOP
+oTabStop, TAB_STOP
+    0
+    nTl:EX_BANK
+    aTl:EX_BANK
+    O_NUM
+    0
+oTagLen, 0
+    0
+    nTags:EX_BANK
+    aTags:EX_BANK
+    O_STR
+    0
+    OPT_STR+2*OPT_SLEN
+    dTags:EX_BANK
+    nTerm:EX_BANK
+    0
+    O_TERM
+    0
+    0
+    0
+    nTerse:EX_BANK
+    0
+    O_ONOFF
+    0
+oTerse, 0
+    0
+    nTo:EX_BANK
+    aTo:EX_BANK
+    O_ONOFF
+    1
+oTimeout, 1
+    0
+opTty,
+    nTty:EX_BANK
+    aTty:EX_BANK
+    O_TERM
+    0
+    0
+    0
+    nWarn:EX_BANK
+    0
+    O_ONOFF
+    1
+oWarn, 1
+    0
+opWin,
+    nWi:EX_BANK
+    aWi:EX_BANK
+    O_NUM
+    0d23
+oWindow, 0d23
+    0
+    nWs:EX_BANK
+    aWs:EX_BANK
+    O_ONOFF
+    1
+oWrapScan, 1
+    0
+    nWm:EX_BANK
+    aWm:EX_BANK
+    O_NUM
+    0
+oWrapMarg, 0
+    0
+    nWa:EX_BANK
+    aWa:EX_BANK
+    O_ONOFF
+    0
+oWriteAny, 0
+    0
+optEnd,
+    assert optEnd - optTab == NOPTS*OPT_WORDS, "an entry for every option"
+    assert OPT_STR + 3*OPT_SLEN <= 0130000, "the strings fit bank 10"
+
+oTerm, TERM_DUMB            // term and ttytype: a TERM_ code
+
+// The terminals' names, in TERM_ order, then 0.
+termNames,
+    tDumb:EX_BANK
+    tVt100:EX_BANK
+    tVt102:EX_BANK
+    0
+    assert TERM_DUMB == 0 && TERM_VT100 == 1 && TERM_VT102 == 2, "termNames' order"
+
+nAi,     ascii "autoindent"
+aAi,     ascii "ai"
+nAp,     ascii "autoprint"
+aAp,     ascii "ap"
+nAw,     ascii "autowrite"
+aAw,     ascii "aw"
+nBf,     ascii "beautify"
+aBf,     ascii "bf"
+nCo,     ascii "columns"
+nEd,     ascii "edcompatible"
+aEd,     ascii "ed"
+nEb,     ascii "errorbells"
+aEb,     ascii "eb"
+nHt,     ascii "hardtabs"
+aHt,     ascii "ht"
+nIc,     ascii "ignorecase"
+aIc,     ascii "ic"
+nLines,  ascii "lines"
+nList,   ascii "list"
+nMagic,  ascii "magic"
+nNu,     ascii "number"
+aNu,     ascii "nu"
+nPara,   ascii "paragraphs"
+aPara,   ascii "para"
+dPara,   ascii "IPLPPPQPP LIpplpipbp"
+nPrompt, ascii "prompt"
+nRo,     ascii "readonly"
+aRo,     ascii "ro"
+nRemap,  ascii "remap"
+nReport, ascii "report"
+nScr,    ascii "scroll"
+aScr,    ascii "scr"
+nSect,   ascii "sections"
+aSect,   ascii "sect"
+dSect,   ascii "NHSHH HUnhsh"
+nSw,     ascii "shiftwidth"
+aSw,     ascii "sw"
+nSm,     ascii "showmatch"
+aSm,     ascii "sm"
+nSlow,   ascii "slowopen"
+aSlow,   ascii "slow"
+nTs,     ascii "tabstop"
+aTs,     ascii "ts"
+nTl,     ascii "taglength"
+aTl,     ascii "tl"
+nTags,   ascii "tags"
+aTags,   ascii "tag"
+dTags,   ascii "DR:TAGS"
+nTerm,   ascii "term"
+nTerse,  ascii "terse"
+nTo,     ascii "timeout"
+aTo,     ascii "to"
+nTty,    ascii "ttytype"
+aTty,    ascii "tty"
+nWarn,   ascii "warn"
+nWi,     ascii "window"
+aWi,     ascii "wi"
+nWs,     ascii "wrapscan"
+aWs,     ascii "ws"
+nWm,     ascii "wrapmargin"
+aWm,     ascii "wm"
+nWa,     ascii "writeany"
+aWa,     ascii "wa"
+nAll,    ascii "all"
+noStr,   ascii "no"
+tDumb,   ascii "dumb"
+tVt100,  ascii "vt100"
+tVt102,  ascii "vt102"
+
+OPTNAME,                    // :set's name or value, a character a word
+    table OPT_SLEN, 0

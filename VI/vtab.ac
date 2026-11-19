@@ -1,0 +1,197 @@
+// vtab.ac -- vi's dispatch tables: vmain.ac's
+// commands and vmotion.ac's motions, each a key and its routine's full
+// address, 0 ending the table. They are read through full addresses, so
+// they live in bank SCR_BANK, where there is room. Needs vi.ah, vmain.ac,
+// vmotion.ac and vops.ac (bank VI_BANK).
+
+// the commands' keys, then their routines; 0 ends the table
+vCmdTab,
+    CH_COLON
+    vcColon:VI_BANK
+    0121                    // Q
+    vcQ:VI_BANK
+    0132                    // Z
+    vcZZ:VI_BANK
+    CH_CTLG
+    vcCtlG:VI_BANK
+    035                     // ^]
+    vcCtlRb:VI_BANK
+    036                     // ^^
+    vcCtlUp:VI_BANK
+    CH_CTLL
+    vcCtlL:VI_BANK
+    CH_CTLR
+    vcCtlR:VI_BANK
+    CH_CTLF
+    vcCtlF:VI_BANK
+    CH_CTLB
+    vcCtlB:VI_BANK
+    CH_CTLD
+    vcCtlD:VI_BANK
+    CH_CTLU
+    vcCtlU:VI_BANK
+    CH_CTLE
+    vcCtlE:VI_BANK
+    CH_CTLY
+    vcCtlY:VI_BANK
+    0172                    // z
+    vcZ:VI_BANK
+    CH_ESC
+    vcEsc:VI_BANK
+    0144                    // d
+    vcOper:VI_BANK
+    0143                    // c
+    vcOper:VI_BANK
+    0171                    // y
+    vcOper:VI_BANK
+    CH_LT
+    vcOper:VI_BANK
+    CH_GT
+    vcOper:VI_BANK
+    0170                    // x
+    vcX:VI_BANK
+    0130                    // X
+    vcBigX:VI_BANK
+    0104                    // D
+    vcBigD:VI_BANK
+    0103                    // C
+    vcBigC:VI_BANK
+    0163                    // s
+    vcSmS:VI_BANK
+    0123                    // S
+    vcBigS:VI_BANK
+    0131                    // Y
+    vcBigY:VI_BANK
+    0162                    // r
+    vcR:VI_BANK
+    0112                    // J
+    vcJ:VI_BANK
+    0160                    // p
+    vcPut:VI_BANK
+    0120                    // P
+    vcPut:VI_BANK
+    CH_AMP
+    vcAmp:VI_BANK
+    CH_TILDE
+    vcTilde:VI_BANK
+    0100                    // @
+    vcAt:FILE_BANK
+    0165                    // u
+    vcU:VI_BANK
+    0125                    // U
+    vcBigU:VI_BANK
+    CH_DOT
+    vcDot:VI_BANK
+    0151                    // i
+    vcSmI:VI_BANK
+    0141                    // a
+    vcSmA:VI_BANK
+    0111                    // I
+    vcBigI:VI_BANK
+    0101                    // A
+    vcBigA:VI_BANK
+    0122                    // R
+    vcBigR:VI_BANK
+    0157                    // o
+    vcOpen:VI_BANK
+    0117                    // O
+    vcOpen:VI_BANK
+    0
+
+// the motions' keys, then their routines; 0 ends the table
+vMoTab,
+    0150                    // h
+    vmH:VI_BANK
+    CH_BS
+    vmH:VI_BANK
+    0154                    // l
+    vmL:VI_BANK
+    CH_SP
+    vmL:VI_BANK
+    0152                    // j
+    vmJ:VI_BANK
+    CH_CTLN
+    vmJ:VI_BANK
+    CH_USCORE
+    vmUs:VI_BANK
+    0153                    // k
+    vmK:VI_BANK
+    CH_CTLP
+    vmK:VI_BANK
+    CH_PLUS
+    vmPlus:VI_BANK
+    CH_CR
+    vmPlus:VI_BANK
+    CH_LF                   // LF is 3.7's CR here
+    vmPlus:VI_BANK
+    CH_MINUS
+    vmMinus:VI_BANK
+    CH_0
+    vm0:VI_BANK
+    CH_CARET
+    vmCaret:VI_BANK
+    CH_DOLLAR
+    vmDollar:VI_BANK
+    CH_VBAR
+    vmBar:VI_BANK
+    0167                    // w
+    vmSmW:VI_BANK
+    0127                    // W
+    vmBigW:VI_BANK
+    0142                    // b
+    vmSmB:VI_BANK
+    0102                    // B
+    vmBigB:VI_BANK
+    0145                    // e
+    vmSmE:VI_BANK
+    0105                    // E
+    vmBigE:VI_BANK
+    0146                    // f
+    vmSmF:VI_BANK
+    0106                    // F
+    vmBigF:VI_BANK
+    0164                    // t
+    vmSmT:VI_BANK
+    0124                    // T
+    vmBigT:VI_BANK
+    CH_SEMI
+    vmSemi:VI_BANK
+    CH_COMMA
+    vmComma:VI_BANK
+    CH_LPAR
+    vmLpar:VI_BANK
+    CH_RPAR
+    vmRpar:VI_BANK
+    0173                    // {
+    vmLbrc:VI_BANK
+    0175                    // }
+    vmRbrc:VI_BANK
+    CH_LBRK
+    vmLbk:VI_BANK
+    CH_RBRK
+    vmRbk:VI_BANK
+    CH_PCT
+    vmPct:VI_BANK
+    0110                    // H
+    vmBigH:VI_BANK
+    0114                    // L
+    vmBigL:VI_BANK
+    0115                    // M
+    vmBigM:VI_BANK
+    0107                    // G
+    vmBigG:VI_BANK
+    0155                    // m
+    vmM:VI_BANK
+    CH_APOS
+    vmApos:VI_BANK
+    CH_GRAVE
+    vmGrave:VI_BANK
+    CH_SLASH
+    vmSlash:VI_BANK
+    CH_QMARK
+    vmSlash:VI_BANK
+    0156                    // n
+    vmSmN:VI_BANK
+    0116                    // N
+    vmBigN:VI_BANK
+    0

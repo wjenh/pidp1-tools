@@ -1,0 +1,1500 @@
+// vops.ac -- vi's changes, after 3.7's ex_vops.c, the
+// change commands of ex_vmain.c and operate()'s operators (ex_voper.c): the
+// operators d c y < > on every motion, x X D (vmotion.ac's), C s S r J p P
+// Y & ~, u, U and ., the registers and the unnamed buffer. Insert mode is
+// vinsert.ac's.
+//
+// A change within dot's line is made at once, as a new record for the line
+// (lines.ac's lnRepl), undoable by ex's undo; 3.7 kept it in linebuf until
+// the cursor left the line (vsave). So U's line comes from uSync, dot's line
+// as it was before vi's first change on it since dot came there (3.7's
+// *dot), when U's line is taken while that line has such changes.
+//
+// The unnamed buffer, 3.7's save area as put sees it, is register slot 0:
+// the lines the last delete, change, yank or join of lines took, or the
+// lines an undo took out; vPk, vPk0 and vPk1 say they started and ended
+// within a line (3.7's pkill). A change within a line empties it (3.7's
+// squish) and keeps its text in DEL, which p puts in as an insert.
+//
+// The last change's keys are kept for . as 3.7 keeps them: the command's key
+// and an operator's motion key (vWcmd, as typed, copied to vLcmd by
+// vSetLast), its count, whether it had one, and its register; an insert's
+// text is INS. . replays them through vmain.ac's vGetKey (vGlob).
+//
+// Commands are reached by jmp from vmain.ac's table and end at viLoop;
+// routines are entered by jsp and return by jmp i. In bank VI_BANK. Needs
+// vi.ah, <AIDS/skipmacros.ah>, vmain.ac and vmotion.ac, lines.ac (bank 0),
+// excmd.ac and options.ac (bank EX_BANK), screen.ac and vinsert.ac (bank
+// SCR_BANK), termio.ac (bank TERM_BANK) and messages.ac (bank MSG_BANK).
+
+local vcOp1, vcOi, \
+    vspY, voDg, voDn, voMul, voML, voCap, voMd, voKey, voQ, voGo, vog1, xwSw, \
+    xwOrd, xwWh, xwCnt, xw1, xw2, xwE, yr1, slL, slE, dm1, sdL, sdE, sdOv, \
+    ctL, ctE, vrP, vyIn, vy1, vy2, vy3, vyNs, vpU, vpR, vp1, vp2, vp3, vp4, \
+    vp5, vp6, vpPt, vpWh, vpNo, vpE, vrK, vrQ, vr1, tl1, tl2, vcIns, vuMi, \
+    vuM, vuF, vuE, vuN, vuE1, vuE2, vdR, vdG, vnZ, vn1, svY, sv2, plF, pl0, \
+    xfS, xfU, dwL, dwS, dwO, dwW, dwN, dwE, vlnX, vgdX, vlnP, xwX, xwN, yrX, \
+    yrC, slX, slS, slD, awX, awC, dmX, sdlX, sbD, sbN, sbS, ctX, ctD, ctS, \
+    ctN, cmX, scyX, urX, ur1, ur2, klX, ukX, vcN, vcA, vU, vyN, vpS, vpPart, \
+    vpA, vpN, tlP, tlC, vuD, vnoX, svnX, svL, plcX, dwX, dwV, dwZ, dwP, dwT, \
+    dwD, xfX, veM, voN, voA, vqP, jN, jM, shN
+
+// --- the operators
+
+// d c y < > -- an operator: a second count multiplies the first, then the
+// motion's key, read as 3.7's getesc (ESC cancels, ^V and ^Q quote), names
+// the other end; the operator's key again is _, the line itself.
+vcOper, lac vC
+    dac vOp
+    jsp vKey
+    dio vU
+    lac vU                  // a second count, 1 to 9 first
+    sub [CH_0+1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp voKey
+    sub [0d9]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp voKey
+    dzm voN
+voDg, lac voN               // 3.7's vgetcnt
+    sub [COUNT_CAP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp voDn
+    lac voN
+    ral 2s                  // times 10
+    add voN
+    ral 1s
+    add vU
+    sub [CH_0]
+    dac voN
+voDn, jsp vKey
+    dio vU
+    lac vU
+    sub [CH_0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp voMul
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp voMul
+    jmp voDg
+// the counts multiplied, no further than COUNT_CAP
+voMul, lac vCnt
+    dac voA
+    dzm vCnt
+voML, lac voN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp voMd
+    sub [1]
+    dac voN
+    lac vCnt
+    add voA
+    dac vCnt
+    sub [COUNT_CAP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp voCap
+    jmp voML
+voCap, lac [COUNT_CAP]
+    dac vCnt
+voMd, lac vCnt
+    dac vXcnt
+voKey, lac vU
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp viLoop
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp voQ
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLQ]
+    jmp voQ
+    jmp voGo
+voQ, jsp vKey
+    dio vU
+voGo, lio vU                // mapped, as 3.7's operate maps it
+    jsp i [kyMot:TERM_BANK]
+    dio vU
+    lac vSub                // kept for ., unless s, C or S gave it
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp vAddW
+    lac vU
+    dac vC
+    lac vCurs
+    dac vOpCur
+    jmp vMotion
+
+// vOpGo -- where a motion ends under an operator (vmotion.ac's vMove): a
+// register named makes the range name a line, so that it is yanked (3.7's
+// "if (vreg && wdot == 0) wdot = dot"); then the operator. Reached by jmp.
+vOpGo, lac vReg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vog1
+    lac wSet
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vog1
+    lac DOT
+    dac wDot
+    law 1
+    dac wSet
+vog1, lac vOp
+    SKIP_NEXT_IF_DIFFERENT [0144]           // d
+    jmp vDel
+    SKIP_NEXT_IF_DIFFERENT [0143]           // c
+    jmp i [vChg:SCR_BANK]
+    SKIP_NEXT_IF_DIFFERENT [0171]           // y
+    jmp vYank
+    jmp vShift
+
+// vXdw -- 3.7's xdw: a range that names no line, or one past the buffer, is
+// the bell; else lastcmd is kept (vSetLast), the ends are put in order (dot
+// and vOpCur first), a range ending at a later line's start is made to end
+// at the end of the line before, or whole lines when it starts at or before
+// its first line's first character that is not white; the lines are
+// yanked into the register named, and for the keys d and c into "1.
+// AC is the range's lines; IO is clobbered, and LINEBUF.
+vXdw, dac xwX
+    lac wSet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    lac wDot
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vFail
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vFail
+    jsp vSetLast
+    lac DOT
+    sub wDot
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp xwSw                // dot after wdot
+    SKIP_NEXT_IF_AC_ZERO
+    jmp xwOrd
+    lac wCur                // the same line: the cursor after wcursor
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp xwOrd
+    lac vOpCur
+    sub wCur
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp xwSw
+    jmp xwOrd
+xwSw, lac DOT
+    lio wDot
+    dac wDot
+    dio DOT
+    lac vOpCur
+    lio wCur
+    dac wCur
+    dio vOpCur
+// wcursor at the start of a later line
+xwOrd, lac vOpCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp xwCnt
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp xwCnt
+    lac wDot
+    sub DOT
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp xwCnt
+    lac wDot
+    sub [1]
+    dac wDot
+    jsp vFirst
+    sub vOpCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp xwWh
+    lio wDot
+    jsp vLenOf
+    dac wCur
+    jmp xwCnt
+xwWh, lac [0777776]
+    dac wCur
+xwCnt, lac wDot
+    sub DOT
+    add [1]
+    dac xwN
+    lac vReg
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp xw1
+    lia
+    jsp vYReg
+xw1, dzm vReg
+    lac vOpKey
+    SKIP_NEXT_IF_DIFFERENT [0144]
+    jmp xw2
+    SKIP_NEXT_IF_DIFFERENT [0143]
+    jmp xw2
+    jmp xwE
+xw2, lio [CH_0+1]
+    jsp vYReg
+xwE, lac xwN
+    jmp i xwX
+
+// vYReg -- 3.7's YANKreg for the register in IO: lines dot to wDot, from
+// column vOpCur and to wCur when both are given (a partial yank).
+// AC and IO are clobbered, and LINEBUF.
+vYReg, dac yrX
+    dio yrC
+    lac DOT
+    dac LNA
+    lac wDot
+    dac LNB
+    dzm i [rgPart:0]
+    lac vOpCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp yr1
+    dac i [rgPC:0]
+    lac wCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp yr1
+    dac i [rgPW:0]
+    law REG_PART
+    dac i [rgPart:0]
+yr1, lio yrC
+    jsp i [rgYank:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vNoMem
+    jmp i yrX
+
+// vSetLast -- 3.7's setLAST: unless . is replaying, this command's keys,
+// count, whether it had one, and its register, kept for the next .
+// AC is clobbered, IO preserved.
+vSetLast, dac slX
+    lac vGlob
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i slX
+    lac vReg
+    dac vLReg
+    lac vHad
+    dac vLHad
+    lac vXcnt
+    dac vLCnt
+    lac [vWcmd:VI_BANK]
+    dac slS
+    lac [vLcmd:VI_BANK]
+    dac slD
+slL, lac slS
+    SKIP_NEXT_IF_DIFFERENT vWcP
+    jmp slE
+    lac i slS
+    dac i slD
+    idx slS
+    idx slD
+    jmp slL
+slE, dzm i slD
+    jmp i slX
+
+// vAddW -- the key in IO added to this command's keys (3.7's *lastcp++),
+// seven at most. AC is clobbered, IO preserved.
+vAddW, dac awX
+    dio awC
+    lac vWcP
+    sub [vWcmd:VI_BANK]
+    sub [7]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i awX
+    lac awC
+    dac i vWcP
+    idx vWcP
+    jmp i awX
+
+// --- d
+
+// vDel -- 3.7's vdelete: lines, or within dot's line; a range that starts
+// or ends within a line is vChg's. Reached by jmp.
+vDel, lac wSet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vdIn
+    lac wCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i [vChgD:SCR_BANK]
+vdLn, dzm vSyncLn            // whole lines (3.7's vsave)
+    jsp vXdw
+    dac vcN
+    dac vsN
+    dzm vsM
+    jsp vSaveN
+    lac DOT
+    dac vcA
+    dac LNA
+    add vcN
+    sub [1]
+    dac LNB
+    jsp i [lnDelete:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vNoUnd
+    lac vcA
+    dac LNA
+    jsp i [lnAppNone:0]
+    jsp vKillLn
+    jsp vKillU
+    law VU_MANY
+    dac vUndK
+    lac vcN
+    dac vNcnt
+    lac [nmDel:MSG_BANK]
+    dac vNnam
+    jsp vNote
+    jsp vPlace
+    jmp viLoop
+// within the line: the text taken out, kept in DEL
+vdIn, jsp vGetDot
+    lac wCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    dzm wCur
+    lac vOpCur
+    SKIP_NEXT_IF_DIFFERENT wCur
+    jmp vFail
+    jsp vDcMid
+    jsp vSetDel
+    jsp vCut
+    jsp vCommit
+    lac vOpCur              // the cursor there, back one at the line's end
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vdC
+    SKIP_NEXT_IF_SAME LBLEN
+    jmp vdC
+    sub [1]
+vdC, dac vCurs
+    jmp viLoop
+
+// vDcMid -- 3.7's vdcMID: the ends in order, lastcmd kept, u's cursor the
+// change's start. AC and IO are clobbered.
+vDcMid, dac dmX
+    jsp vSetLast
+    lac wCur
+    sub vOpCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp dm1
+    lac vOpCur
+    lio wCur
+    dac wCur
+    dio vOpCur
+dm1, lac vOpCur
+    dac vUcur
+    jmp i dmX
+
+// vSetDel -- 3.7's setDEL: LINEBUF from vOpCur to wCur into DEL, or DEL
+// marked OVERBUF when VBSIZE cannot hold it. AC is clobbered, IO preserved.
+vSetDel, dac sdlX
+    lac [vDEL:SCR_BANK]
+    dac sbD
+    lac wCur
+    sub vOpCur
+    dac sbN
+    sub [VBSIZE-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sdOv
+    lac vOpCur
+    add [LINEBUF]
+    dac sbS
+sdL, lac sbN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sdE
+    lac i sbS
+    dac i sbD
+    idx sbS
+    idx sbD
+    lac sbN
+    sub [1]
+    dac sbN
+    jmp sdL
+sdOv, law OVERBUF
+    dac i sbD
+    idx sbD
+sdE, dzm i sbD
+    jmp i sdlX
+
+// vCut -- LINEBUF without its characters vOpCur to wCur. AC is clobbered,
+// IO preserved.
+vCut, dac ctX
+    lac vOpCur
+    add [LINEBUF]
+    dac ctD
+    lac wCur
+    add [LINEBUF]
+    dac ctS
+    lac LBLEN
+    sub wCur
+    add [1]                 // and the 0 after
+    dac ctN
+ctL, lac ctN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ctE
+    lac i ctS
+    dac i ctD
+    idx ctS
+    idx ctD
+    lac ctN
+    sub [1]
+    dac ctN
+    jmp ctL
+ctE, lac LBLEN
+    sub wCur
+    add vOpCur
+    dac LBLEN
+    jmp i ctX
+
+// vCommit -- LINEBUF as dot's line, a change within it: U's line kept first
+// (vSyncChk), undoable at once (lnRepl), the unnamed buffer emptied (3.7's
+// squish); u's kind VU_CHNG. No room is Out of memory, or Out of memory
+// saving lines for undo. AC and IO are clobbered.
+vCommit, dac cmX
+    jsp vSyncChk
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vNoMem
+    dac i [lnR:0]
+    jsp i [lnRepl:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vNoUnd
+    jsp vSquish
+    law VU_CHNG
+    dac vUndK
+    lac DOT
+    dac vUdot
+    jmp i cmX
+
+// vSyncChk -- before vi's first change on dot's line since dot came there,
+// the line as it is, as 3.7's *dot (uSync). AC and IO are clobbered.
+vSyncChk, dac scyX
+    lac vSyncLn
+    SKIP_NEXT_IF_DIFFERENT DOT
+    jmp i scyX
+    lac DOT
+    dac vSyncLn
+    lio DOT
+    jsp i [lnPtr:0]
+    dac i [uSync:0]
+    jmp i scyX
+
+// vURec -- 3.7's vmove within a line: U's line taken, the first time the
+// cursor moves within a line it has not been on since U's line was
+// forgotten. AC and IO are clobbered.
+vURec, dac urX
+    lac i [uLnum:0]
+    SKIP_NEXT_IF_DIFFERENT DOT
+    jmp i urX
+    lac DOT
+    dac i [uLnum:0]
+    lac vSyncLn
+    SKIP_NEXT_IF_SAME DOT
+    jmp ur1
+    lac i [uSync:0]
+    jmp ur2
+ur1, lio DOT
+    jsp i [lnPtr:0]
+ur2, dac i [uLine:0]
+    jmp i urX
+
+// vKillU -- 3.7's killU: U's line forgotten. AC is clobbered, IO
+// preserved.
+vKillU, dac ukX
+    dzm i [uLnum:0]
+    jmp i ukX
+
+// vKillLn -- the unnamed buffer undo's list, whole lines: the lines a change
+// of lines took (3.7's save area); DEL emptied. AC is clobbered, IO
+// preserved.
+vKillLn, dac klX
+    lac i [undList:0]
+    dac i [REG_BASE]
+    dzm i [REG_BASE+1]
+    dzm vPk
+    dzm i [vDEL:SCR_BANK]
+    jmp i klX
+
+// vSquish -- the unnamed buffer emptied (3.7's squish). AC is clobbered, IO
+// preserved.
+vSquish, dac klX
+    dzm i [REG_BASE]
+    dzm i [REG_BASE+1]
+    dzm vPk
+    jmp i klX
+
+// --- y
+
+// vYank -- 3.7's vyankit: lines (into the unnamed buffer, and the register
+// named), or within dot's line (into DEL). Reached by jmp.
+vYank, lac wSet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vyIn
+    jsp vXdw
+    dac vyN
+    lac DOT
+    dac LNA
+    add vyN
+    sub [1]
+    dac LNB
+    jsp i [lnSave:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vNoUnd
+    dzm i [undKind:0]       // a yank is not undone (3.7's UNDNONE)
+    jsp vKillLn
+    lac wCur                // 3.7's setpk
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vy1
+    law 1
+    dac vPk
+    dac i [REG_BASE+1]
+    lac vOpCur
+    dac vPk0
+    lac wCur
+    dac vPk1
+vy1, dzm vUndK
+// the note, unless the lines are all on the screen and fewer than report
+    lac vyN
+    dac vNcnt
+    lac [nmYank:MSG_BANK]
+    dac vNnam
+    law 1
+    dac vNsav
+    lac DOT
+    sub i [scTop:SCR_BANK]
+    sub i [scCnt:SCR_BANK]
+    add vyN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vyNs
+    lac vyN
+    sub i [oReport:EX_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vyNs
+    dzm vNsav
+vyNs, jsp vNote
+    lac vOpCur              // the cursor as it was, or the start's
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vy2
+    jsp vPlace
+    jmp viLoop
+vy2, dac vCurs
+    jmp viLoop
+// within the line: 3.7's takeout(DEL), the cursor to the start
+vyIn, jsp vGetDot
+    lac wCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    dzm wCur
+    lac vOpCur
+    SKIP_NEXT_IF_DIFFERENT wCur
+    jmp vFail
+    lac wCur
+    sub vOpCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vy3
+    lac vOpCur
+    lio wCur
+    dac wCur
+    dio vOpCur
+vy3, jsp vSetDel
+    lac i [vDEL:SCR_BANK]
+    SKIP_NEXT_IF_DIFFERENT [OVERBUF]
+    jsp i [ringBell:TERM_BANK]
+    lac vOpCur
+    dac vCurs
+    jmp viLoop
+
+// --- < >
+
+// vShift -- 3.7's vshftop: the lines shifted by ex's < or >, with a count
+// of them, dot then their first line (vXDone's vXKind 2). Reached by jmp.
+vShift, jsp vXdw
+    dac shN
+    lac vOp
+    dac i [CMDBUF]
+    law CH_SP
+    dac i [CMDBUF+1]
+    lac [CMDBUF+2]
+    dac vqP
+    lio shN
+    jsp vDecW
+    law 2
+    dac vXKind
+    lac DOT
+    dac vXDot
+    jmp vExec
+
+// --- the change commands
+
+// x, X, D are vmotion.ac's (3.7's deleteit, which needs the scanners).
+
+// C -- c$, or a on an empty line. s -- c and a blank, 3.7's c<space>. S --
+// cc. Y -- yy. The key that follows is put back and not kept for .
+vcBigC, jsp vGetDot
+    lac LBLEN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcSmA
+    law CH_DOLLAR
+    jmp vcCs
+vcSmS, law CH_SP
+    jmp vcCs
+vcBigS, law CH_USCORE
+vcCs, dac vPeek
+    law 1
+    dac vSub
+    law 0143
+    dac vC
+    jmp vcOper
+vcBigY, law CH_USCORE
+    dac vPeek
+    law 0171
+    dac vC
+    jmp vcOper
+
+// r -- the count's characters replaced by the next key, 3.7's vrep: insert
+// mode reading one key over them; that key kept for . after the r.
+vcR, jsp vGetDot
+    lac LBLEN
+    sub vCurs
+    sub vCnt
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vFail
+    lac vGlob
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vr1
+    jsp vGetKey             // 3.7's getesc, the key then put back
+    dio vU
+    lac vU
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp viLoop
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp vrQ
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLQ]
+    jmp vrQ
+    sub [KY_UP]             // an arrow, DEL or ^C: put back, nothing replaced
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vrK
+    lac vU
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp vrK
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLC]
+    jmp vrK
+    jmp vrP
+vrK, lac vU
+    dac vPeek
+    jmp viLoop
+vrQ, jsp vGetKey
+    dio vU
+vrP, lac vU
+    dac vPeek
+vr1, law VU_CHNG
+    dac vUndK
+    lac vCurs
+    dac vUcur
+    law 0162
+    dac viCh
+    lac vCnt
+    dac viCnt
+    dac viS0
+    dzm viDol
+    law 1
+    dac viUnd
+    lac [vrDone:VI_BANK]
+    dac viRet
+    jmp i [vaGo:SCR_BANK]
+vrDone, lio i [vINS:SCR_BANK]
+    jsp vAddW
+    jsp vSetLast
+    jmp viLoop
+
+// ~ -- 3.7's "r", the character with its case changed, then a blank to step
+// on unless it is the line's last: the count is not used.
+vcTilde, jsp vSetLast
+    jsp vGetDot
+    lac vCurs
+    SKIP_NEXT_IF_DIFFERENT LBLEN
+    jmp vFail
+    add [LINEBUF]
+    dac tlP
+    lac i tlP
+    dac tlC
+    and [0137]              // a letter's case changed
+    sub [CH_A]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp tl1
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp tl1
+    lac tlC
+    xor [040]
+    dac tlC
+tl1, lac tlC
+    dac i tlP
+    lia                     // INS, as r's would be
+    jsp i [vaIns1:SCR_BANK]
+    lac vCurs
+    dac vUcur
+    jsp vCommit
+    lac vCurs
+    add [1]
+    SKIP_NEXT_IF_DIFFERENT LBLEN
+    jmp viLoop
+    dac vCurs
+    jsp vURec
+    jmp viLoop
+
+// J -- the count's lines joined, two at least, by ex's j (vXKind 1): the
+// cursor where the first line ended, back one at the line's end.
+vcJ, lac DOT
+    SKIP_NEXT_IF_DIFFERENT DOL
+    jmp vFail
+    lac vCnt
+    SKIP_NEXT_IF_DIFFERENT [1]
+    law 2
+    dac jN
+    lac DOL
+    sub DOT
+    add [1]
+    dac jM
+    lac jN
+    sub jM
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp .+3
+    lac jM
+    dac jN
+    dzm vSyncLn
+    jsp vSetLast
+    lio DOT
+    jsp vLenOf
+    dac vXCur
+    lac DOT
+    dac vXDot
+    law 1
+    dac vXKind
+    law 0152
+    dac i [CMDBUF]
+    law CH_SP
+    dac i [CMDBUF+1]
+    lac [CMDBUF+2]
+    dac vqP
+    lac jN                  // ex's j with no address joins one line more
+    sub [1]                 // than its count (3.7's "given < 2"); 3.7's J
+    lia                     // calls join on dot to dot+cnt-1 itself
+    jsp vDecW
+    jmp vExec
+
+// & -- :&, the last substitute again on dot's line.
+vcAmp, lio [vsAmp:MSG_BANK]
+    jmp vRun
+
+// --- p P
+
+// p P -- 3.7's put: DEL, text of a change within a line, put in as an
+// insert (a or i) through vGlob; else the register's lines, or the unnamed
+// buffer's, after (p) or before (P) dot's line, or within it after (p) or
+// at (P) the cursor when they start or end within a line (pragged).
+vcPut, dzm vMoving
+    lac vReg
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vpR
+    lac i [vDEL:SCR_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vpU
+    SKIP_NEXT_IF_DIFFERENT [OVERBUF]
+    jmp vFail
+    lac [vDEL:SCR_BANK]
+    dac vGlob
+    lac vC
+    SKIP_NEXT_IF_SAME [0160]
+    jmp vp1
+    law 0141
+    jmp vp2
+vp1, law 0151
+vp2, dac vPeek
+    jmp vlKey
+vpU, lac i [REG_BASE]       // the unnamed buffer: lines a change took
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    lac [REG_BASE]
+    dac vpS
+    lac vPk
+    jmp vp3
+vpR, lio vReg
+    jsp i [rgSlot:0]
+    dac vpS
+    lac i vpS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vpNo
+    lac vpS
+    add [1]
+    dac vpA
+    lac i vpA
+vp3, dac vpPart
+    jsp vSetLast
+    dzm vSyncLn
+    jsp vKillU
+    jsp vGetDot
+    lac vpPart
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vpWh
+// within dot's line: p after the cursor's character
+    lac vC
+    SKIP_NEXT_IF_SAME [0160]
+    jmp vp4
+    lac vCurs
+    SKIP_NEXT_IF_SAME LBLEN
+    idx vCurs
+vp4, lac i vpS
+    dac i [pgSrc:0]
+    lac vCurs
+    dac i [pgAt:0]
+    lac vReg
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vpPt
+    lac vPk0                // the unnamed buffer's lines are whole: cut them
+    dac i [pgF:0]
+    lac vPk1
+    dac i [pgW:0]
+    jmp vp5
+vpPt, dzm i [pgF:0]
+    lac [LB_SIZE]
+    dac i [pgW:0]
+vp5, jsp i [lnPutPart:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vStErr
+    law VU_MANY
+    dac vUndK
+    lac vReg                // putreg's note: the lines, no more or fewer
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp viLoop
+    lio i [pgSrc:0]
+    jsp i [lsLen:0]
+    jmp vp6
+// whole lines: P puts them before dot
+vpWh, lac vC
+    SKIP_NEXT_IF_SAME [0120]
+    jmp .+4
+    lac DOT
+    sub [1]
+    dac DOT
+    lac DOT
+    dac vpA
+    dac LNA
+    jsp i [lnDelNone:0]
+    jsp i [lnAppNone:0]
+    lac vpA
+    dac LNA
+    cli
+    jsp i [lnAppStart:0]
+    law CP_LIST
+    dac i [cpSrc:0]
+    lac vpS
+    dac i [cpSlot:0]
+    jsp i [lnCopyIn:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vStErr
+    law VU_MANY
+    dac vUndK
+    lac i [cpCnt:0]
+    dac vpN
+    dzm vsN
+    dac vsM
+    lac vpA
+    add [1]
+    dac DOT
+    jsp vSaveN
+    jsp vFirst
+    dac vCurs
+    lac vpN
+    lio vReg                // put's note is more lines; putreg's, lines
+    SKIP_NEXT_IF_IO_NOT_ZERO
+    jmp .+3
+    dzm vNsgn
+    jmp vp6
+    lio [mMore:MSG_BANK]
+    dio vNsgn
+vp6, dac vNcnt
+    jsp vNote
+    jmp viLoop
+vpNo, lac vReg
+    dac i [msgC:MSG_BANK]
+    lac [mNoReg:MSG_BANK]
+    jmp vErr
+
+// --- inserts
+
+// i a I A R -- insert mode at the cursor, after it, at the line's first
+// character not white, at its end; R over the line's text. A and I move the
+// cursor as their motion ($ or ^) does, U's line taken (vURec).
+vcBigA, jsp vGetDot
+    lac LBLEN
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac vCurs
+    jsp vURec
+    law 0141
+    dac vC
+vcSmA, jsp vGetDot          // a: after the cursor's character
+    lac vCurs
+    SKIP_NEXT_IF_SAME LBLEN
+    idx vCurs
+    law 0141
+    dac vC
+    jmp vcIns
+vcBigI, jsp vFirst
+    dac vCurs
+    jsp vURec
+    law 0151
+    dac vC
+vcSmI, jsp vGetDot
+    jmp vcIns
+vcBigR, jsp vGetDot
+vcIns, dzm viS0
+    lac vC
+    SKIP_NEXT_IF_SAME [0122]
+    jmp .+4
+    lac LBLEN               // R: the rest of the line is typed over
+    sub vCurs
+    dac viS0
+    jsp vSetLast
+    law VU_CHNG
+    dac vUndK
+    lac vCurs
+    dac vUcur
+    dzm vMoving
+    lac vC
+    dac viCh
+    lac vCnt
+    dac viCnt
+    dzm viDol
+    law 1
+    dac viUnd
+    lac [viLoop:VI_BANK]
+    dac viRet
+    jmp i [vaGo:SCR_BANK]
+
+// o O -- an empty line after (o) or before (O) dot's, then insert mode in
+// it, given dot's line's indent for autoindent; the count is not used (3.7
+// on a terminal that inserts lines).
+vcOpen, dzm vSyncLn
+    jsp vSetLast
+    dzm vcOi
+    lac DOT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcOp1
+    lia
+    jsp i [ivWcR:FILE_BANK]
+    dac vcOi
+vcOp1, lac vC
+    SKIP_NEXT_IF_SAME [0117]
+    jmp .+4
+    lac DOT
+    sub [1]
+    dac DOT
+    jsp vKillU
+    lac DOT
+    dac LNA
+    jsp i [lnDelNone:0]
+    lac DOT
+    dac LNA
+    cli
+    jsp i [lnAppStart:0]
+    dzm LBLEN
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vNoMem
+    lia
+    jsp i [lnInsert:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vStErr
+    jsp vSquish
+    law VU_MANY
+    dac vUndK
+    dzm vCurs
+    law 0157
+    dac viCh
+    law 1
+    dac viCnt
+    dzm viS0
+    dzm viDol
+    dzm viUnd
+    lac vcOi
+    dac i [vaInd0:SCR_BANK]
+    lac [viLoop:VI_BANK]
+    dac viRet
+    jmp i [vaGo:SCR_BANK]
+
+// --- undo and .
+
+// u -- 3.7's vundo: a change within dot's line undone, the cursor at its
+// start; after the cursor left that line, or a change of lines, ex's undo
+// (lnUndo), the cursor as a line motion leaves it and the unnamed buffer
+// the lines it took out. After an insert that broke lines, those lines
+// are yanked into "1 first. u again undoes the undo.
+vcU, lac vUndK
+    SKIP_NEXT_IF_DIFFERENT [VU_NONE]
+    jmp vFail
+    SKIP_NEXT_IF_DIFFERENT [VU_MANY]
+    jmp vuM
+    SKIP_NEXT_IF_DIFFERENT [VU_MINS]
+    jmp vuMi
+    lac DOT                 // VU_CHNG, VU_CAPU: still on the line?
+    SKIP_NEXT_IF_SAME vUdot
+    jmp vuM
+    lio [1]
+    jsp i [lnUndo:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vuE
+    law VU_CHNG
+    dac vUndK
+    lac vUcur
+    dac vCurs
+    jmp viLoop              // vClamp backs it onto the line
+vuMi, lac i [undAp1:0]      // the lines the insert put in, into "1
+    dac LNA
+    lac i [undAp2:0]
+    sub [1]
+    dac LNB
+    dzm i [rgPart:0]
+    lio [CH_0+1]
+    jsp i [rgYank:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vNoMem
+vuM, lac DOL
+    dac vuD
+    lio [1]
+    jsp i [lnUndo:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vuE
+    jsp vKillU
+    dzm vSyncLn
+    law VU_MANY
+    dac vUndK
+    lac i [undList:0]       // the unnamed buffer: what the undo took out
+    dac i [REG_BASE]
+    dzm i [REG_BASE+1]
+    dzm vPk
+// the note: the lines more or fewer
+    lac DOL
+    sub vuD
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vuF
+    dac vNcnt
+    lac [mMore:MSG_BANK]
+    jmp vuN
+vuF, cma
+    dac vNcnt
+    lac [mFewer:MSG_BANK]
+vuN, dac vNsgn
+    lac vNcnt
+    dac vsN
+    dac vsM
+    jsp vSaveN
+    jsp vNote
+    jsp vFixZero
+    jsp vPlace
+    jsp vCtxDot
+    jmp viLoop
+vuE, SKIP_NEXT_IF_DIFFERENT [ST_NOUNDO]
+    jmp vuE1
+    SKIP_NEXT_IF_DIFFERENT [ST_SAME]
+    jmp vuE2
+    lac [mUndoGlob:MSG_BANK]
+    jmp vErr
+vuE1, jmp vFail
+vuE2, lac [mSame:MSG_BANK]
+    jmp vErr
+
+// U -- 3.7's vUndo: dot's line as it was when U's line was taken (uLine),
+// undoable by u; the cursor at its start. Refused after U, or on another
+// line.
+vcBigU, lac vUndK
+    SKIP_NEXT_IF_DIFFERENT [VU_CAPU]
+    jmp vFail
+    lac i [uLnum:0]
+    SKIP_NEXT_IF_SAME DOT
+    jmp vFail
+    lac i [uLine:0]
+    dac i [lnR:0]
+    jsp i [lnRepl:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vNoUnd
+    jsp vSquish
+    law VU_CAPU
+    dac vUndK
+    lac DOT
+    dac vUdot
+    dzm vUcur
+    dzm vCurs
+    dzm vSyncLn
+    jmp viLoop
+
+// . -- the last change again: its keys from vLcmd through vGlob, its count
+// unless one is typed (which is kept for the next), its register unless
+// one is named; a numbered register steps on, "1 to "2 and so on.
+vcDot, lac vLcmd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp .+2
+    jmp .+3
+    lac vCnt
+    dac vLCnt
+    lac vReg
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vdR
+    lac vLReg
+    sub [CH_0+1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vdG
+    sub [0d8]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vdG
+    idx vLReg
+    jmp vdG
+vdR, dac vLReg
+vdG, lac vLReg
+    dac vReg
+    lac vLCnt
+    dac vCnt
+    lac vLHad
+    dac vHad
+    lac [vLcmd:VI_BANK]
+    dac vGlob
+    jmp vlKey
+
+// --- what the changes share
+
+// vGetDot -- dot's line into LINEBUF. AC and IO are clobbered.
+vGetDot, dac vgdX
+    lio DOT
+    jsp vLoad
+    jmp i vgdX
+
+// vLoad -- line IO into LINEBUF. AC and IO are clobbered.
+vLoad, dac vlnX
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    jmp i vlnX
+
+// vLenOf -- the length of line IO. AC is it; IO is preserved.
+vLenOf, dac vlnX
+    jsp i [lnPtr:0]
+    dac vlnP
+    lac i vlnP
+    and [REC_LEN]
+    jmp i vlnX
+
+// vSpace -- whether the character in IO is a blank or a TAB. AC is 1 or 0;
+// IO is preserved.
+vSpace, dac vlnX
+    dio vlnP
+    lac vlnP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp vspY
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp vspY
+    cla
+    jmp i vlnX
+vspY, law 1
+    jmp i vlnX
+
+// vPlace -- 3.7's vnline(NOSTR) after a change of lines: an empty buffer
+// given its empty line, dot a line, the cursor at vMovCol's column when the
+// motion kept a column, else on the first character that is not white.
+// AC and IO are clobbered.
+vPlace, dac plcX
+    jsp vFixZero
+    lac DOT
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pl0
+    law 1
+    dac DOT
+pl0, jsp vURec              // vnline's vmove: U's line taken
+    lac vMoving
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp plF
+    lac vMovCol
+    dac i [scN:SCR_BANK]
+    lio DOT
+    jsp i [scFindCol:SCR_BANK]
+    dac vCurs
+    jmp i plcX
+plF, jsp vFirst
+    dac vCurs
+    jmp i plcX
+
+// vCtxDot -- dot not on the screen: placed in the window's middle, as 3.7's
+// vjumpto(dot, NOSTR, '.'). AC and IO are clobbered.
+vCtxDot, dac plcX
+    jsp vLay
+    lac i [scDotR:SCR_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i plcX
+    law CH_DOT
+    dac i [scCtx:SCR_BANK]
+    lio DOT
+    jsp i [scContext:SCR_BANK]
+    jmp i plcX
+
+// vSaveN -- 3.7's vreplace's test for a note: vsN lines taken out and vsM
+// put in at dot are worth noting (vNsav) when either is more than report,
+// when they reach past the lines shown, or when dot is above them.
+// AC is clobbered, IO preserved.
+vSaveN, dac svnX
+    lac DOT
+    sub i [scTop:SCR_BANK]
+    dac svL
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp svY
+    lac vsN
+    sub i [oReport:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp svY
+    lac vsM
+    sub i [oReport:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp svY
+    lac vsN                 // more than one gone, past the lines shown
+    sub [2]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sv2
+    lac svL
+    add vsN
+    sub i [scCnt:SCR_BANK]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp svY
+sv2, lac vsM                // more than one come, past them
+    sub [2]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i svnX
+    lac svL
+    add vsM
+    sub i [scCnt:SCR_BANK]
+    sub [1]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp svY
+    jmp i svnX
+svY, law 1
+    dac vNsav
+    jmp i svnX
+
+// vNote -- 3.7's noteit: "N [more |fewer ]lines[ name]" on the status line
+// when vNcnt is 2 or more and vNsav is set; vNsgn and vNnam are strings or
+// 0. All four cleared after. AC and IO are clobbered.
+vNote, dac vnoX
+    lac vNcnt
+    sub [2]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vnZ
+    lac vNsav
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnZ
+    jsp i [scStat:SCR_BANK]
+    lio vNcnt
+    jsp i [putDec:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lac vNsgn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vn1
+    lia
+    jsp i [putStr:TERM_BANK]
+vn1, lio [nmLines:MSG_BANK]
+    jsp i [putStr:TERM_BANK]
+    lac vNnam
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vnZ
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio vNnam
+    jsp i [putStr:TERM_BANK]
+vnZ, dzm vNcnt
+    dzm vNsav
+    dzm vNsgn
+    dzm vNnam
+    jmp i vnoX
+
+// vDecW -- the number in IO, 0 to 99999, in decimal at vqP in CMDBUF; vLen
+// the length of CMDBUF's command then. AC and IO are clobbered.
+vDecW, dac dwX
+    dio dwV
+    dzm dwZ
+    lac [dwPow:VI_BANK]
+    dac dwP
+dwL, lac i dwP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dwE
+    dac dwT
+    law CH_0
+    dac dwD
+dwS, lac dwV
+    sub dwT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp dwO
+    dac dwV
+    idx dwD
+    jmp dwS
+dwO, lac dwD                // no leading 0
+    SKIP_NEXT_IF_SAME [CH_0]
+    jmp dwW
+    lac dwZ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp dwN
+dwW, lac dwD
+    dac i vqP
+    idx vqP
+    law 1
+    dac dwZ
+dwN, idx dwP
+    jmp dwL
+dwE, lac dwV
+    add [CH_0]
+    dac i vqP
+    idx vqP
+    lac vqP
+    sub [CMDBUF]
+    dac vLen
+    jmp i dwX
+dwPow, 0d10000
+    0d1000
+    0d100
+    0d10
+    0
+
+// vXFix -- vXDone's work after J (vXKind 1) or < > (2), run as ex commands:
+// dot their first line; J's cursor where the first line ended, the unnamed
+// buffer the lines joined (3.7's save area); a shift's cursor on the first
+// character not white, the unnamed buffer emptied (3.7 refuses p then).
+// AC and IO are clobbered.
+vXFix, dac xfX
+    lac vXDot
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+3
+    lac vXDot
+    jmp .+2
+    lac DOL
+    dac DOT
+    lac vXKind
+    SKIP_NEXT_IF_SAME [1]
+    jmp xfS
+    lac vXCur
+    dac vCurs
+    jsp vKillLn
+    jmp xfU
+xfS, jsp vSquish
+    jsp vPlace
+xfU, law VU_MANY
+    dac vUndK
+    jsp vKillU
+    dzm vXKind
+    jmp i xfX
+
+// The errors of a change, as ex's (exErr then vmain.ac's viErr).
+vNoMem, lac [mOutMem:MSG_BANK]
+    jmp vErr
+vNoUnd, lac [mOutUndo:MSG_BANK]
+    jmp vErr
+vStErr, SKIP_NEXT_IF_DIFFERENT [ST_FULL]
+    jmp .+5
+    SKIP_NEXT_IF_DIFFERENT [ST_LONG]
+    jmp .+5
+    lac [mOutMem:MSG_BANK]
+    jmp vErr
+    lac [mTooMany:MSG_BANK]
+    jmp vErr
+    lac [mVLong:MSG_BANK]
+vErr, dac veM
+    jsp i [vaOff:SCR_BANK]  // insert mode's screen ended
+    jsp i [scExArm:SCR_BANK]
+    lac veM
+    jmp i [exErr:EX_BANK]
+
+
+vlnX, 0
+vgdX, 0
+vlnP, 0
+xwX, 0
+xwN, 0
+yrX, 0
+yrC, 0
+slX, 0
+slS, 0
+slD, 0
+awX, 0
+awC, 0
+dmX, 0
+sdlX, 0
+sbD, 0
+sbN, 0
+sbS, 0
+ctX, 0
+ctD, 0
+ctS, 0
+ctN, 0
+cmX, 0
+scyX, 0
+urX, 0
+klX, 0
+ukX, 0
+vcN, 0
+vcA, 0
+vyN, 0
+vpS, 0
+vpPart, 0
+vpA, 0
+vpN, 0
+tlP, 0
+tlC, 0
+vuD, 0
+vnoX, 0
+svnX, 0
+svL, 0
+plcX, 0
+dwX, 0
+dwV, 0
+dwZ, 0
+dwP, 0
+dwT, 0
+dwD, 0
+xfX, 0
+veM, 0
+voN, 0
+voA, 0
+vqP, 0
+jN, 0
+jM, 0
+shN, 0
+vU, 0
+vcOi, 0
+endloc
+
+vOp, 0                      // the operator: d c y < >, 0 for a motion alone
+vOpKey, 0                   // the command's key (3.7's op): d and c yank to "1
+vOpCur, 0                   // the cursor where the range starts, -1 for none
+vReg, 0                     // the register named, 0 for none (3.7's vreg)
+vSub, 0                     // 1 when s, C or S gave the motion's key
+vRst, 0                     // 1 after a register: a count starts again
+vXcnt, 0                    // the count as the operator took it (3.7's Xcnt)
+vWcP, 0                     // this command's keys: the next place in vWcmd
+vWcmd,                      // this command's keys (3.7's workcmd)
+    table 0d8, 0
+vLcmd,                      // the last change's (3.7's lastcmd), 0 ending them
+    table 0d8, 0
+vLReg, 0                    // its register, whether it had a count, the count
+vLHad, 0
+vLCnt, 0
+vGlob, 0                    // keys replayed (3.7's vglobp), a full address or 0
+vLastVg, 0                  // the last key replayed, 0 at the end (lastvgk)
+vUndK, 0                    // what u undoes: VU_NONE ... VU_MINS
+vUcur, 0                    //   a change within a line: its start
+vUdot, 0                    //   and its line
+vSyncLn, 0                  // dot's line when uSync holds it, else 0
+vPk, 0                      // the unnamed buffer starts and ends in a line
+vPk0, 0                     //   its first line taken from this column
+vPk1, 0                     //   its last cut at this one
+vNcnt, 0                    // vNote's lines, sign, name, worth noting
+vNsgn, 0
+vNnam, 0
+vNsav, 0
+vsN, 0                      // vSaveN's lines taken out and put in
+vsM, 0
+vXKind, 0                   // vXDone's work: 0 none, 1 after J, 2 after < >
+vXDot, 0                    //   dot then
+vXCur, 0                    //   J's cursor
+viCh, 0                     // insert mode's command (vinsert.ac's vaGo)
+viCnt, 0                    //   its count
+viS0, 0                     //   the characters at the cursor it goes over
+viDol, 0                    //   1 for c: $ on the last of them
+viUnd, 0                    //   1 when its first line put sets undo
+viRet, 0                    //   where it goes when done, a full address

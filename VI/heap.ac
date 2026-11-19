@@ -1,0 +1,425 @@
+// heap.ac -- the heap: records of a line's text, and lists of line records,
+// from HEAP_BASE up to HEAP_END. Allocation takes from
+// heapTop up and frees nothing; a record nothing refers to is reclaimed by
+// compaction, a sliding mark-and-compact in four passes:
+//   1. mark every record reachable from the roots, and each list's lines;
+//   2. walk the heap by the headers' lengths, giving each marked record its
+//      new address in its forwarding word;
+//   3. rewrite every root, and every list's pointers, through the forwarding
+//      words; a weak reference (a mark) whose record was not marked is
+//      cleared;
+//   4. slide the marked records down, clearing their marks.
+// The roots: the line table's lines 1 to dol, the undo's list, the registers'
+// lists, U's line and vi's line as it was before a change on it (uLine,
+// uSync), the buffer as g found it (gList), and two words a caller may hold
+// a record in across an allocation (hpHold1, hpHold2). The weak references:
+// the marks.
+//
+// A routine that keeps a record's address in a word of its own across a call
+// to hpAlloc reads it again after, from a root: compaction moves records.
+//
+// In bank 0. Every routine is entered by jsp with the extend window open and
+// returns by jmp i. Needs vi.ah, <AIDS/skipmacros.ah>, and lines.ac's dol,
+// undList, uLine, uSync, gList and marks; the registers' slots are at REG_BASE, the
+// screen's rows' keys at ROW_KEYS.
+
+local hiX, haX, haN, haNew, haNone, hcX, hcP, hcN, hcI, hcFwd, hcSz, hcQ, \
+    hcW, hc1Lt, hc1Reg, hc1Mk, hc2, hc2Next, hc3, hc3Lt, hc3Reg, hc3Mk, \
+    hc3MkN, hc3MkZ, hc3MkS, hc3Rw, hc3RwZ, hc3RwS, hc3Lst, hc3Elem, hc3LNext, hc4Go, hc4, hc4Copy, \
+    hc4Next, hc4Done, hmX, hmP, hmN, hmQ, hmLoop, hfX, hfP, hzX, hzW, hzList
+
+// hpInit -- an empty heap. AC is clobbered, IO preserved.
+hpInit, dac hiX
+    lac [HEAP_BASE]
+    dac heapTop
+    dzm hpHold1
+    dzm hpHold2
+    jmp i hiX
+
+// hpAlloc -- room for a record of the number of words in IO, header
+// included, compacting first when the top has no room.
+// AC is the record's full address, or 0 when even compaction leaves too
+// little; IO is clobbered. The words are not cleared.
+hpAlloc, dac haX
+    dio haN
+    lac heapTop
+    add haN
+    sub [HEAP_END]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jsp hpCompact
+    lac heapTop
+    add haN
+    sub [HEAP_END]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp haNone
+    lac heapTop
+    dac haNew
+    add haN
+    dac heapTop
+    lac haNew
+    jmp i haX
+haNone, cla
+    jmp i haX
+
+// hpSize -- a record's length in words, header included, from its header
+// word in IO. AC is the length, IO is clobbered.
+hpSize, dac hzX
+    dio hzW
+    lac hzW
+    and [REC_LIST]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp hzList
+// text: two characters a word
+    lac hzW
+    and [REC_LEN]
+    add [1]
+    rar 1s
+    and [REC_LEN]
+    add [REC_HDR]
+    jmp i hzX
+hzList, lac hzW
+    and [REC_LEN]
+    add [REC_HDR]
+    jmp i hzX
+
+// hpCompact -- the four passes, above. AC and IO are clobbered.
+hpCompact, dac hcX
+// 1. mark: the line table, the undo's list, U's line, the holds, g's list,
+// the registers
+    law 1
+    dac hcI
+hc1Lt, lac hcI
+    sub dol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp hc1Reg
+    lac hcI
+    add [LT_BASE]
+    dac hcP
+    lac i hcP
+    and [LT_PTR]
+    lia
+    jsp hpMark
+    idx hcI
+    jmp hc1Lt
+hc1Reg, lio undList
+    jsp hpMark
+    lio uLine
+    jsp hpMark
+    lio uSync
+    jsp hpMark
+    lio hpHold1
+    jsp hpMark
+    lio hpHold2
+    jsp hpMark
+    lio gList
+    jsp hpMark
+    lac [REG_BASE]
+    dac hcP
+    law NREG
+    dac hcN
+hc1Mk, lio i hcP
+    jsp hpMark
+    lac hcP
+    add [REG_WORDS]
+    dac hcP
+    lac hcN
+    sub [1]
+    dac hcN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp hc1Mk
+
+// 2. each marked record's new address, into its forwarding word
+    lac [HEAP_BASE]
+    dac hcP
+    dac hcFwd
+hc2, lac hcP
+    sub heapTop
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp hc3
+    lio i hcP
+    jsp hpSize
+    dac hcSz
+    lac i hcP
+    SKIP_NEXT_IF_AC_NEGATIVE    // the mark is the sign bit
+    jmp hc2Next
+    lac hcP
+    add [1]
+    dac hcQ
+    lac hcFwd
+    dac i hcQ
+    add hcSz
+    dac hcFwd
+hc2Next, lac hcP
+    add hcSz
+    dac hcP
+    jmp hc2
+
+// 3. the roots through the forwarding words: the line table, keeping g's mark
+hc3, law 1
+    dac hcI
+hc3Lt, lac hcI
+    sub dol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp hc3Reg
+    lac hcI
+    add [LT_BASE]
+    dac hcP
+    lac i hcP
+    and [LT_PTR]
+    lia
+    jsp hpFwd
+    dac hcW
+    lac i hcP
+    and [LT_GMARK]
+    ior hcW
+    dac i hcP
+    idx hcI
+    jmp hc3Lt
+// the undo's list, U's line, the holds, g's list, the registers' lists
+hc3Reg, lio undList
+    jsp hpFwd
+    dac undList
+    lio uLine
+    jsp hpFwd
+    dac uLine
+    lio uSync
+    jsp hpFwd
+    dac uSync
+    lio hpHold1
+    jsp hpFwd
+    dac hpHold1
+    lio hpHold2
+    jsp hpFwd
+    dac hpHold2
+    lio gList
+    jsp hpFwd
+    dac gList
+    lac [REG_BASE]
+    dac hcP
+    law NREG
+    dac hcN
+hc3Mk, lio i hcP
+    jsp hpFwd
+    dac i hcP
+    lac hcP
+    add [REG_WORDS]
+    dac hcP
+    lac hcN
+    sub [1]
+    dac hcN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp hc3Mk
+// the marks: kept when their record was marked, else cleared
+    lac [marks:0]
+    dac hcP
+    law NMARK
+    dac hcN
+hc3MkN, lac i hcP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp hc3MkS              // no mark
+    dac hcQ
+    lac i hcQ
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp hc3MkZ              // its record was not kept
+    lio hcQ
+#ifndef VICTL_MARKS                 // the control leg's build leaves it stale
+    jsp hpFwd
+    dac i hcP
+#endif
+    jmp hc3MkS
+hc3MkZ, dzm i hcP
+hc3MkS, idx hcP
+    lac hcN
+    sub [1]
+    dac hcN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp hc3MkN
+// the screen's rows (screen.ac): a row's record kept when it was marked,
+// else the row unknown; a ~, @ or unknown row is left as it is
+    lac [ROW_KEYS]
+    dac hcP
+    law ROW_MAX
+    dac hcN
+hc3Rw, lac i hcP
+    sub [HEAP_BASE]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp hc3RwS
+    lac i hcP
+    dac hcQ
+    lac i hcQ
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp hc3RwZ              // its record was not kept
+    lio hcQ
+#ifndef VICTL_FWD                   // the control leg's build leaves it stale
+    jsp hpFwd
+    dac i hcP
+#endif
+    jmp hc3RwS
+hc3RwZ, dzm i hcP
+hc3RwS, lac hcP
+    add [ROW_W]
+    dac hcP
+    lac hcN
+    sub [1]
+    dac hcN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp hc3Rw
+// every marked list's pointers, walking the heap so each list is done once
+    lac [HEAP_BASE]
+    dac hcP
+hc3Lst, lac hcP
+    sub heapTop
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp hc4Go
+    lio i hcP
+    jsp hpSize
+    dac hcSz
+    lac i hcP
+    and [REC_MARK REC_LIST]
+    SKIP_NEXT_IF_SAME [REC_MARK REC_LIST]
+    jmp hc3LNext            // not a list, or not kept
+    lac i hcP
+    and [REC_LEN]
+    dac hcN
+    lac hcP
+    add [REC_HDR]
+    dac hcQ
+hc3Elem, lac hcN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp hc3LNext
+    lio i hcQ
+    jsp hpFwd
+    dac i hcQ
+    idx hcQ
+    lac hcN
+    sub [1]
+    dac hcN
+    jmp hc3Elem
+hc3LNext, lac hcP
+    add hcSz
+    dac hcP
+    jmp hc3Lst
+
+// 4. slide each marked record down to its new address, its mark cleared;
+// the copy runs upward, the new place never above the old, so it never
+// overwrites a word it has still to read
+hc4Go, lac [HEAP_BASE]
+    dac hcP
+    dac hcFwd
+hc4, lac hcP
+    sub heapTop
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp hc4Done
+    lio i hcP
+    jsp hpSize
+    dac hcSz
+    lac i hcP
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp hc4Next
+    and [~REC_MARK]
+    dac hcW
+    lac hcP
+    add [1]
+    dac hcI
+    lac i hcI
+    dac hcQ                 // the new address
+    lac hcW
+    dac i hcQ
+    lac hcFwd
+    add hcSz
+    dac hcFwd
+    lac hcSz
+    sub [1]
+    dac hcN
+    lac hcP
+    dac hcI
+hc4Copy, idx hcI
+    idx hcQ
+    lac i hcI
+    dac i hcQ
+    lac hcN
+    sub [1]
+    dac hcN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp hc4Copy
+hc4Next, lac hcP
+    add hcSz
+    dac hcP
+    jmp hc4
+hc4Done, lac hcFwd
+    dac heapTop
+    idx hpCount
+    jmp i hcX
+
+// hpMark -- mark the record whose full address is in IO, 0 for none, and,
+// for a list, every line record in it. AC and IO are clobbered.
+hpMark, dac hmX
+    dio hmP
+    lac hmP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i hmX
+    lac i hmP
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i hmX               // marked already
+    ior [REC_MARK]
+    dac i hmP
+    and [REC_LIST]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i hmX
+    lac i hmP
+    and [REC_LEN]
+    dac hmN
+    lac hmP
+    add [REC_HDR]
+    dac hmP
+hmLoop, lac hmN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i hmX
+    lac i hmP
+    dac hmQ
+    lac i hmQ
+    ior [REC_MARK]
+    dac i hmQ
+    idx hmP
+    lac hmN
+    sub [1]
+    dac hmN
+    jmp hmLoop
+
+// hpFwd -- the new address of the marked record whose full address is in IO,
+// 0 for 0. AC is the result, IO is clobbered.
+hpFwd, dac hfX
+    dio hfP
+    lac hfP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i hfX
+    idx hfP
+    lac i hfP
+    jmp i hfX
+
+hiX, 0                      // the return addresses
+haX, 0
+hcX, 0
+hmX, 0
+hfX, 0
+hzX, 0
+haN, 0
+haNew, 0
+hcP, 0
+hcN, 0
+hcI, 0
+hcFwd, 0
+hcSz, 0
+hcQ, 0
+hcW, 0
+hmP, 0
+hmN, 0
+hmQ, 0
+hfP, 0
+hzW, 0
+endloc
+
+heapTop, 0                  // the next free word
+hpHold1, 0                  // records a caller holds across an allocation: roots
+hpHold2, 0
+hpCount, 0                  // compactions run, counting on (for the tests)

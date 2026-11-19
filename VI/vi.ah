@@ -1,0 +1,374 @@
+// vi.ah -- vi's constants: the bank layout, the buffer's records, the
+// console, the limits and the characters. Every bare number is octal unless
+// written 0d.
+
+// The code banks.
+#define TERM_BANK    1                    // the console (termio.ac)
+#define EX_BANK      2                    // ex (excmd.ac, exaddr.ac, exops.ac, options.ac)
+#define RE_BANK      3                    // expressions, s, g, v, tags (regex.ac, subst.ac)
+#define VI_BANK      4                    // vi's command mode (vmain.ac, vmotion.ac)
+#define SCR_BANK     5                    // the screen (screen.ac)
+#define FILE_BANK    6                    // the files (files.ac, ptape.ac, lpt.ac)
+#define FS_BANK      7                    // the file system library (fslib.ac)
+#define MSG_BANK     7                    // the messages and the greeting, with it
+
+// Bank 8, the line table: word n is line n, 1 to LT_MAX; word 0 is zero,
+// the empty line before the first. A word holds its record's address in
+// LT_PTR and g's mark in LT_GMARK.
+#define LT_BASE      0100000
+#define LT_MAX       07777                // 4,095 lines
+#define LT_PTR       0177777
+#define LT_GMARK     0400000
+
+// Bank 9, the work areas, a character a word, each ending in a 0 word: the
+// line buffer and genbuf hold a line of LB_SIZE characters; the command
+// line CMD_SIZE. Then the type-ahead ring, its keys and the millisecond each
+// was taken; then the registers' slots, REG_WORDS each.
+#define LINEBUF      0110000              // to 0112001
+#define GENBUF       0112002              // to 0114003
+#define CMDBUF       0114004              // to 0116005
+#define LB_SIZE      0d1024
+#define CMD_SIZE     0d1024
+#define TA_BUF       0116006              // TA_SIZE keys
+#define TA_TIME      0116206              // TA_SIZE times
+#define TA_SIZE      0d128
+#define REG_BASE     0116406              // NREG slots, to 0116516
+#define NREG         0d36
+#define REG_WORDS    2
+#define WK_END       0116516              // the first word past the work areas
+
+// Bank 9 after the registers, the files' names (files.ac), each a character
+// a word ending in a 0 word, in the full form DR:NAME.EXT: the current file
+// (3.7's savedfile), the alternate (altfile), the one a command names
+// (file), the one a read cut short. Then the argument list, its names
+// one after another, each ending in a 0 word; then :e's +cmd, FPAT_SIZE
+// characters at most, 3.7's fpatbuf.
+#define FN_CUR       0116520
+#define FN_ALT       0116540
+#define FN_FILE      0116560
+#define FN_CUT       0116600
+#define FN_SIZE      020                  // 13 characters and the 0 word, and room
+#define ARG_BUF      0116620              // to 0117217
+#define ARG_SIZE     0400
+#define FPAT         0117220              // to 0117257
+#define FPAT_SIZE    040
+#define WK9_END      0117260              // the first word past them
+
+// Bank 9 after them, the screen's rows (screen.ac): what each row of the
+// window shows, ROW_W words a row, the window's rows at most ROW_MAX (lines
+// at most 66, less the status line). Word 0 is the record whose text the
+// row shows, or KEY_NONE (not known: it must be painted), KEY_TILDE (a ~
+// row past the end), KEY_AT (an @ row where a line does not fit); word 1
+// which of that line's rows it is, 0 the first; word 2 the line's number
+// while number is set, else 0. A record is never changed, so a row whose
+// key is the one wanted needs nothing sent.
+#define ROW_KEYS     WK9_END
+#define ROW_W        3
+#define ROW_MAX      0d65
+#define ROW_END      ROW_KEYS+ROW_W*ROW_MAX
+#define KEY_NONE     0
+#define KEY_TILDE    1
+#define KEY_AT       2
+
+// The arrow keys as the key reader (keys.ac) gives them: ESC [ or ESC O
+// and A to D, each key within ESC_MS of the one before. No key
+// typed can be one; CH_EOF is 0400. The control leg's build (VICTL_ESC0)
+// has no window at all, -1: every ESC is a lone ESC.
+#define KY_UP        0401
+#define KY_DOWN      0402
+#define KY_RIGHT     0403
+#define KY_LEFT      0404
+#ifdef VICTL_ESC0
+#define ESC_MS       0777776
+#else
+#define ESC_MS       0d100
+#endif
+
+// Bank 10 after the options' strings, the file system's data (files.ac):
+// the drum's handle and a tape's, FS_HANDLEW words each; the descriptor of
+// the file read or written, and :so's; :so's block; the staging buffer,
+// STG_BLKS blocks, through which files are read and written.
+#define DR_HND       0120400              // to 0121446
+#define MT_HND       0121450              // to 0122516
+#define FD_IO        0122520              // FS_FILEW words
+#define FD_SO        0122540
+#define SO_BUF       0123000              // FS_BLKW words, to 0123377
+#define STG_BUF      0123400              // to 0125377
+#define STG_BLKS     4
+#define B10_END      0125400              // the first word past them
+
+// Bank 10 after them, the maps (keys.ac): MAP_TEXT, 3.7's mapspace, the
+// text of every map and abbreviation, a character a word, MAP_CHARS in all
+// for the three tables (3.7's MAXCHARMACS); then MAC_BUF, 3.7's vmacbuf,
+// the keys a map or an abbreviation put in, MAC_SIZE and a 0 word. A table
+// has MAP_N entries (MAXNOMACS) of MAP_W words; a side is MAP_SIDE
+// characters at most (3.7's lhs[100], rhs[100]); a key is mapped again at
+// most MAP_HOPS times (maphopcnt); a map's next key waits MAP_MS under
+// timeout (fastpeekkey's alarm(1)). AB_HAD, a word for each abbreviation,
+// is 3.7's hadthis: set when it expands, cleared when a key is typed, so
+// that its own expansion does not expand it again. showmatch shows a match
+// for SHOW_MS (3.7's sleep(1)). SO_RST is what followed :so's line in
+// CMDBUF (vi's CH_EOF, the rest of a command list), SO_RSTN words at most,
+// kept while the file is read and then put back, as 3.7's source saves its
+// input around the file's commands.
+#define MAP_TEXT     B10_END              // to 0126377
+#define MAP_CHARS    0d512
+#define MAC_BUF      0126400              // to 0127400
+#define MAC_SIZE     0d512
+#define MAP_N        0d32
+#define MAP_W        3
+#define MAP_SIDE     0d99
+#define MAP_HOPS     0d256
+#define MAP_MS       0d1000
+#define AB_HAD       0127401              // MAP_N words, to 0127440
+#define SHOW_MS      0d1000
+#define SO_RST       0127441              // SO_RSTN words, to 0127740
+#define SO_RSTN      0d192
+
+// Bank TERM_BANK after the console's code, the three remembered expressions
+// (regex.ac), 3.7's re, scanre and subre, RE_W words each: circfl, nbra,
+// then the program, a step a word, as 3.7's ESIZE+2 bytes of Expbuf. A
+// program whose first step is 0 is none. Bank 10 has no room for them
+// beside the maps; the console's code must end below RE_LAST (vi.am1's
+// assert).
+#define RE_LAST      014764
+#define RE_SCAN      015770
+#define RE_SUB       016774
+#define RE_W         01004                // 0d516
+#define ESIZE        0d512
+#define NBRA         0d9
+
+// 3.7's other limits of bank RE_BANK (regex.ac, subst.ac): a substitute's
+// replacement; g's command list; a tag's characters (RM 10); a tags line's
+// file name, more being passed over.
+#define RHS_SIZE     0d256
+#define GB_SIZE      0d256
+#define TAG_MAX      0d30
+#define TGF_MAX      0d30
+
+// The end of a command list ex runs from CMDBUF, g's and :ta's: 3.7's EOF
+// in commands(1,1). No key typed can be it (termio.ac keeps 7 bits).
+#define CH_EOF       0400
+
+// The drum's volume, TECO's: DR_NTRK tracks from DR_TRK0.
+#define DR_TRK0      020
+#define DR_NTRK      020
+
+// A name's device (files.ac): the drum, a tape (unit 1 to 8), paper tape,
+// the printer.
+#define FK_DRUM      1
+#define FK_TAPE      2
+#define FK_PC        3
+#define FK_LP        4
+
+// A library name, as fsOpenName takes it: 9 characters at most, two a word,
+// ending in a 0 character, LIB_W words.
+#define LIB_MAX      0d9
+#define LIB_W        5
+
+// The paper tape reader's end: RD_MS with no character, FOCAL's rule.
+#define RD_MS        0d2000
+
+// The printer: the Type 62 unless built with -DLPT_TYPE64=1, which must agree
+// with lptType64 in pidp1.config; its line is LPT_COLS.
+#ifndef LPT_TYPE64
+#define LPT_TYPE64   0
+#endif
+#define LPT_COLS     0d120
+
+// The registers' slots: the unnamed one, a to z, 1 to 9. A slot is the
+// list record of its lines' records, 0 for empty, and its mode: REG_LINES
+// whole lines, REG_PART the first line taken from a column and the last cut
+// at one (3.7's rg_flags), its records holding only what was taken.
+#define REG_UNNAMED  0
+#define REG_A        1
+#define REG_1        0d27
+#define REG_9        0d35
+#define REG_LINES    0
+#define REG_PART     1
+
+// vi's changes (vops.ac, vinsert.ac). The command's keys as typed (3.7's
+// workcmd), the last change's (lastcmd), the last insert's text (INS) and
+// the text of the last delete within a line (DEL): VBSIZE characters each,
+// a character a word ending in a 0 word; more marks it OVERBUF, as 3.7's
+// QUOTE|TRIM first character. While insert mode runs, the line being typed
+// is packed as a record at ED_REC, CMDBUF's room (no ex command runs then),
+// for the screen to show it.
+#define VBSIZE       0d128
+#define OVERBUF      0777
+#define CH_CDREC     0204                 // INS's ^D that backtabbed (3.7's \204)
+#define ED_REC       CMDBUF
+
+// vi's undo (3.7's vundkind): nothing; a change within dot's line (u puts
+// the cursor at its start); a change of lines; U's restoring of a line.
+#define VU_NONE      0
+#define VU_CHNG      1
+#define VU_MANY      2
+#define VU_CAPU      3
+#define VU_MINS      4                    // an insert that broke lines (3.7's VMANYINS)
+
+// Bank 10, the options' strings: three of them, OPT_SLEN words each, a
+// character a word and a 0 word. A value longer than OPT_SMAX characters is
+// refused, 3.7's ONMSZ.
+#define OPT_STR      0120000
+#define OPT_SLEN     0110
+#define OPT_SMAX     0d64
+
+// Banks 11 to 15, the heap: every line's text, and the lists of line
+// records that undo and the registers keep. Allocation takes from heapTop
+// up; compaction reclaims (heap.ac).
+#define HEAP_BASE    0130000
+#define HEAP_END     0200000              // one past the last word, 0177777
+
+// A record: two header words, then its body. Word 0 is REC_MARK for
+// compaction, REC_LIST for a list of line records (else a line's text),
+// REC_PLAIN for text with no TAB and no control character, and the length
+// in REC_LEN: characters of text, or pointers of a list. Word 1 is
+// compaction's forwarding address. Text is two characters a word, the first
+// in PK_HI.
+#define REC_MARK     0400000
+#define REC_LIST     0200000
+#define REC_PLAIN    0100000
+#define REC_LEN      077777
+#define REC_HDR      2
+#define PK_HI        0777000
+#define PK_LO        0777
+
+// The marks: a to z, then '' at MARK_PREV.
+#define NMARK        0d27
+#define MARK_PREV    0d26
+
+// An address not given: a line number no line has.
+#define ADDR_NONE    0777776
+
+// Undo's kinds, 3.7's: nothing to undo, a change (lines put in and taken
+// out), a change saved whole (shift, yank), a put, a move.
+#define UND_NONE     0
+#define UND_CHANGE   1
+#define UND_ALL      2
+#define UND_PUT      3
+#define UND_MOVE     4
+
+// What the buffer's routines (lines.ac) return in AC: done, or why not.
+#define ST_OK        0
+#define ST_MEM       1                    // the heap has no room
+#define ST_FULL      2                    // the line table is full
+#define ST_NOTHING   3                    // "That move would do nothing!"
+#define ST_MOVED     4                    // "Move to a moved line"
+#define ST_NOUNDO    5                    // "Nothing to undo"
+#define ST_SAME      6                    // "Nothing changed"
+#define ST_GLOBAL    7                    // "Can't undo in global commands"
+#define ST_LONG      0d8                  // "Line too long"
+
+// Where lnCopyIn takes its lines: the line table, or a list record.
+#define CP_TABLE     0
+#define CP_LIST      1
+
+// The console: DCS2 channel 0 on PORTNO, telnet, vi's own echo.
+#define PORTNO       0d2030
+
+// The BBN clock counts milliseconds and wraps at CLK_WRAP. Leaving waits
+// BYE_MS for what was sent last to leave before the caller is dropped.
+#define CLK_WRAP     0d60000
+#define BYE_MS       0d200
+
+// The sense switches: SW_BREAK turned on breaks a running command; SW_VISUAL
+// on starts each caller in visual mode (visual mode's own build). szs takes
+// a switch as its number times 010.
+#define SW_BREAK     3
+#define SW_VISUAL    2
+
+// What tmErr is entered with in AC: a lost caller, or a break.
+#define ERR_LOST     0
+#define ERR_BREAK    1
+
+// The terminal types of term and ttytype.
+#define TERM_DUMB    0
+#define TERM_VT100   1
+#define TERM_VT102   2
+
+// Output: TAB_STOP is the terminal's own tab; a numbered line's number is
+// NUM_W wide, and its text starts NUM_COLS in.
+#define TAB_STOP     0d8
+#define NUM_W        0d6
+#define NUM_COLS     0d8
+
+// A command's name, as an error message names it, is at most CMDNAME_MAX
+// characters, 3.7's.
+#define CMDNAME_MAX  0d19
+
+// ASCII.
+#define CH_NUL       000
+#define CH_CTLB      002
+#define CH_CTLC      003
+#define CH_CTLD      004
+#define CH_CTLE      005
+#define CH_CTLF      006
+#define CH_CTLG      007
+#define CH_CTLL      014
+#define CH_CTLN      016
+#define CH_CTLP      020
+#define CH_CTLQ      021
+#define CH_CTLR      022
+#define CH_CTLT      024
+#define CH_CTLY      031
+#define CH_BELL      007
+#define CH_BS        010
+#define CH_TAB       011
+#define CH_LF        012
+#define CH_FF        014
+#define CH_CR        015
+#define CH_CTLU      025
+#define CH_CTLV      026
+#define CH_CTLW      027
+#define CH_ESC       033
+#define CH_SP        040
+#define CH_EXCL      041
+#define CH_QUOTE     042
+#define CH_HASH      043
+#define CH_DOLLAR    044
+#define CH_PCT       045
+#define CH_AMP       046
+#define CH_APOS      047
+#define CH_LPAR      050
+#define CH_RPAR      051
+#define CH_STAR      052
+#define CH_PLUS      053
+#define CH_COMMA     054
+#define CH_MINUS     055
+#define CH_DOT       056
+#define CH_SLASH     057
+#define CH_0         060
+#define CH_9         071
+#define CH_COLON     072
+#define CH_SEMI      073
+#define CH_LT        074
+#define CH_EQ        075
+#define CH_GT        076
+#define CH_QMARK     077
+#define CH_A         0101
+#define CH_Z         0132
+#define CH_LBRK      0133
+#define CH_BSL       0134
+#define CH_RBRK      0135
+#define CH_CARET     0136
+#define CH_USCORE    0137
+#define CH_GRAVE     0140
+#define CH_LA        0141
+#define CH_LZ        0172
+#define CH_VBAR      0174
+#define CH_TILDE     0176
+#define CH_DEL       0177
+
+// ex, in bank EX_BANK, reaches the buffer's state in bank 0 through these.
+#define DOT          i [dot:0]
+#define DOL          i [dol:0]
+#define CHNG         i [chng:0]
+#define LNA          i [lnA:0]
+#define LNB          i [lnB:0]
+#define LNT          i [lnT:0]
+#define LBLEN        i [lbLen:0]
+
+// ex's limits: a command's name in an error message (3.7's tcommand); a
+// count or an address read no further than COUNT_CAP.
+#define COUNT_CAP    0d10000

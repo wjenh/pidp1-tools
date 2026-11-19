@@ -1,0 +1,1152 @@
+// excmd.ac -- ex's command loop, as 3.7's commands() (ex_cmds.c): the
+// autoprint, the prompt, the addresses, the command's name, the dispatch;
+// the input (ex_get.c), the helpers of ex_cmds2.c, and the errors.
+//
+// Input is a line at a time, read by tmLine into CMDBUF with its LF after
+// it, and taken a character at a time (getChar), so text typed for a, i and
+// c, and the rest of a line after |, come the same way as 3.7's. A line
+// ended by ^D holds a ^D in place of the LF. An edit's +cmd is put in
+// CMDBUF by files.ac (fiInject), its LF taken as 3.7's EOF (pcEof).
+//
+// An error (exErr, its message's full address in AC) types the message,
+// drops the rest of the line, and starts the loop again; a break comes in
+// through tmErr to exBrk. The routines are entered by jsp and return by
+// jmp i; a command is reached by jmp from the dispatch and goes back to
+// exNext. In bank EX_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, lines.ac (bank
+// 0), termio.ac (bank TERM_BANK), messages.ac (bank MSG_BANK), exaddr.ac,
+// exops.ac and options.ac, and files.ac (bank FILE_BANK): its commands, the
+// source file's lines (soOn, soLine) and the lost caller's save (fiLost);
+// subst.ac (bank RE_BANK): s & ~ g v ta, and the command lists g and ta run,
+// each ending in CH_EOF.
+
+#define CT_WORDS    3             // cmdTab: letters needed, handler, name
+
+local erNb, \
+    elC, elP, elS, elF, elE, elK, elN, elI, elAp0, elAp, elOff, elNoAp, \
+    elAd, elAdL, elAdD, elAdG, elAdC, elPct, elCol, elCol2, elDisp, elUnk, \
+    elCmt, elBar, elNl, elLine, elLnS, elLnT, elEof, elAlpha, elLoop, \
+    elNeed, elTyp, elCmp, elNx, elHit, elMore, elTail, elNot, elNotL, \
+    elMiss, elNotE, elNotM, elGo, erM, ebK, ebMsg, gaX, gaP, gaT, gaTop, \
+    gaRead, gaGot, gaSrc, gaLong, gdX, gdC, gdOk, ghX, ghL, pkX, pdX, igX, \
+    ugX, swX, swN, swL, pwX, skX, skC, ecX, eoX, nlX, nlC, nlL, nlUp, nlDn, \
+    nlCmt, nlEnd, nlFl, xcX, crX, cmX, gnX, gnN, gnL, gnEnd, iaX, iwX, rfX, \
+    sfX, pkcX, pkcW, pkcLo, pmX, pmK, pmC, pmL, pmNo, puX, puK, puP, puL, tsX, \
+    elApH, \
+    gdRet, icYes, icNo, ilNo, swE, ecLine, ecMid, eoEnd, nlList, nlNum, \
+    nlPr, xcNo, crNo, cmL, pmYes, pkC, icC, ecC, gnD, pkcI, elPEof, elPE1, \
+    ecPc, pcLine, pcX, elLnG, elLnA, elSub
+
+// exStart -- ex for a new caller: the options at their defaults, no
+// line read, a break taken to exBrk, then the loop. Reached by jmp from
+// restart (vi.am1).
+exStart, jsp optInit
+    lac [exBrk:EX_BANK]
+    dac i [tmErr:TERM_BANK]
+    law 1
+    dac i [brkOn:TERM_BANK]
+    dac endline
+    dzm cbPos
+    dzm cbEnd
+    dzm i [tlCtlD:TERM_BANK]
+    dzm shudclob
+    dzm hadpr
+    dzm pcEof
+
+// exLoop -- where 3.7's commands() starts, after an error too: the flavor
+// reset, nothing changed since.
+exLoop, jsp resetFlav
+    lac CHNG
+    dac lchng
+
+// exNext -- each command. Dot is 1 when it was 0 and there are lines.
+exNext, lac DOT
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elAp0
+    lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    dac DOT
+// the trailing flags' print, or autoprint's, of the line at the offset
+elAp0, lac pflag
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elAp
+    lac lchng
+    SKIP_NEXT_IF_DIFFERENT CHNG
+    jmp elNoAp
+    lac oAutoPr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elNoAp
+    lac i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elNoAp
+    lac i [viOn:VI_BANK]    // none in visual mode, as 3.7's inopen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elNoAp
+    lac endline
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elNoAp
+elAp, dzm pflag
+    lac CHNG
+    dac lchng
+    lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elNoAp
+    lac DOT
+    add poffset
+    dac addr1
+    dac addr2
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp elApH
+    jmp elOff
+elApH, sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp elOff
+    jsp setDot1
+    jmp exPrint
+elOff, lac [mOffset:MSG_BANK]
+    jmp exErr
+elNoAp, lac CHNG
+    dac lchng
+// the prompt, when a new line is to be read
+    lac endline
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elAd
+    lac i [rnDepth:RE_BANK] // none within a command list (g, :ta)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elAd
+    jsp i [tmReady:TERM_BANK]
+    dzm hadpr
+    lac i [soOn:FILE_BANK]  // no prompt for a source file's lines
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elAd
+    lac i [viPend:VI_BANK] // switch 2: visual mode, the greeting done
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [viStart:VI_BANK]
+    lac oPrompt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elAd
+    lio [CH_COLON]
+    jsp i [putc:TERM_BANK]
+    law 1
+    dac hadpr
+// the addresses: degenerate ones are dot
+elAd, lac [ADDR_NONE]
+    dac addr2
+    dzm given
+    dzm seenSemi
+elAdL, lac addr2
+    dac addr1
+    jsp address
+    dac elS                 // the address
+    dio elF                 // not 0 when there was one
+    jsp getCd
+    dac elC
+    lac elF
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elAdG
+    lac elC
+    SKIP_NEXT_IF_DIFFERENT [CH_COMMA]
+    jmp elAdD
+    lac addr1
+    SKIP_NEXT_IF_DIFFERENT [ADDR_NONE]
+    jmp elPct
+    lac DOT
+    dac addr2
+    jmp elPct
+elAdD, lac DOT
+    dac elS
+elAdG, lac elS
+    dac addr2
+    idx given
+    lac elC
+    SKIP_NEXT_IF_SAME [CH_SEMI]
+    jmp elAdC
+    law CH_COMMA
+    dac elC
+    lac elS
+    dac DOT
+    law 1
+    dac seenSemi
+elAdC, lac elC
+    SKIP_NEXT_IF_DIFFERENT [CH_COMMA]
+    jmp elAdL
+// % is 1,$
+elPct, lac elC
+    SKIP_NEXT_IF_SAME [CH_PCT]
+    jmp elCol
+    law 1
+    dac addr1
+    lac DOL
+    dac addr2
+    law 2
+    dac given
+    jsp getChar
+    dac elC
+elCol, lac addr1
+    SKIP_NEXT_IF_SAME [ADDR_NONE]
+    jmp elCol2
+    lac addr2
+    dac addr1
+elCol2, lac elC
+    SKIP_NEXT_IF_SAME [CH_COLON]
+    jmp elDisp
+    jsp getChar
+    dac elC
+// the command
+elDisp, lio elC
+    jsp tailSpec
+    lio elC
+    jsp isAlpha
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elAlpha
+    lac elC
+    SKIP_NEXT_IF_DIFFERENT [CH_VBAR]
+    jmp elBar
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp elNl
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp elCmt
+    SKIP_NEXT_IF_DIFFERENT [CH_HASH]
+    jmp cNumberIt
+    SKIP_NEXT_IF_DIFFERENT [CH_EQ]
+    jmp cEquals
+    SKIP_NEXT_IF_DIFFERENT [CH_LT]
+    jmp cShift
+    SKIP_NEXT_IF_DIFFERENT [CH_GT]
+    jmp cShift
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLD]
+    jmp cCtlD
+    SKIP_NEXT_IF_DIFFERENT [CH_AMP]
+    jmp i [cAmp:RE_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_TILDE]
+    jmp i [cTilde:RE_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]     // a command list's end (subst.ac)
+    jmp i [rnEof:RE_BANK]
+elUnk, lac elC
+    dac i [msgC:MSG_BANK]
+    lac [mUnknown:MSG_BANK]
+    jmp exErr
+elCmt, jsp comment
+    jmp exNext
+// | and LF: print the next line, or the lines addressed
+elBar, dzm endline
+    jmp elLine
+elNl, lac pcEof
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elPEof
+    law 1
+    dac endline
+elLine, jsp notEmpty
+    lac addr2
+    SKIP_NEXT_IF_SAME [ADDR_NONE]
+    jmp elLnS
+    lac i [inGlobal:0]      // in g, dot itself
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elLnG
+    lac DOT
+    SKIP_NEXT_IF_DIFFERENT DOL
+    jmp elEof
+    add [1]
+    jmp elLnA
+elLnG, lac DOT
+elLnA, dac addr1
+    dac addr2
+elLnS, jsp setDot
+    jsp nonZero
+    lac seenSemi
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elLnT
+    lac addr2
+    dac addr1
+elLnT, jmp exPrint1
+elEof, lac [mAtEof:MSG_BANK]
+    jmp exErr
+// a +cmd's end, 3.7's EOF in commands(1,1): an address given sets dot and
+// nothing is printed
+elPEof, dzm pcEof
+    lac addr2
+    SKIP_NEXT_IF_DIFFERENT [ADDR_NONE]
+    jmp elPE1
+    dac DOT
+elPE1, jsp pcLine
+    jmp exNext
+
+// a word: k and z take none; the rest are found in cmdTab
+elAlpha, lac elC
+    SKIP_NEXT_IF_DIFFERENT ['k']
+    jmp cMarkK
+    SKIP_NEXT_IF_DIFFERENT ['z']
+    jmp cZ
+    SKIP_NEXT_IF_DIFFERENT ['P']
+    law 'p'                 // P is p
+    dac elK                 // the first letter, as the names have it
+    lac cbPos
+    sub [1]
+    dac elS                 // the word's place in CMDBUF
+    lac [cmdTab:EX_BANK]
+    dac elE
+elLoop, lac i elE
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elMiss
+    dac elF                 // the letters a match needs
+    lac elE
+    add [2]
+    dac elP
+    lac i elP
+    dac pkStr
+    dzm elN
+// the needed letters: the first as elK, the rest as typed
+elNeed, lac elN
+    SKIP_NEXT_IF_DIFFERENT elF
+    jmp elHit
+    lio elN
+    jsp pkChr
+    dac elC
+    lac elN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp elTyp
+    lac elK
+    jmp elCmp
+elTyp, lac elS
+    add elN
+    add [CMDBUF]
+    dac elP
+    lac i elP
+elCmp, SKIP_NEXT_IF_SAME elC
+    jmp elNx
+    idx elN
+    jmp elNeed
+elNx, lac elE
+    add [CT_WORDS]
+    dac elE
+    jmp elLoop
+// found: as 3.7's tailprim, the name's further letters as far as typed
+elHit, jsp pkUnp
+    lac elS
+    add elF
+    dac cbPos
+elMore, lio elN
+    jsp pkChr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elTail
+    dac elC
+    lac cbPos
+    add [CMDBUF]
+    dac elP
+    lac i elP
+    SKIP_NEXT_IF_SAME elC
+    jmp elTail
+    idx cbPos
+    idx elN
+    jmp elMore
+// a letter after it makes another word, except d's l and p, and s's g, c
+// and r
+elTail, lac cbPos
+    add [CMDBUF]
+    dac elP
+    lio i elP
+    jsp isAlpha
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elGo
+    lac elK
+    SKIP_NEXT_IF_DIFFERENT ['s']
+    jmp elSub
+    SKIP_NEXT_IF_SAME ['d']
+    jmp elNot
+    lac i elP
+    SKIP_NEXT_IF_DIFFERENT ['l']
+    jmp elGo
+    SKIP_NEXT_IF_DIFFERENT ['p']
+    jmp elGo
+// not a command: the name's letters matched, then the letters typed after
+elNot, dzm elI
+elNotL, lac elI
+    SKIP_NEXT_IF_DIFFERENT elN
+    jmp elNotE
+    lio elI
+    jsp pkChr
+    lia
+    lac elI
+    add [tcommand:EX_BANK]
+    dac elP
+    dio i elP
+    idx elI
+    jmp elNotL
+elMiss, lac elS             // no entry: the word as typed
+    dac cbPos
+    dzm elI
+elNotE, lac elI
+    sub [CMDNAME_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp elNotM
+    lac cbPos
+    add [CMDBUF]
+    dac elP
+    lio i elP
+    jsp isAlpha
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp elNotM
+    lac elI
+    add [tcommand:EX_BANK]
+    dac elC
+    lac i elP
+    dac i elC
+    idx cbPos
+    idx elI
+    jmp elNotE
+elNotM, lac elI
+    add [tcommand:EX_BANK]
+    dac elC
+    dzm i elC
+    lac [tcommand:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mNotCmd:MSG_BANK]
+    jmp exErr
+elSub, lac i elP
+    SKIP_NEXT_IF_DIFFERENT ['g']
+    jmp elGo
+    SKIP_NEXT_IF_DIFFERENT ['c']
+    jmp elGo
+    SKIP_NEXT_IF_DIFFERENT ['r']
+    jmp elGo
+    jmp elNot
+elGo, lac elE
+    add [1]
+    dac elP
+    lac i elP
+    dac elP
+    jmp i elP
+
+// exErr -- 3.7's error: the bell when errorbells is set on a dumb terminal
+// (3.7's dingdong, where a VT100's standout serves instead), the message
+// whose full address is in AC, a new line; the rest of the line dropped, g
+// ended, and the loop started again. Reached by jmp from any routine of ex.
+exErr, dac erM
+    jsp resetFlav
+    lac oErrBells
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp erNb
+    lac oTerm
+    SKIP_NEXT_IF_DIFFERENT [TERM_DUMB]
+    jsp i [ringBell:TERM_BANK]
+erNb, lio erM
+    jsp i [msgPut:MSG_BANK]
+    jsp i [newline:TERM_BANK]
+    lac i [inGlobal:0]      // undo as g's end leaves it
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [glFix:RE_BANK]
+    dzm i [inGlobal:0]
+    dzm i [rnDepth:RE_BANK] // and no command list goes on
+    dzm i [tlCtlD:TERM_BANK]
+    dzm i [soOn:FILE_BANK]  // an error ends a source file's commands
+    dzm pcEof               //   and a +cmd's
+    dzm i [kyMacP:TERM_BANK] // and a map's keys, as 3.7's error clears vmacp
+    lac cbEnd
+    dac cbPos
+    law 1
+    dac endline
+    lac i [viOn:VI_BANK]    // in visual mode, back to it (vmain.ac)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [viErr:VI_BANK]
+    jmp exLoop
+
+// exBrk -- where tmErr leads (termio.ac): a lost caller's changed buffer is
+// saved and vi starts again for the next (fiLost); a break is 3.7's
+// onintr: the key echoed as the terminal would, then Interrupt as an error.
+exBrk, SKIP_NEXT_IF_AC_NOT_ZERO     // ERR_LOST is 0
+    jmp i [fiLost:FILE_BANK]
+    lac i [brkKey:TERM_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ebMsg
+    dac ebK
+    lio [CH_CARET]
+    jsp i [putc:TERM_BANK]
+    lac ebK
+    xor [0100]
+    lia
+    jsp i [putc:TERM_BANK]
+ebMsg, lac [mIntr:MSG_BANK]
+    jmp exErr
+
+// getAch -- the next character of the input, reading a line when the last
+// is used up. AC is the character; IO is clobbered.
+getAch, dac gaX
+gaTop, lac cbPos
+    sub cbEnd
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gaRead
+    lac cbPos
+    add [CMDBUF]
+    dac gaP
+    idx cbPos
+    lac i gaP
+    jmp i gaX
+gaRead, lac [CMDBUF]
+    dac i [tlBuf:TERM_BANK]
+    law CMD_SIZE
+    dac i [tlMax:TERM_BANK]
+    dzm cbPos
+    dzm cbEnd
+    lac i [soOn:FILE_BANK]  // a source file's line, else one typed
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gaSrc
+    jsp i [tmLine:TERM_BANK]
+gaGot, dac gaT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gaLong
+    lac i [tlLen:TERM_BANK]
+    dac cbEnd
+    add [CMDBUF]
+    dac gaP
+    lac gaT
+    dac i gaP
+    idx gaP
+    dzm i gaP
+    idx cbEnd
+    jmp gaTop
+gaSrc, jsp i [soLine:FILE_BANK]
+    jmp gaGot
+gaLong, lac [mInLong:MSG_BANK]
+    jmp exErr
+
+// getCd -- 3.7's getcd: a character, ^D included; while beautify is set, a
+// control character other than TAB, LF and FF is dropped.
+// AC is the character; IO is clobbered.
+getCd, dac gdX
+gdC, jsp getAch
+    dac gdOk
+    lac oBeautify
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gdRet
+    lac gdOk
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLD]
+    jmp gdRet
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp gdRet
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp gdRet
+    SKIP_NEXT_IF_DIFFERENT [CH_FF]
+    jmp gdRet
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp gdC
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp gdC
+gdRet, lac gdOk
+    jmp i gdX
+
+// getChar -- 3.7's getchar: a character, a ^D passed over.
+// AC is the character; IO is clobbered.
+getChar, dac ghX
+ghL, jsp getCd
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLD]
+    jmp ghL
+    jmp i ghX
+
+// peekChar, peekCd -- the next character, left to be read again.
+// AC is the character; IO is clobbered.
+peekChar, dac pkX
+    jsp getChar
+    dac pkC
+    jsp unGetChar
+    lac pkC
+    jmp i pkX
+peekCd, dac pdX
+    jsp getCd
+    dac pkC
+    jsp unGetChar
+    lac pkC
+    jmp i pdX
+
+// ignChar -- a character passed over. AC and IO are clobbered.
+ignChar, dac igX
+    jsp getChar
+    jmp i igX
+
+// unGetChar -- the last character read, to be read again. AC is clobbered,
+// IO preserved.
+unGetChar, dac ugX
+    lac cbPos
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac cbPos
+    jmp i ugX
+
+// isWhite, isAlpha, isDigit, isAlnum, isLower -- whether the character in IO
+// is a blank or TAB, a letter, a digit, either, a small letter.
+// AC is 1 or 0; IO is preserved.
+isWhite, dac iwX
+    dio icC
+    lac icC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp icYes
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp icYes
+    cla
+    jmp i iwX
+isAlpha, dac iwX
+    dio icC
+    lac icC
+    and [0137]              // a small letter as a capital
+    sub ['A']
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp icNo
+    sub ['Z'-'A'+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp icNo
+    lac icC                 // and 0100 to 0137 or 0140 to 0177 only
+    and [0100]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp icNo
+    law 1
+    jmp i iwX
+isDigit, dac iwX
+    dio icC
+    lac icC
+    sub ['0']
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp icNo
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp icNo
+icYes, law 1
+    jmp i iwX
+icNo, cla
+    jmp i iwX
+isAlnum, dac iaX
+    jsp isAlpha
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp isDigit
+    jmp i iaX
+isLower, dac iaX
+    dio icC
+    lac icC
+    sub ['a']
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ilNo
+    sub ['z'-'a'+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ilNo
+    law 1
+    jmp i iaX
+ilNo, cla
+    jmp i iaX
+
+// skipWh -- 3.7's skipwh: blanks passed over. AC is how many; IO is
+// clobbered.
+skipWh, dac swX
+    dzm swN
+swL, jsp peekChar
+    lia
+    jsp isWhite
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp swE
+    jsp ignChar
+    idx swN
+    jmp swL
+swE, lac swN
+    jmp i swX
+
+// pastWh -- blanks passed over. AC and IO are clobbered.
+pastWh, dac pwX
+    jsp skipWh
+    jmp i pwX
+
+// endCmd -- 3.7's endcmd: whether the character in IO ends a command: LF
+// or a command list's CH_EOF (endline set), | or " (endline clear). AC is 1
+// or 0; IO is preserved.
+endCmd, dac ecX
+    dio ecC
+    lac ecC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp ecLine
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp ecLine
+    SKIP_NEXT_IF_DIFFERENT [CH_VBAR]
+    jmp ecMid
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp ecMid
+    cla
+    jmp i ecX
+ecLine, lac pcEof
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ecPc
+    law 1
+    dac endline
+    jmp i ecX
+ecPc, dzm pcEof             // a +cmd's end
+    jsp pcLine
+    law 1
+    jmp i ecX
+ecMid, dzm endline
+    law 1
+    jmp i ecX
+
+// pcLine -- after a +cmd's end (files.ac's fiInject): the line ended,
+// endline set, unless the rest of the typed line follows. AC is clobbered,
+// IO preserved.
+pcLine, dac pcX
+    dzm endline
+    lac pcRest
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx endline
+    jmp i pcX
+
+// skipEnd -- 3.7's skipend: blanks passed over, and whether the command
+// ends there, a " not counting. AC is 1 or 0; IO is clobbered.
+skipEnd, dac skX
+    jsp pastWh
+    jsp peekChar
+    dac skC
+    lia
+    jsp endCmd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i skX
+    lac skC
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    cla
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    jmp i skX
+
+// eol -- 3.7's eol: the command must end here; its end taken, a comment
+// passed over; a command list's CH_EOF left for the dispatch.
+// AC and IO are clobbered.
+eol, dac eoX
+    jsp skipEnd
+    SKIP_NEXT_IF_AC_ZERO
+    jmp eoEnd
+    lac [mExtra:MSG_BANK]
+    jmp exErr
+eoEnd, jsp getChar
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jsp comment
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jsp unGetChar
+    jmp i eoX
+
+// newLine -- 3.7's newline: the trailing flags and offsets, # p l + - ^,
+// then the command's end, a command list's CH_EOF left for the dispatch.
+// AC and IO are clobbered.
+newLine, dac nlX
+    jsp resetFlav
+nlL, jsp getChar
+    dac nlC
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp nlDn
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp nlDn
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp nlUp
+    SKIP_NEXT_IF_DIFFERENT ['l']
+    jmp nlList
+    SKIP_NEXT_IF_DIFFERENT [CH_HASH]
+    jmp nlNum
+    SKIP_NEXT_IF_DIFFERENT ['p']
+    jmp nlPr
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp nlL
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp nlL
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp nlCmt
+    lio nlC
+    jsp endCmd
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nlEnd
+    lac [cmdName:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mExtraCmd:MSG_BANK]
+    jmp exErr
+nlDn, lac poffset
+    sub [1]
+    dac poffset
+    jmp nlFl
+nlUp, idx poffset
+    jmp nlFl
+nlList, idx listf
+    jmp nlFl
+nlNum, idx nflag
+    jmp nlFl
+nlPr, dzm listf
+nlFl, idx pflag
+    jmp nlL
+nlCmt, jsp comment
+nlEnd, lac nlC
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jsp unGetChar
+    jsp setFlav
+    jmp i nlX
+
+// exclam -- 3.7's exclam: a ! taken if it is next. AC is 1 or 0; IO is
+// clobbered.
+exclam, dac xcX
+    jsp peekChar
+    SKIP_NEXT_IF_SAME [CH_EXCL]
+    jmp xcNo
+    jsp ignChar
+    law 1
+    jmp i xcX
+xcNo, cla
+    jmp i xcX
+
+// cmdReg -- 3.7's cmdreg: a register's letter, after at least one blank.
+// AC is the letter, or 0; IO is clobbered.
+cmdReg, dac crX
+    jsp skipWh
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp crNo
+    jsp peekChar
+    lia
+    jsp isAlpha
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i crX
+    jsp getChar
+    jmp i crX
+crNo, cla
+    jmp i crX
+
+// comment -- the rest of the line passed over, its LF too.
+// AC and IO are clobbered.
+comment, dac cmX
+cmL, jsp getChar
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp cmL
+    jmp i cmX
+
+// getNum -- 3.7's getnum: the digits next, as a number, held at COUNT_CAP
+// so that it cannot overflow. AC is the number; IO is clobbered.
+getNum, dac gnX
+    dzm gnN
+gnL, jsp peekCd
+    lia
+    jsp isDigit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gnEnd
+    jsp getChar
+    sub ['0']
+    dac gnD
+    lac gnN
+    sub [COUNT_CAP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gnL                 // held
+    lac gnN
+    ral 2s
+    add gnN
+    ral 1s
+    add gnD
+    dac gnN
+    jmp gnL
+gnEnd, lac gnN
+    jmp i gnX
+
+// resetFlav, setFlav -- 3.7's resetflav and setflav: no flags, then the
+// flavor of printing from the flags and the number and list options.
+// AC and IO are clobbered.
+resetFlav, dac rfX
+    dzm listf
+    dzm nflag
+    dzm pflag
+    dzm poffset
+    jsp setFlav
+    jmp i rfX
+setFlav, dac sfX
+    lac nflag
+    ior oNumber
+    dac numbf
+    lac listf
+    ior oList
+    dac listf
+    jmp i sfX
+
+// tailSpec -- 3.7's tailspec: the command's name, for a command that is a
+// character, is that character (in IO). AC is clobbered, IO preserved.
+tailSpec, dac tsX
+    dio cmdName
+    dzm cmdName+1
+    jmp i tsX
+
+// pkChr -- character IO, 0 the first, of the ascii string at the full
+// address in pkStr; 0 past its end. AC is the character; IO is preserved.
+pkChr, dac pkcX
+    dio pkcI
+    lac pkcI
+    rar 1s
+    and [0377]              // the word
+    add pkStr
+    dac pkcW
+    lac pkcI
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pkcLo
+    lac i pkcW
+    rar 9s
+    and [0177]
+    jmp i pkcX
+pkcLo, lac i pkcW
+    and [0177]
+    jmp i pkcX
+
+// pkCmp -- whether the ascii string at pkStr is the string at the full
+// address in cwStr, a character a word ending in 0. AC is 1 or 0; IO is
+// clobbered.
+pkCmp, dac pmX
+    dzm pmK
+    lac cwStr
+    dac pmC
+pmL, lio pmK
+    jsp pkChr
+    SKIP_NEXT_IF_SAME i pmC
+    jmp pmNo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pmYes
+    idx pmK
+    idx pmC
+    jmp pmL
+pmYes, law 1
+    jmp i pmX
+pmNo, cla
+    jmp i pmX
+
+// pkUnp -- the ascii string at pkStr into cmdName, a character a word: the
+// command's name for its messages. AC and IO are clobbered.
+pkUnp, dac puX
+    dzm puK
+    lac [cmdName:EX_BANK]
+    dac puP
+puL, lio puK
+    jsp pkChr
+    dac i puP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i puX
+    idx puK
+    idx puP
+    jmp puL
+
+ugX, 0
+gaX, 0
+gaP, 0
+gaT, 0
+gdX, 0
+gdOk, 0
+ghX, 0
+pkX, 0
+pkC, 0
+pdX, 0
+igX, 0
+iwX, 0
+iaX, 0
+icC, 0
+swX, 0
+swN, 0
+pwX, 0
+ecX, 0
+ecC, 0
+pcX, 0
+skX, 0
+skC, 0
+eoX, 0
+nlX, 0
+nlC, 0
+xcX, 0
+crX, 0
+cmX, 0
+gnX, 0
+gnN, 0
+gnD, 0
+rfX, 0
+sfX, 0
+tsX, 0
+pkcX, 0
+pkcI, 0
+pkcW, 0
+pmX, 0
+pmK, 0
+pmC, 0
+puX, 0
+puK, 0
+puP, 0
+erM, 0
+ebK, 0
+elC, 0
+elP, 0
+elS, 0
+elF, 0
+elE, 0
+elK, 0
+elN, 0
+elI, 0
+endloc
+
+// ex's state.
+addr1, 0                    // the command's lines; ADDR_NONE when not given
+addr2, 0
+given, 0                    // how many addresses were given
+seenSemi, 0                 // an address was ended by ;
+pflag, 0                    // print dot after the command
+poffset, 0                  //   at this offset
+listf, 0                    // print in list's form
+nflag, 0                    // print numbered: a flag's
+numbf, 0                    // print numbered: the flag's or the option's
+endline, 0                  // the last command ended its line
+hadpr, 0                    // the prompt was typed for this command
+lchng, 0                    // chng when the last command started
+shudclob, 0                 // 3.7's: the next line printed may cover the prompt
+cbPos, 0                    // CMDBUF: the next character
+cbEnd, 0                    //   the characters read, the LF included
+pcEof, 0                    // the next LF ends a +cmd, 3.7's EOF (fiInject)
+pcRest, 0                   //   and the rest of the typed line follows it
+pkStr, 0                    // pkChr's string: a full address
+cwStr, 0                    // pkCmp's other string: a full address
+cmdName,                    // the command's name, a character a word
+    table CMDNAME_MAX+1, 0
+tcommand,                   // a name that is not a command's, for its message
+    table CMDNAME_MAX+1, 0
+
+// The commands with names: the letters a match needs, the command, the
+// name. An entry needing two letters comes before its letter's others.
+cmdTab,
+    2
+    cAbbr:TERM_BANK
+    nmAbbr:MSG_BANK
+    2
+    cArgs:FILE_BANK
+    nmArgs:FILE_BANK
+    1
+    cAppend:EX_BANK
+    nmAppend:EX_BANK
+    2
+    cCopy:EX_BANK
+    nmCopy:EX_BANK
+    1
+    cChange:EX_BANK
+    nmChange:EX_BANK
+    1
+    cDelete:EX_BANK
+    nmDelete:EX_BANK
+    2
+    cEdit:FILE_BANK
+    nmEx:FILE_BANK
+    1
+    cEdit:FILE_BANK
+    nmEdit:FILE_BANK
+    6                       // in full, and before f, which f takes
+    cFormat:FILE_BANK
+    nmFormat:FILE_BANK
+    1
+    cFile:FILE_BANK
+    nmFile:FILE_BANK
+    1
+    cGlobal:RE_BANK
+    nmGlobal:RE_BANK
+    1
+    cInsert:EX_BANK
+    nmInsert:EX_BANK
+    1
+    cJoin:EX_BANK
+    nmJoin:EX_BANK
+    1
+    cList:EX_BANK
+    nmList:EX_BANK
+    3
+    cMap:TERM_BANK
+    nmMap:MSG_BANK
+    2
+    cMark:EX_BANK
+    nmMark:EX_BANK
+    1
+    cMove:EX_BANK
+    nmMove:EX_BANK
+    2
+    cNumber:EX_BANK
+    nmNumber:EX_BANK
+    1
+    cNext:FILE_BANK
+    nmNext:FILE_BANK
+    2
+    cPut:EX_BANK
+    nmPut:EX_BANK
+    1
+    cPrint:EX_BANK
+    nmPrint:EX_BANK
+    1
+    cQuit:EX_BANK
+    nmQuit:EX_BANK
+    3
+    cRecover:FILE_BANK
+    nmRecover:FILE_BANK
+    3
+    cRewind:FILE_BANK
+    nmRewind:FILE_BANK
+    1
+    cRead:FILE_BANK
+    nmRead:FILE_BANK
+    2
+    cSet:EX_BANK
+    nmSet:EX_BANK
+    2
+    cSource:FILE_BANK
+    nmSource:FILE_BANK
+    1
+    cSubst:RE_BANK
+    nmSubst:RE_BANK
+    2
+    cTag:RE_BANK
+    nmTag:RE_BANK
+    1
+    cCopy:EX_BANK
+    nmT:EX_BANK
+    3
+    cUnabbr:TERM_BANK
+    nmUnabbr:MSG_BANK
+    3
+    cUnmap:TERM_BANK
+    nmUnmap:MSG_BANK
+    1
+    cUndo:EX_BANK
+    nmUndo:EX_BANK
+    2
+    cVersion:EX_BANK
+    nmVersion:EX_BANK
+    2
+    cVisual:VI_BANK
+    nmVisual:VI_BANK
+    1
+    cVglob:RE_BANK
+    nmV:RE_BANK
+    2
+    cWq:EX_BANK
+    nmWq:EX_BANK
+    1
+    cWrite:EX_BANK
+    nmWrite:EX_BANK
+    1
+    cXit:EX_BANK
+    nmXit:EX_BANK
+    1
+    cYank:EX_BANK
+    nmYank:EX_BANK
+    0
+
+nmAppend,  ascii "append"
+nmCopy,    ascii "copy"
+nmChange,  ascii "change"
+nmDelete,  ascii "delete"
+nmInsert,  ascii "insert"
+nmJoin,    ascii "join"
+nmList,    ascii "list"
+nmMark,    ascii "mark"
+nmMove,    ascii "move"
+nmNumber,  ascii "number"
+nmPut,     ascii "put"
+nmPrint,   ascii "print"
+nmQuit,    ascii "quit"
+nmSet,     ascii "set"
+nmT,       ascii "t"
+nmUndo,    ascii "undo"
+nmVersion, ascii "version"
+nmWq,      ascii "wq"
+nmWrite,   ascii "write"
+nmXit,     ascii "xit"
+nmYank,    ascii "yank"
+

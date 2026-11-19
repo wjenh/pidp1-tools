@@ -1,0 +1,1257 @@
+// keys.ac -- vi's keys: the next key, with ESC and the
+// arrow keys told apart by time. An arrow is ESC, then [ or O,
+// then A to D, each key taken from DCS2 within ESC_MS of the one before; any
+// other ESC is a lone ESC, the keys after it left in the ring. The times
+// are the milliseconds termio.ac's brkChk took each key with, so a whole
+// arrow that arrived while vi was busy is still told from an ESC typed and
+// a key typed later. When the key looked for has not come yet, the rest of
+// the gap is waited out with the BBN clock's countdown (cct), taking keys
+// as they come.
+//
+// Then the maps and abbreviations: the keys a map or an
+// abbreviation puts in, read before those typed (kyNext); the matching of
+// :map's, :map!'s and :ab's tables; and those four commands with :unmap
+// and :una, which ex's dispatch reaches here for the room.
+//
+// The gaps of the last ESC sequence are kept for the tests:
+// kyGap1 from the ESC to the next key, kyGap2 from that to the third, in
+// milliseconds, -1 when that key did not come in time; kyGapMx the largest
+// gap of any arrow taken.
+//
+// Entered by jsp with the extend window open, returning by jmp i. In bank
+// TERM_BANK, after termio.ac, whose ring (taCnt, taHd, TA_BUF, TA_TIME),
+// getc, pollc and brkChk it uses. Needs vi.ah, <AIDS/skipmacros.ah> and
+// <CLOCK/clockdefs.ah>.
+
+local kgX, kgK, kgT, kgI, kgRet, kg2, kgArr, kpX, kpWait, kpNone, kpHave, \
+    kpPos, kpK, kpT, kpGap, kpLate, kpIn, kpEl, kpMs, kinX, kinP, kinL, \
+    knX, knEnd, knTyp, kwX, kyFast, kfX, kfT, kfT2, kfEver, kfYes, kyMap, \
+    kmX, kmC, kmBn, kmTab, kmE, kmEnt, kmP, kmQ, kmCh, kmCmp, kmNx, kmHit, \
+    kmFail, kmMore, kmmX, kmT, kmBack, kbX, kpuX, kuS, kuN, kuR, \
+    kuR0, kuD, kuF, kuT, kuK, kuBk, kuFwd, kuFw, kuNone, kuSt, kuSL, kuE, \
+    kuLong, kyLen, klX, klP, klN, klL, klE, kyEq, kyEqN, kqX, kqA, kqB, kqN, \
+    kqL, kqNL, kqNE, kqNo, kqY, kcX, kcOp, kcHop, kcL, kcC, kcBk, kcR, kcE, \
+    kcHops, ksX, ksL, ksE, kmoX, kaX, kaC, kaA, kaP, kaT, kaK, kaL, kaL1, \
+    kaE, kaN, kaW, kaH, kaNx, kaNx2, kaHit, kaNo, kyWch, kwcX, kwcC, kwcY, \
+    knClr, kaGo, kaBuf, \
+    kspX, kspC, kspY, kspN, kxUn, cxAb, cxMp, cxIm, cxGo, kxTab, cxLhs, kxN, \
+    cxLL, kxC, cxLQ, cxLE, cxLEnd, cxLPut, cxNoR, cxNoL, cxUn, kxP, cxRL, \
+    cxRQ, cxRPut, cxREnd, kxDn, cxAdd, kxRn, kxLn, cxTI, cxDg, cxTail, \
+    cxDang, cxLok, cxFind, kxZer, cxSl, kxSlot, cxUz, cxMany, cxText, \
+    cxCopy, cxNotM, cxLZ, kxZ, kxFX, cfL, cfCap, cfNx, kxCX, kxS, cxCL, \
+    kyList, kxLX, klsL, klsN, klsP, kyLstr, kxSX, kxS2, klsC, klsCt, klsO, \
+    kyMsN, kyTyped
+
+// kyGet -- the next key typed, waiting for one; an arrow is KY_UP, KY_DOWN,
+// KY_RIGHT or KY_LEFT. IO is the key; AC is clobbered.
+kyGet, dac kgX
+    jsp getc
+    dio kgK
+    lac kgK
+    SKIP_NEXT_IF_SAME [CH_ESC]
+    jmp kgRet
+    lac kyTime
+    dac kgT
+    lac [ESC_MS+1]
+    dac kpMs
+    lac [0777776]             // -1: not yet measured
+    dac kyGap1
+    dac kyGap2
+// the second key: [ or O, in time
+    dzm kgI
+    jsp kyPeek
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kgRet               // a lone ESC
+    lac kpGap
+    dac kyGap1
+    lac kpK
+    SKIP_NEXT_IF_DIFFERENT [CH_LBRK]
+    jmp kg2
+    SKIP_NEXT_IF_SAME ['O']
+    jmp kgRet
+// the third: A to D, in time after the second
+kg2, lac kpT
+    dac kgT
+    law 1
+    dac kgI
+    jsp kyPeek
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kgRet
+    lac kpGap
+    dac kyGap2
+    lac kpK
+    sub ['A']
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp kgRet
+    sub [4]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kgRet
+// an arrow: its two keys taken, the gaps kept
+kgArr, jsp pollc
+    jsp pollc
+    lac kyGap1              // a gap past the largest becomes it
+    sub kyGapMx
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp .+3
+    lac kyGap1
+    dac kyGapMx
+    lac kyGap2
+    sub kyGapMx
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp .+3
+    lac kyGap2
+    dac kyGapMx
+    lac kpK
+    sub ['A'-KY_UP]
+    lia
+    jmp i kgX
+kgRet, lio kgK
+    jmp i kgX
+
+// kyPeek -- the key kgI places after the oldest in the ring (0 or 1), taken
+// from DCS2 less than kpMs milliseconds after the millisecond kgT (ESC_MS+1
+// for an arrow, MAP_MS+1 for a map), waiting for it as long as that allows.
+// It stays in the ring.
+// AC is 1 with the key in kpK, its millisecond in kpT and the gap in kpGap,
+// or 0 when it did not come in time (kpGap the gap if it came late, else
+// -1); IO is clobbered.
+kyPeek, dac kpX
+    lac [0777776]
+    dac kpGap
+    jsp brkChk
+    lac taCnt
+    sub kgI
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp kpHave
+// not there: the rest of the gap, if any, on the countdown
+    rck
+    lai
+    sub kgT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    add [CLK_WRAP]
+    dac kpEl
+    sub kpMs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kpNone              // the gap is over
+    cma                     // the milliseconds left, at least 1
+    and [cctcnt]
+    cct
+kpWait, jsp brkChk
+    lac taCnt
+    sub kgI
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp kpHave
+    cks
+    lai
+    and [cctcks]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kpWait
+    jsp brkChk              // once more, as the countdown ends
+    lac taCnt
+    sub kgI
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp kpHave
+kpNone, cla
+    jmp i kpX
+// there: its key and time, and whether it came in time
+kpHave, lac taHd
+    add kgI
+    dac kpPos
+    sub [TA_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    dac kpPos               // round the ring's end
+    lac kpPos
+    add [TA_BUF]
+    dac kpIn
+    lac i kpIn
+    dac kpK
+    lac kpPos
+    add [TA_TIME]
+    dac kpIn
+    lac i kpIn
+    dac kpT
+    sub kgT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    add [CLK_WRAP]
+    dac kpGap
+    sub kpMs
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kpNone              // late: a key of its own
+kpLate, law 1
+    jmp i kpX
+
+// --- maps and abbreviations, after 3.7's map,
+// macpush and fastpeekkey (ex_vget.c), mapcmd and addmac (ex_cmdsub.c) and
+// vgetline's abbreviations (ex_vops2.c). A table (mpArr, mpIm, mpAb) has
+// MAP_N entries of MAP_W words: the left side's full address, 0 when the
+// entry was unmapped; the right side's, 0 past the last entry ever used;
+// the name a listing shows. Their text is in bank 10 from MAP_TEXT, a
+// character a word, never reclaimed, as 3.7's mapspace. The keys a map or
+// an abbreviation puts in wait in bank 10's MAC_BUF from kyMacP (3.7's
+// vmacp), 0 when none.
+
+// kyInit -- no maps, no abbreviations, no keys of a map waiting: a new
+// caller's (vi.am1's restart). AC and IO are clobbered.
+kyInit, dac kinX
+    lac [mpArr:TERM_BANK]
+    dac kinP
+kinL, dzm i kinP
+    idx kinP
+    sub [mpEnd:TERM_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kinL
+    lac [MAP_TEXT]
+    dac kyMsN
+    dzm kyMacP
+    dzm kyTyped
+    jmp i kinX
+
+// kyNext -- vi's next key after a key put back and the keys . replays
+// (vmain.ac's vGetKey): a map's keys first, else kyGet's, kyTyped saying
+// which; before a key typed, AB_HAD cleared. IO is the key; AC is
+// clobbered.
+kyNext, dac knX
+    lac kyMacP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp knTyp
+    lac i kyMacP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp knEnd
+    lia
+    idx kyMacP
+    dzm kyTyped
+    jmp i knX
+knEnd, dzm kyMacP           // a map's keys used up
+knTyp, lac [AB_HAD]         // a key typed: every abbreviation may expand
+    dac kinP
+knClr, dzm i kinP
+    idx kinP
+    sub [AB_HAD+MAP_N]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp knClr
+    jsp kyGet
+    law 1
+    dac kyTyped
+    jmp i knX
+
+// kyMacW -- whether a map's keys wait. AC is 1 or 0; IO is preserved.
+kyMacW, dac kwX
+    lac kyMacP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i kwX
+    lac i kyMacP
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    jmp i kwX
+
+// kyFast -- 3.7's fastpeekkey, or its peekkey when the map's first key
+// (kmC) is #: whether a next key comes in time. One put back, replayed or a
+// map's comes at once; one typed counts when it is taken from DCS2 within
+// MAP_MS of the key before, if that was typed, else of now; it is waited
+// for that long, or for ever under notimeout. It is not taken.
+// AC is 1 or 0; IO is clobbered.
+kyFast, dac kfX
+    lac i [vPeek:VI_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kfYes
+    lac i [vGlob:VI_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kfYes
+    jsp kyMacW
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kfYes
+    lac kmC
+    SKIP_NEXT_IF_DIFFERENT [CH_HASH]
+    jmp kfEver
+    lac i [oTimeout:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kfEver
+    lac kyTyped
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kfT
+    jsp brkChk              // after a map's key, one already typed counts
+    lac taCnt
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kfYes
+    rck
+    lai
+    jmp kfT2
+kfT, lac kyTime
+kfT2, dac kgT
+    dzm kgI
+    lac [MAP_MS+1]
+    dac kpMs
+    jsp kyPeek
+    jmp i kfX
+kfEver, jsp brkChk
+    lac taCnt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kfEver
+kfYes, law 1
+    jmp i kfX
+
+// kyMap -- 3.7's map: the key in IO matched against the left sides of the
+// table at the full address kmTab, taking the further keys a left side
+// needs as kyFast lets them come. A match puts its right side before the
+// keys to come and gives its first key; without one, the keys taken after
+// the first are put back so, and the first is given. As 3.7, keys taken
+// for a longer left side that did not match are lost when a shorter one
+// later in the table matches. IO is the key; AC is clobbered.
+kyMap, dac kmX
+    dio kmC
+    lac kmC
+    dac kmB
+    law 1
+    dac kmBn
+    lac kmTab
+    dac kmE
+kmEnt, lac kmE
+    sub kmTab
+    sub [MAP_N*MAP_W]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kmFail
+    lac kmE
+    add [1]
+    dac kmP
+    lac i kmP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kmFail              // past the last entry used
+    lac i kmE
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kmNx                // unmapped
+    dac kmP
+    lac [kmB:TERM_BANK]
+    dac kmQ
+kmCh, lac i kmP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kmHit
+    lac kmQ                 // the keys taken used up: one more
+    sub [kmB:TERM_BANK]
+    SKIP_NEXT_IF_SAME kmBn
+    jmp kmCmp
+    jsp kmMore
+kmCmp, lac i kmQ
+    SKIP_NEXT_IF_SAME i kmP
+    jmp kmNx
+    idx kmP
+    idx kmQ
+    jmp kmCh
+kmNx, lac kmE
+    add [MAP_W]
+    dac kmE
+    jmp kmEnt
+kmHit, lac kmE
+    add [1]
+    dac kmP
+    lio i kmP
+    jsp kyPush
+    jsp i [vGetKey:VI_BANK]
+    jmp i kmX
+kmFail, jsp kmBack
+    lio kmC
+    jmp i kmX
+
+// kmMore -- the next key added to kmB if it comes in time; if not, kyMap
+// ends as when nothing matched. AC and IO are clobbered.
+kmMore, dac kmmX
+    jsp kyFast
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kmFail
+    jsp i [vGetKey:VI_BANK]
+    lac kmBn
+    add [kmB:TERM_BANK]
+    dac kmT
+    dio i kmT
+    idx kmBn
+    jmp i kmmX
+
+// kmBack -- the keys kyMap took after the first put back before the keys
+// to come. AC and IO are clobbered.
+kmBack, dac kbX
+    lac kmBn
+    add [kmB:TERM_BANK]
+    dac kmT
+    dzm i kmT
+    lio [kmB:TERM_BANK+1]
+    jsp kyPush
+    jmp i kbX
+
+// kyPush -- 3.7's macpush: the string at the full address in IO, a
+// character a word ending in 0, put before a map's keys still to come;
+// more than MAC_SIZE keys in all is Macro too long, an error of vi's.
+// AC and IO are clobbered.
+kyPush, dac kpuX
+    dio kuS
+    lac i kuS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i kpuX
+    lio kuS
+    jsp kyLen
+    dac kuN
+    lac kyMacP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kuR0
+    lio kyMacP
+    jsp kyLen
+kuR0, dac kuR               // the keys still to come
+    add kuN
+    sub [MAC_SIZE+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kuLong
+    lac kuN                 // they move to follow the string, their 0 too
+    add [MAC_BUF]
+    dac kuD
+    lac kyMacP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kuNone
+    sub kuD
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kuFwd
+    lac kyMacP              // to the right: from the end
+    add kuR
+    dac kuF
+    lac kuD
+    add kuR
+    dac kuT
+    lac kuR
+    add [1]
+    dac kuK
+kuBk, lac i kuF
+    dac i kuT
+    lac kuF
+    sub [1]
+    dac kuF
+    lac kuT
+    sub [1]
+    dac kuT
+    lac kuK
+    sub [1]
+    dac kuK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kuBk
+    jmp kuSt
+kuFwd, lac kyMacP           // to the left, or not at all: from the start
+    dac kuF
+    lac kuR
+    add [1]
+    dac kuK
+kuFw, lac i kuF
+    dac i kuD
+    idx kuF
+    idx kuD
+    lac kuK
+    sub [1]
+    dac kuK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kuFw
+    jmp kuSt
+kuNone, dzm i kuD
+kuSt, lac [MAC_BUF]
+    dac kuD
+kuSL, lac i kuS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kuE
+    dac i kuD
+    idx kuS
+    idx kuD
+    jmp kuSL
+kuE, lac [MAC_BUF]
+    dac kyMacP
+    jmp i kpuX
+kuLong, lac [mMacLong:MSG_BANK]
+    jmp i [vErr:VI_BANK]
+
+// kyLen -- the length of the string at the full address in IO, a character
+// a word ending in 0. AC is the length; IO is clobbered.
+kyLen, dac klX
+    dio klP
+    dzm klN
+klL, lac i klP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp klE
+    idx klP
+    idx klN
+    jmp klL
+klE, lac klN
+    jmp i klX
+
+// kyEq -- whether the strings at the full addresses kqA and kqB, a
+// character a word ending in 0, are the same. kyEqN -- whether the string
+// at kqA is the kqN characters at kqB. AC is 1 or 0; IO is clobbered, and
+// kqA, kqB and kqN.
+kyEq, dac kqX
+kqL, lac i kqA
+    SKIP_NEXT_IF_SAME i kqB
+    jmp kqNo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kqY
+    idx kqA
+    idx kqB
+    jmp kqL
+kyEqN, dac kqX
+kqNL, lac kqN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kqNE
+    lac i kqA
+    SKIP_NEXT_IF_SAME i kqB
+    jmp kqNo
+    idx kqA
+    idx kqB
+    lac kqN
+    sub [1]
+    dac kqN
+    jmp kqNL
+kqNE, lac i kqA
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kqY
+kqNo, cla
+    jmp i kqX
+kqY, law 1
+    jmp i kqX
+
+// kyCmd -- vi's command key in IO mapped as 3.7's command loop maps it
+// (ex_vmain.c): by :map's table, and again while remap is set and the key
+// changes; past MAP_HOPS times, Infinite macro loop. A key mapped into a
+// count's first digit (1 to 9) or a register's " is given back to be read
+// from the count again, as 3.7's goto looptop. AC is 0 with the key in IO,
+// or 1 with the key to be read again in IO.
+kyCmd, dac kcX
+    dio kcOp
+    dzm kcHop
+kcL, lac kcOp
+    dac kcC
+    lac [mpArr:TERM_BANK]
+    dac kmTab
+    lio kcC
+    jsp kyMap
+    dio kcOp
+    lac kcC
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp kcBk
+    sub [CH_0+1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp kcR
+    sub [0d9]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kcR
+kcBk, lio kcC
+    law 1
+    jmp i kcX
+kcR, lac i [oRemap:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kcE
+    idx kcHop
+    sub [MAP_HOPS+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kcHops
+    lac kcC
+    SKIP_NEXT_IF_SAME kcOp
+    jmp kcL
+kcE, lio kcOp
+    cla
+    jmp i kcX
+kcHops, lac [mInfLoop:MSG_BANK]
+    jmp i [vErr:VI_BANK]
+
+// kyIns -- a key of insert mode in IO mapped as 3.7's vgetline maps it: by
+// :map!'s table, and again while remap is set and the key changes. IO is
+// the key; AC is clobbered.
+kyIns, dac ksX
+    dio kcC
+    dzm kcHop
+ksL, lac [mpIm:TERM_BANK]
+    dac kmTab
+    lio kcC
+    jsp kyMap
+    dio kcOp
+    lac kcOp
+    SKIP_NEXT_IF_DIFFERENT kcC
+    jmp ksE
+    dac kcC
+    lac i [oRemap:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ksE
+    idx kcHop
+    sub [MAP_HOPS+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kcHops
+    jmp ksL
+ksE, lio kcC
+    jmp i ksX
+
+// kyMot -- an operator's motion key in IO mapped once by :map's table, as
+// 3.7's operate does. IO is the key; AC is clobbered.
+kyMot, dac kmoX
+    lac [mpArr:TERM_BANK]
+    dac kmTab
+    jsp kyMap
+    jmp i kmoX
+
+// kyAbbr, kyAbbC -- 3.7's word abbreviation (vgetline): the key in IO typed
+// in insert mode (kyAbbr: the typed text in GENBUF) or on vi's command line
+// (kyAbbC: in CMDBUF, as 3.7's vgetcmd reads it with vgetline), the text to
+// index kaGc, this insert's own from kaOg. When the key is not a word's and
+// the character before it is, the word before it, back to a blank or a
+// character of the other kind than the one before the last (3.7's wordof),
+// not before kaOg, is matched against the abbreviations; on a match the
+// right side, then the key, are put before the keys to come. AC is the
+// word's start, where the typing goes back to, or -1 when nothing was
+// abbreviated; IO is clobbered.
+kyAbbC, dac kaX
+    lac [CMDBUF]
+    jmp kaGo
+kyAbbr, dac kaX
+    lac [GENBUF]
+kaGo, dac kaBuf
+    dio kaC
+    lac mpAb+1              // 3.7's anyabbrs
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kaNo
+    lac kaGc
+    sub kaOg
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp kaA
+    jmp kaNo
+kaA, lio kaC
+    jsp kyWch
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kaNo
+    lac kaGc
+    add kaBuf
+    sub [1]
+    dac kaP
+    lio i kaP
+    jsp kyWch
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kaNo
+    lac kaP                 // the kind kept: the character's before the last
+    sub [1]
+    dac kaT
+    lio i kaT
+    jsp kyWch
+    dac kaK
+kaL, lac kaP
+    sub kaBuf
+    sub kaOg
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp kaL1
+    jmp kaE
+kaL1, lac kaP
+    sub [1]
+    dac kaT
+    lio i kaT
+    jsp kySp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kaE
+    lio i kaT
+    jsp kyWch
+    SKIP_NEXT_IF_SAME kaK
+    jmp kaE
+    lac kaT
+    dac kaP
+    jmp kaL
+kaE, lac kaGc
+    add kaBuf
+    sub kaP
+    dac kaN
+    lac [mpAb:TERM_BANK]
+    dac kaW
+    lac [AB_HAD]
+    dac kaH
+kaNx, lac kaW
+    sub [mpAb:TERM_BANK+MAP_N*MAP_W]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kaNo
+    lac kaW
+    add [1]
+    dac kaT
+    lac i kaT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kaNo
+    lac i kaH               // 3.7's hadthis: not again in its own expansion
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kaNx2
+    lac i kaW
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kaNx2
+    dac kqA
+    lac kaP
+    dac kqB
+    lac kaN
+    dac kqN
+    jsp kyEqN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kaHit
+kaNx2, idx kaH
+    lac kaW
+    add [MAP_W]
+    dac kaW
+    jmp kaNx
+kaHit, law 1
+    dac i kaH
+    lac kaC
+    dac kyAbK
+    dzm kyAbK+1
+    lio [kyAbK:TERM_BANK]
+    jsp kyPush
+    lac kaW
+    add [1]
+    dac kaT
+    lio i kaT
+    jsp kyPush
+    lac kaP
+    sub kaBuf
+    jmp i kaX
+kaNo, lac [0777776]
+    jmp i kaX
+
+// kyWch -- 3.7's wordch: whether the character in IO is a letter, a digit
+// or _. AC is 1 or 0; IO is preserved.
+kyWch, dac kwcX
+    dio kwcC
+    lac kwcC
+    SKIP_NEXT_IF_DIFFERENT [CH_USCORE]
+    jmp kwcY
+    lio kwcC
+    jsp i [isAlnum:EX_BANK]
+    lio kwcC
+    jmp i kwcX
+kwcY, law 1
+    jmp i kwcX
+
+// kySp -- C's isspace: whether the character in IO is a blank, TAB, LF,
+// VT, FF or CR. AC is 1 or 0; IO is clobbered.
+kySp, dac kspX
+    dio kspC
+    lac kspC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp kspY
+    sub [CH_TAB]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp kspN
+    sub [CH_CR-CH_TAB+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp kspN
+kspY, law 1
+    jmp i kspX
+kspN, cla
+    jmp i kspX
+
+// cAbbr, cUnabbr, cMap, cUnmap -- 3.7's mapcmd: ab[breviate], una[bbrev-
+// iate], map[!] and unm[ap][!], taking no address. With nothing after the
+// name, a listing (una and unm: Missing lhs); else the left side, ^V
+// quoting, to a blank (una and unm: to the command's end), then the right
+// side to the command's end. A map's left side #n is function key n,
+// shown as fn: a VT100's PF1 to PF4 send ESC O P to ESC O S. Reached by
+// jmp from ex's dispatch; ends at exNext.
+cAbbr, dzm kxUn
+    jmp cxAb
+cUnabbr, law 1
+    dac kxUn
+cxAb, jsp i [setNoAddr:EX_BANK]
+    lac [mpAb:TERM_BANK]
+    jmp cxGo
+cMap, dzm kxUn
+    jmp cxMp
+cUnmap, law 1
+    dac kxUn
+cxMp, jsp i [setNoAddr:EX_BANK]
+    jsp i [exclam:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxIm
+    lac [mpArr:TERM_BANK]
+    jmp cxGo
+cxIm, lac [mpIm:TERM_BANK]
+cxGo, dac kxTab
+    jsp i [skipEnd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxLhs
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_SAME [CH_EOF]
+    jsp i [ignChar:EX_BANK]
+    lac kxUn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxNoL
+    jsp kyList
+    jmp i [exNext:EX_BANK]
+// the left side
+cxLhs, jsp i [skipWh:EX_BANK]
+    dzm kxN
+cxLL, jsp i [getChar:EX_BANK]
+    dac kxC
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp cxLQ
+    lac kxUn                // a map's ends at a blank
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxLE
+    lac kxC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp cxLEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp cxLEnd
+cxLE, lio kxC
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxLPut
+    lac kxC
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp cxLPut
+    jsp i [unGetChar:EX_BANK]
+    lac kxUn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxNoR
+    jsp i [newLine:EX_BANK]
+    jsp cxLZ
+    jmp cxUn
+cxLQ, jsp i [getChar:EX_BANK]
+    dac kxC
+cxLPut, lac kxN
+    sub [MAP_SIDE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cxLL                // past 3.7's room: dropped
+    lac kxN
+    add [kmL:TERM_BANK]
+    dac kxP
+    lac kxC
+    dac i kxP
+    idx kxN
+    jmp cxLL
+// the right side
+cxLEnd, jsp cxLZ
+    jsp i [skipEnd:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxNoR
+    dzm kxN
+cxRL, jsp i [getChar:EX_BANK]
+    dac kxC
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp cxRQ
+    lio kxC
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxRPut
+    lac kxC
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp cxRPut
+    jsp i [unGetChar:EX_BANK]
+    jmp cxREnd
+cxRQ, jsp i [getChar:EX_BANK]
+    dac kxC
+cxRPut, lac kxN
+    sub [MAP_SIDE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cxRL
+    lac kxN
+    add [kmR:TERM_BANK]
+    dac kxP
+    lac kxC
+    dac i kxP
+    idx kxN
+    jmp cxRL
+cxREnd, lac kxN
+    add [kmR:TERM_BANK]
+    dac kxP
+    dzm i kxP
+    jsp i [newLine:EX_BANK]
+// #n: shown as fn, and on a VT100 or VT102 its key's sequence for n 1 to 4
+    lac [kmL:TERM_BANK]
+    dac kxDn
+    lac kmL
+    SKIP_NEXT_IF_SAME [CH_HASH]
+    jmp cxAdd
+    law 0146                // f
+    dac kmD
+    lac kmL+1
+    dac kmD+1
+    dzm kmD+2
+    lac [kmD:TERM_BANK]
+    dac kxDn
+    lac i [oTerm:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [TERM_DUMB]
+    jmp cxAdd
+    lac kmL+1
+    sub [CH_0+1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cxAdd
+    sub [4]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cxAdd
+    add [0124]              // 1 to 4 as P to S
+    dac kmL+2
+    law CH_ESC
+    dac kmL
+    law 0117                // O
+    dac kmL+1
+    dzm kmL+3
+// 3.7's addmac: :map refuses a one-key left side that its right side ends
+// with, and a left side of letters or starting with :; :map! and :ab a
+// right side ending with the left
+cxAdd, lio [kmR:TERM_BANK]
+    jsp kyLen
+    dac kxRn
+    lio [kmL:TERM_BANK]
+    jsp kyLen
+    dac kxLn
+    lac kxTab
+    SKIP_NEXT_IF_SAME [mpArr:TERM_BANK]
+    jmp cxTI
+    lac kmL+1
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxDg
+    lac kxRn
+    add [kmR:TERM_BANK-1]
+    dac kxP
+    lac i kxP
+    SKIP_NEXT_IF_DIFFERENT kmL
+    jmp cxTail
+cxDg, lac kmL
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    jmp cxDang
+    lac kmL+1
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxLok
+    lio kmL
+    jsp i [isAlpha:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxDang
+    jmp cxLok
+cxTI, lac kxRn
+    sub kxLn
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cxLok
+    add [kmR:TERM_BANK]
+    dac kqB
+    lac [kmL:TERM_BANK]
+    dac kqA
+    jsp kyEq
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxTail
+cxLok, lac kmL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxNoL
+    jsp cxFind
+    lac kxZer               // an unmapped entry, when none was found
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxSl
+    lac kxSlot
+    sub kxTab
+    sub [MAP_N*MAP_W]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cxUz
+    lac kxSlot
+    add [1]
+    dac kxP
+    lac i kxP
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxSl
+cxUz, lac kxZer
+    dac kxSlot
+cxSl, lac kxSlot
+    sub kxTab
+    sub [MAP_N*MAP_W]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cxMany
+// the text, charged as 3.7 does: both sides and the name shown with their
+// ends, even when an entry is used again
+    lio kxDn
+    jsp kyLen
+    add kxLn
+    add kxRn
+    add [3]
+    add kyMsN
+    sub [MAP_TEXT+MAP_CHARS+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cxText
+    lac kyMsN
+    dac i kxSlot
+    lio [kmL:TERM_BANK]
+    jsp cxCopy
+    lac kxSlot
+    add [1]
+    dac kxP
+    lac kyMsN
+    dac i kxP
+    lio [kmR:TERM_BANK]
+    jsp cxCopy
+    lac kxSlot
+    add [2]
+    dac kxP
+    lac kyMsN
+    dac i kxP
+    lio kxDn
+    jsp cxCopy
+    jmp i [exNext:EX_BANK]
+// unmap: the entry whose left or right side it is
+cxUn, lac kmL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxNoL
+    jsp cxFind
+    lac kxSlot
+    sub kxTab
+    sub [MAP_N*MAP_W]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cxNotM
+    lac i kxSlot
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cxNotM
+    dzm i kxSlot
+    lac kxSlot
+    add [2]
+    dac kxP
+    dzm i kxP
+    jmp i [exNext:EX_BANK]
+cxNoL, lac [mMissLhs:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+cxNoR, lac [mMissRhs:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+cxTail, lac [mTailRec:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+cxDang, lac [mDanger:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+cxNotM, lac [mNotMap:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+cxMany, lac [mTooMacs:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+cxText, lac [mMacText:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// cxLZ -- the left side ended with a 0 after kxN characters. AC is
+// clobbered.
+cxLZ, dac kxZ
+    lac kxN
+    add [kmL:TERM_BANK]
+    dac kxP
+    dzm i kxP
+    jmp i kxZ
+
+// cxFind -- addmac's search of the table kxTab for kmL as a left side or a
+// right side: kxSlot is the entry found, else the first never used, else
+// the table's end; kxZer the last unmapped entry before it, or 0. AC and
+// IO are clobbered.
+cxFind, dac kxFX
+    dzm kxZer
+    lac kxTab
+    dac kxSlot
+cfL, lac kxSlot
+    sub kxTab
+    sub [MAP_N*MAP_W]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i kxFX
+    lac kxSlot
+    add [1]
+    dac kxP
+    lac i kxP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i kxFX
+    lac i kxSlot
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cfCap
+    lac kxSlot
+    dac kxZer
+    jmp cfNx
+cfCap, dac kqA
+    lac [kmL:TERM_BANK]
+    dac kqB
+    jsp kyEq
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i kxFX
+    lac i kxP
+    dac kqA
+    lac [kmL:TERM_BANK]
+    dac kqB
+    jsp kyEq
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i kxFX
+cfNx, lac kxSlot
+    add [MAP_W]
+    dac kxSlot
+    jmp cfL
+
+// cxCopy -- the string at the full address in IO copied to kyMsN, which
+// moves past its 0. AC and IO are clobbered.
+cxCopy, dac kxCX
+    dio kxS
+cxCL, lac i kxS
+    dac i kyMsN
+    dac kxC
+    idx kyMsN
+    idx kxS
+    lac kxC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cxCL
+    jmp i kxCX
+
+// kyList -- 3.7's listing of the table kxTab: for each entry mapped, its
+// name, its left side and its right side, a TAB between, in list's form.
+// AC and IO are clobbered.
+kyList, dac kxLX
+    lac kxTab
+    dac kxSlot
+klsL, lac kxSlot
+    sub kxTab
+    sub [MAP_N*MAP_W]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i kxLX
+    lac kxSlot
+    add [1]
+    dac kxP
+    lac i kxP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i kxLX
+    lac i kxSlot
+    SKIP_NEXT_IF_AC_ZERO
+    jmp klsP
+klsN, lac kxSlot
+    add [MAP_W]
+    dac kxSlot
+    jmp klsL
+klsP, lac kxSlot
+    add [2]
+    dac kxP
+    lio i kxP
+    jsp kyLstr
+    lio [CH_TAB]
+    jsp putc
+    lio i kxSlot
+    jsp kyLstr
+    lio [CH_TAB]
+    jsp putc
+    lac kxSlot
+    add [1]
+    dac kxP
+    lio i kxP
+    jsp kyLstr
+    jsp newline
+    jmp klsN
+
+// kyLstr -- the string at the full address in IO typed in list's form, as
+// 3.7's lprintf: a control character as ^ and its letter, DEL as ^?.
+// AC and IO are clobbered.
+kyLstr, dac kxSX
+    dio kxS2
+klsC, lac i kxS2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i kxSX
+    dac kxC
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp klsCt
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp klsO
+klsCt, lio [CH_CARET]
+    jsp putc
+    lac kxC
+    xor [0100]
+    dac kxC
+klsO, lio kxC
+    jsp putc
+    idx kxS2
+    jmp klsC
+
+kgX, 0
+kgK, 0
+kgT, 0
+kgI, 0
+kpX, 0
+kpPos, 0
+kpK, 0
+kpT, 0
+kpGap, 0
+kpIn, 0
+kpEl, 0
+kpMs, 0
+kinX, 0
+kinP, 0
+knX, 0
+kwX, 0
+kfX, 0
+kmX, 0
+kmC, 0
+kmBn, 0
+kmTab, 0
+kmE, 0
+kmP, 0
+kmQ, 0
+kmmX, 0
+kmT, 0
+kbX, 0
+kpuX, 0
+kuS, 0
+kuN, 0
+kuR, 0
+kuD, 0
+kuF, 0
+kuT, 0
+kuK, 0
+klX, 0
+klP, 0
+klN, 0
+kqX, 0
+kqA, 0
+kqB, 0
+kqN, 0
+kcX, 0
+kcOp, 0
+kcHop, 0
+kcC, 0
+ksX, 0
+kmoX, 0
+kaX, 0
+kaBuf, 0                    // the typed text's buffer, a full address
+kaC, 0
+kaP, 0
+kaT, 0
+kaK, 0
+kaN, 0
+kaW, 0
+kaH, 0
+kwcX, 0
+kwcC, 0
+kspX, 0
+kspC, 0
+kxUn, 0
+kxTab, 0
+kxN, 0
+kxC, 0
+kxP, 0
+kxDn, 0
+kxRn, 0
+kxLn, 0
+kxZer, 0
+kxSlot, 0
+kxZ, 0
+kxFX, 0
+kxCX, 0
+kxS, 0
+kxLX, 0
+kxSX, 0
+kxS2, 0
+kyMsN, 0                    // the next free word of MAP_TEXT, 3.7's msnext
+kyTyped, 0                  // 1 when kyNext's last key was typed, at kyTime
+endloc
+
+kyGap1, 0                   // the last ESC sequence's gaps, ms; -1 none
+kyGap2, 0
+kyGapMx, 0                  // the largest gap of an arrow taken, ms
+kyMacP, 0                   // the next key a map put in, in MAC_BUF; 0 none
+kaGc, 0                     // kyAbbr's typed text's end and this insert's start
+kaOg, 0
+kyAbK, 0                    // the key that ended an abbreviation, and its 0
+    0
+kmB,                        // kyMap's keys, the first and those taken after it
+    table MAP_SIDE+1, 0
+kmL,                        // a map command's left side, 3.7's lhs, ending in 0
+    table MAP_SIDE+1, 0
+kmR,                        // its right side, 3.7's rhs
+    table MAP_SIDE+1, 0
+kmD,                        // fn, the name a function key's map shows
+    table 3, 0
+mpArr,                      // :map's table, 3.7's arrows
+    table MAP_N*MAP_W, 0
+mpIm,                       // :map!'s, 3.7's immacs
+    table MAP_N*MAP_W, 0
+mpAb,                       // :ab's, 3.7's abbrevs
+    table MAP_N*MAP_W, 0
+mpEnd,

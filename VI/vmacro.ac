@@ -1,0 +1,139 @@
+// vmacro.ac -- vi's @x, after 3.7's case '@' (ex_vmain.c) and regbuf
+// (ex_temp.c): register x's text put before the keys still to come, as a
+// map's are (keys.ac's kyPush), so that vi reads it as typed commands. Kept
+// in bank FILE_BANK for room; reached from vtab.ac's table.
+//
+// The text is each line of the register followed by LF, the last LF left
+// off for a register taken from within a line (REG_PART), at most MAC_SIZE
+// characters, built in GENBUF. LF is the key Return sends here, so a
+// whole line's LF acts as 3.7's CR, not as its newline (^J).
+//
+// Reached by jmp with the extend window open; ends at vmain.ac's viLoop, or
+// at vFail or vErr. In bank FILE_BANK. Needs vi.ah, <AIDS/skipmacros.ah>,
+// lines.ac (bank 0), keys.ac (bank TERM_BANK), vmain.ac and vops.ac (bank
+// VI_BANK) and messages.ac (bank MSG_BANK).
+
+local vmQ, vmK, vmAt, vmLow, vmOk, vmLn, vmCh, vmNl, vmEnd, vmNo, vmLong, \
+    vmC, vmS, vmN, vmI, vmP, vmQ1, vmCn, vmW, vmPut, vmX
+
+// vcAt -- @x: x a to z, A to Z the same, @ the last one used (3.7's
+// lastmac); ESC cancels it, ^V and ^Q quote the key (3.7's getesc). The
+// line U restores is forgotten first (3.7's vsave).
+vcAt, jsp i [vGetKey:VI_BANK]
+    dio vmC
+    lac vmC
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp i [viLoop:VI_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp vmQ
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLQ]
+    jmp vmQ
+    jmp vmK
+vmQ, jsp i [vGetKey:VI_BANK]
+    dio vmC
+vmK, lac vmC
+    SKIP_NEXT_IF_DIFFERENT [0100]     // @
+    jmp vmAt
+    jmp vmLow
+vmAt, lac vmLast
+    dac vmC
+vmLow, lac vmC              // A to Z taken as a to z
+    sub [CH_A]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vmCn
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vmCn
+    lac vmC
+    ior [040]
+    dac vmC
+vmCn, lac vmC               // forbid(!islower(c))
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [vFail:VI_BANK]
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i [vFail:VI_BANK]
+    lac vmC
+    dac vmLast
+    dzm i [vSyncLn:VI_BANK]
+// regbuf: the register's lines into GENBUF
+    lio vmC
+    jsp i [rgSlot:0]
+    dac vmS
+    lac i vmS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vmNo
+    dac i [lsList:0]
+    lio i [lsList:0]
+    jsp i [lsLen:0]
+    dac vmN
+    dzm vmI
+    lac [GENBUF]
+    dac vmP
+vmLn, lac vmI
+    SKIP_NEXT_IF_DIFFERENT vmN
+    jmp vmEnd
+    lio vmI
+    jsp i [lsElem:0]
+    lia
+    jsp i [getLine:0]
+    lac [LINEBUF]
+    dac vmQ1
+vmCh, lac i vmQ1            // the line's characters, ending at its 0
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vmNl
+    dac vmW
+    jsp vmPut
+    idx vmQ1
+    jmp vmCh
+vmNl, law CH_LF
+    dac vmW
+    jsp vmPut
+    idx vmI
+    jmp vmLn
+vmEnd, lac vmS              // within a line: the last LF left off
+    add [1]
+    dac vmS
+    lac i vmS
+    SKIP_NEXT_IF_SAME [REG_PART]
+    jmp vmOk                // whole lines: every LF kept
+    lac vmP
+    sub [1]
+    dac vmP
+vmOk, dzm i vmP
+    lio [GENBUF]
+    jsp i [kyPush:TERM_BANK]
+    jmp i [viLoop:VI_BANK]
+vmNo, lac vmC               // nothing in it: 3.7's error, lastmac forgotten
+    dac i [msgC:MSG_BANK]
+    dzm vmLast
+    lac [mNoReg:MSG_BANK]
+    jmp i [vErr:VI_BANK]
+
+// vmPut -- vmW put at vmP, which moves on; more than MAC_SIZE characters is
+// 3.7's Register too long, lastmac forgotten. AC is clobbered, IO preserved.
+vmPut, dac vmX
+    lac vmP
+    sub [GENBUF+MAC_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vmLong
+    lac vmW
+    dac i vmP
+    idx vmP
+    jmp i vmX
+vmLong, dzm vmLast
+    lac [mRegLong:MSG_BANK]
+    jmp i [vErr:VI_BANK]
+
+vmC, 0
+vmS, 0
+vmN, 0
+vmI, 0
+vmP, 0
+vmQ1, 0
+vmW, 0
+vmX, 0
+endloc
+
+vmLast, 0                   // 3.7's lastmac: the last register run, 0 none

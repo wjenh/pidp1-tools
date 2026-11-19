@@ -1,0 +1,13 @@
+Notes for trying vi on the PDP-1.
+
+The quick brown fox jumps over the lazy dog.
+Teh second line has a typo in its first word.
+This line is indented by nothing at all.
+    This one is indented by four blanks.
+	And this one by a tab.
+
+A paragraph starts after a blank line. It holds two sentences.
+It also runs onto a second line, so } and { have somewhere to go.
+
+(Parentheses), [brackets] and {braces} match with %.
+The last line of the notes.

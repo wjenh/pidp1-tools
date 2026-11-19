@@ -1,0 +1,133 @@
+VI
+
+// vi.am1 -- ex/vi 3.7 for the PDP-1: Bill Joy's editor, its line editor ex
+// first, rewritten in am1 after 4.3BSD's ex 3.7.
+// One caller at a time on DCS2 channel 0, port PORTNO: ex on any terminal,
+// vi's visual mode on a VT100 or VT102 (sense switch 2 starts each caller
+// in it).
+//
+// Requires the PDP-1D's lai and lia, the BBN clock (IOT 32), DCS2, and 16
+// banks:
+//   bank 0  the start and restart; the heap and its compaction (heap.ac);
+//   the line table, undo, the marks and the registers (lines.ac)
+//   bank 1  the console (termio.ac), ESC and the arrows (keys.ac); from
+//   RE_LAST, the three remembered expressions
+//   bank 2  ex: the command loop and dispatch (excmd.ac), the addresses
+//   (exaddr.ac), the line commands and text input (exops.ac), :set and the
+//   options' table (options.ac)
+//   bank 3  the regular expressions (regex.ac); s, g, v and :ta (subst.ac)
+//   bank 4  visual mode: its command loop and commands (vmain.ac), its
+//   motions (vmotion.ac)
+//   bank 5  the screen (screen.ac)
+//   bank 6  the files, paper tape and the printer (files.ac, ptape.ac,
+//   lpt.ac); autoindent's and showmatch's text work (vindent.ac); @x
+//   (vmacro.ac); a search's offsets (vaddr.ac)
+//   bank 7  the file system library and its Microtape and drum layers
+//   (fslib.ac); the messages and the greeting (messages.ac, greeting.ac)
+//   bank 8  the line table; bank 9 the work areas, the registers' slots, the
+//   files' names and the argument list; bank 10 the options' strings and the
+//   file system's handles, descriptors and buffers; banks 11-15 the heap
+// Sense switch 2 on starts each caller in visual mode (greeting.ac).
+// Sense switch 3 turned on breaks a running command, as DEL does.
+// The extend window is open throughout.
+//
+// Built by the Makefile, with the sources' directory on the include path;
+// -DLPT_TYPE64=1 builds for the Type 64 printer (lpt.ac).
+
+#include <AIDS/skipmacros.ah>
+#include <DCS/dcs2defs.ah>
+#include <CLOCK/clockdefs.ah>
+#include <MICROTAPE/microtape.ah>
+// The drum's volume is always given its tracks (DR_TRK0, vi.ah), and bank FS_BANK has no room
+// for the library's tracks of 0.
+#define DR_FIXEDTRACKS 1
+#include <DRUM/drum.ah>
+#include "vi.ah"
+#if LPT_TYPE64
+#include <LPT/type64defs.ah>
+#else
+#include <LPT/type62defs.ah>
+#endif
+
+100/
+// go -- the start: the console and DCS2 reset, then restart.
+go, lem
+    eem
+    jsp i [tmInit:TERM_BANK]
+
+// restart -- the rest of the start, and where a caller who leaves or is
+// lost brings vi: the heap empty, the buffer empty with nothing to
+// undo and no marks, every register empty, no file names, the clock
+// enabled; then ex, which waits for the next caller.
+restart, jsp hpInit
+    jsp lnReset
+    jsp rgClear
+    jsp i [fiInit:FILE_BANK]
+    jsp i [reInit:RE_BANK]
+    jsp i [viInit:VI_BANK]
+    jsp i [kyInit:TERM_BANK]
+    law clsena
+    cls
+    jmp i [exStart:EX_BANK]
+
+#include "heap.ac"
+#include "lines.ac"
+constants
+assert . <= 07750, "bank 0 runs into the read-in loader"
+
+bank TERM_BANK
+0/
+#include "termio.ac"
+#include "keys.ac"
+constants
+assert . <= RE_LAST-010000, "the console runs into the remembered expressions"
+
+bank EX_BANK
+0/
+#include "excmd.ac"
+#include "exaddr.ac"
+#include "exops.ac"
+#include "options.ac"
+constants
+
+bank RE_BANK
+0/
+#include "regex.ac"
+#include "subst.ac"
+constants
+
+bank VI_BANK
+0/
+#include "vmain.ac"
+#include "vmotion.ac"
+#include "vops.ac"
+constants
+
+bank SCR_BANK
+0/
+#include "screen.ac"
+#include "vinsert.ac"
+#include "vchange.ac"
+#include "vtab.ac"
+constants
+assert ROW_END <= 0120000, "the rows' keys run past the work bank"
+
+bank FILE_BANK
+0/
+#include "files.ac"
+#include "ptape.ac"
+#include "lpt.ac"
+#include "vindent.ac"
+#include "vmacro.ac"
+#include "vaddr.ac"
+constants
+
+// MSG_BANK is FS_BANK: the messages share the library's bank.
+bank FS_BANK
+0/
+#include "fslib.ac"
+#include "messages.ac"
+#include "greeting.ac"
+constants
+
+start go

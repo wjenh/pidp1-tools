@@ -1,0 +1,33 @@
+// greeting.ac -- what a new caller is greeted with: a new line, then
+// ex/vi 3.7 PDP-1, with sense switch 2 on visual mode after it, and a new
+// line; switch 2 also declares a VT100 and has ex's prompt start visual
+// mode (vmain.ac's viPend); then the drum's EXRC, if there is one, is
+// sourced (files.ac's soExrc). In bank MSG_BANK; tmReady (termio.ac)
+// calls it for each new caller. Needs vi.ah, termio.ac (bank TERM_BANK),
+// files.ac (bank FILE_BANK), options.ac (bank EX_BANK) and vmain.ac (bank
+// VI_BANK).
+
+local thX, thNl, thVis
+
+// tmHello -- greet a new caller. AC and IO are clobbered.
+tmHello, dac thX
+    jsp i [newline:TERM_BANK]
+    lio [hello:MSG_BANK]
+    jsp i [putStr:TERM_BANK]
+    szs SW_VISUAL*010
+    jmp thVis
+thNl, jsp i [newline:TERM_BANK]
+    jsp i [soExrc:FILE_BANK]
+    jmp i thX
+thVis, lio [helloVis:MSG_BANK]
+    jsp i [putStr:TERM_BANK]
+    law TERM_VT100
+    dac i [oTerm:EX_BANK]
+    law 1
+    dac i [viPend:VI_BANK]
+    jmp thNl
+thX, 0
+endloc
+
+hello, ascii "ex/vi 3.7 PDP-1"
+helloVis, ascii " visual mode"

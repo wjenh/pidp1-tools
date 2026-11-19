@@ -1,0 +1,1693 @@
+// lines.ac -- the buffer: the line table (bank 8), a line in and out of the
+// line buffer, the changes every command shares (delete, save, insert, move,
+// copy, put), undo, the marks and the registers, as 3.7's ex_cmdsub.c,
+// ex_subr.c and ex_temp.c do them.
+//
+// A line is a record in the heap that is never changed: a change unpacks it
+// into LINEBUF, works there, and puts a new record in the line's word. Undo
+// keeps 3.7's state: the kind, the lines a change put in (undAp1 up to, not
+// including, undAp2), the line after which the lines it took out go back
+// (undDel), and those lines as a list record (undList, 3.7's save area). A
+// mark is a record's address, found by searching the table.
+//
+// The routines take their lines in lnA, lnB, lnN and lnT, words a caller in
+// another bank sets through full addresses ([lnA:0]); those that can fail
+// return ST_OK in AC, or why not. Every routine is entered by jsp with the
+// extend window open and returns by jmp i. In bank 0. Needs vi.ah,
+// <AIDS/skipmacros.ah> and heap.ac.
+
+local lgX, lgN, lgP, glX, glP, glD, glN, glLoop, glEnd, \
+    ptX, ptR, ptS, ptD, ptN, ptW, ptF, ptLoop, ptStore, ptEnd, ptChk, \
+    pcX, pcV, pcNot, opX, opS, opD, opN, opMove, opZ, opZero, opEnd, \
+    clX, clS, clD, clN, clLoop, clMove, rvX, rv1, rv2, rvT, rvLoop, rvSwap, \
+    lnLow, lwX, lwN, \
+    lmX, lmN, lmR, lmS, lmD, lmLoop, lmEnd, llX, llP, leX, leI, leP, chX, \
+    ldX, ldLast, ldOk, ldMem, svX, svMem, asX, asF, \
+    inX, inP, inQ, inFull, dnX, anX, \
+    cpX, cpL, cpLoop, cpList, cpReg, cpLst, cpElem, cpGot, cpDone, cpMem, \
+    mvX, mvC, mvE, mvAdt, mvAd1, mvAd2, mvA1, mvA2, mvLines, mvP, mvN, \
+    mvClr, mvClrL, mvPlace, mvBack, mvFwd, mvDone, mvUnd, mvOk, mvNoth, \
+    mvAmong, mvErr, \
+    unX, unC, unNew, unRem, unI, unJp, unKp, unP, unQ, unN, unGo, unTake, \
+    unDot, unPut, unBack, unCopy, unAdj, unSetDot, unInv, unChg, unMv, \
+    unMvF, unMvGo, unFix, unFx2, unFx3, unOk, unGlob, unNoRd, unNR, \
+    ucX, ucP, ucQ, ucN, ucAll, ucChg, ucPut, ucSame, ucNone, ucYes, \
+    msX, msI, msP, mfX, mfI, mfP, mfR, mfLoop, mfYes, mfNo, \
+    mpX, mpN, mpP, mpI, mpOld, mpLoop, mpNext, mpvX, \
+    lrX, lrP, lrN, lrLoop, rsX, rsP, rsN, rsLoop, rgX, rgC, rgLet, rgAddr, \
+    ryX, ryC, ryS, ryOld, ryN, ryNew, ryD, ryP, ryOldL, ryTab, ryNewL, \
+    ryDone, ryMem, ryNoD, ryCnt, ryF, ryAl, ryH1, ryPw, ryPut, ryI, ryW, \
+    ryFrom, rfX, rfS, rfD, rfN, rfL, rfE, rfAll, rkX, rkS, rkD, rkN, rkL, \
+    pgX, pgN, pgG, pgS, pgD, pgK, pgI, pgL, pgF1, pgUp, pgHd, pgT, pgPut, \
+    pgIns, pgNx, pgEnd, pgNoU, pgLong, pgMem, pgOut, pgCopy, pcyX, pcyL, \
+    rpX, rpMem
+
+// lnPtr -- the record of the line whose number is in IO.
+// AC is the record's address; IO is preserved.
+lnPtr, dac lgX
+    dio lgN
+    lac lgN
+    add [LT_BASE]
+    dac lgP
+    lac i lgP
+    and [LT_PTR]
+    jmp i lgX
+lgX, 0
+lgN, 0
+lgP, 0
+
+// getLine -- the record whose address is in IO, 0 for an empty line, into
+// LINEBUF, a character a word and a 0 word; lbLen its length.
+// AC and IO are clobbered.
+getLine, dac glX
+    dio glP
+    lac [LINEBUF]
+    dac glD
+    dzm lbLen
+    lac glP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp glEnd
+    lac i glP
+    and [REC_LEN]
+    dac glN
+    dac lbLen
+    lac glP
+    add [REC_HDR]
+    dac glP
+// two characters a word, the first in the high half
+glLoop, lac glN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp glEnd
+    lac i glP
+    rar 9s
+    and [PK_LO]
+    dac i glD
+    idx glD
+    lac glN
+    sub [1]
+    dac glN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp glEnd
+    lac i glP
+    and [PK_LO]
+    dac i glD
+    idx glD
+    idx glP
+    lac glN
+    sub [1]
+    dac glN
+    jmp glLoop
+glEnd, dzm i glD
+    jmp i glX
+glX, 0
+glP, 0
+glD, 0
+glN, 0
+
+// putLine -- LINEBUF's lbLen characters as a new record, REC_PLAIN when none
+// is a TAB, a control character or DEL. Even an empty line has a record, so
+// that a mark can name it. The buffer is counted changed (lnChange).
+// AC is the record's address, or 0 when the heap has no room; IO is clobbered.
+putLine, dac ptX
+    lac lbLen
+    add [1]
+    rar 1s
+    and [REC_LEN]
+    add [REC_HDR]
+    lia
+    jsp hpAlloc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ptX
+    dac ptR
+    lac [REC_PLAIN]
+    dac ptF
+    lac lbLen
+    dac ptN
+    lac [LINEBUF]
+    dac ptS
+    lac ptR
+    add [REC_HDR]
+    dac ptD
+ptLoop, lac ptN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ptEnd
+    lio i ptS
+    jsp ptChk
+    lac i ptS
+    ral 9s
+    dac ptW
+    idx ptS
+    lac ptN
+    sub [1]
+    dac ptN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ptStore
+    lio i ptS
+    jsp ptChk
+    lac i ptS
+    ior ptW
+    dac ptW
+    idx ptS
+    lac ptN
+    sub [1]
+    dac ptN
+ptStore, lac ptW
+    dac i ptD
+    idx ptD
+    jmp ptLoop
+ptEnd, lac lbLen
+    ior ptF
+    dac i ptR
+    lac ptR
+    add [1]
+    dac ptD
+    dzm i ptD
+    jsp lnChange            // as 3.7's putline, a line put is a change
+    lac ptR
+    jmp i ptX
+
+// ptChk -- ptF's REC_PLAIN cleared when the character in IO is a TAB, a
+// control character or DEL. AC is clobbered, IO preserved.
+ptChk, dac pcX
+    dio pcV
+    lac pcV
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp pcNot
+    lac pcV
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp pcNot
+    jmp i pcX
+pcNot, dzm ptF
+    jmp i pcX
+ptX, 0
+ptR, 0
+ptS, 0
+ptD, 0
+ptN, 0
+ptW, 0
+ptF, 0
+pcX, 0
+pcV, 0
+
+// lnOpen -- room for lnN lines after line lnA: the lines after it move up,
+// the new words are 0, and dol grows. The caller has made sure of the room.
+// AC and IO are clobbered.
+lnOpen, dac opX
+    lio lnA
+    jsp lnLow
+    lac dol
+    add [LT_BASE]
+    dac opS
+    add lnN
+    dac opD
+    lac dol
+    sub lnA
+    dac opN
+opMove, lac opN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp opZ
+    lac i opS
+    dac i opD
+    lac opS
+    sub [1]
+    dac opS
+    lac opD
+    sub [1]
+    dac opD
+    lac opN
+    sub [1]
+    dac opN
+    jmp opMove
+opZ, lac lnA
+    add [LT_BASE+1]
+    dac opD
+    lac lnN
+    dac opN
+opZero, lac opN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp opEnd
+    dzm i opD
+    idx opD
+    lac opN
+    sub [1]
+    dac opN
+    jmp opZero
+opEnd, lac dol
+    add lnN
+    dac dol
+    jmp i opX
+opX, 0
+opS, 0
+opD, 0
+opN, 0
+
+// lnClose -- lnN lines taken out from line lnA on: the lines after them move
+// down and dol shrinks. AC and IO are clobbered.
+lnClose, dac clX
+    lio lnA
+    jsp lnLow
+    lac lnA
+    add [LT_BASE]
+    dac clD
+    add lnN
+    dac clS
+    lac dol
+    sub lnA
+    sub lnN
+    add [1]
+    dac clN
+clLoop, lac clN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp clMove
+    lac dol
+    sub lnN
+    dac dol
+    jmp i clX
+clMove, lac i clS
+    dac i clD
+    idx clS
+    idx clD
+    lac clN
+    sub [1]
+    dac clN
+    jmp clLoop
+clX, 0
+clS, 0
+clD, 0
+clN, 0
+
+// lnRev -- 3.7's reverse(a1, a2): the table's words from line lnA up to, not
+// including, line lnB, in the opposite order. AC and IO are clobbered.
+lnRev, dac rvX
+    lio lnA
+    jsp lnLow
+    lac lnA
+    add [LT_BASE]
+    dac rv1
+    lac lnB
+    add [LT_BASE]
+    dac rv2
+rvLoop, lac rv2
+    sub [1]
+    dac rv2
+    lac i rv2
+    dac rvT
+    lac rv2
+    sub rv1
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp rvSwap
+    jmp i rvX
+rvSwap, lac i rv1
+    dac i rv2
+    lac rvT
+    dac i rv1
+    idx rv1
+    jmp rvLoop
+rvX, 0
+rv1, 0
+rv2, 0
+rvT, 0
+
+// lnLow -- ltLow lowered to the line in IO, the first whose table word a
+// change moves, so that g (subst.ac) looks for marked lines from there.
+// AC is clobbered, IO preserved.
+lnLow, dac lwX
+    dio lwN
+    lac lwN
+    sub ltLow
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i lwX
+    dio ltLow
+    jmp i lwX
+lwX, 0
+lwN, 0
+
+// lsMake -- a list record of the records of lines lnA to lnB, at least one.
+// AC is the list's address, or 0 when the heap has no room; IO is clobbered.
+lsMake, dac lmX
+    lac lnB
+    sub lnA
+    add [1]
+    dac lmN
+    add [REC_HDR]
+    lia
+    jsp hpAlloc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i lmX
+    dac lmR
+    lac lmN
+    ior [REC_LIST]
+    dac i lmR
+    lac lmR
+    add [1]
+    dac lmD
+    dzm i lmD
+    idx lmD
+    lac lnA
+    add [LT_BASE]
+    dac lmS
+lmLoop, lac lmN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lmEnd
+    lac i lmS
+    and [LT_PTR]
+    dac i lmD
+    idx lmS
+    idx lmD
+    lac lmN
+    sub [1]
+    dac lmN
+    jmp lmLoop
+lmEnd, lac lmR
+    jmp i lmX
+lmX, 0
+lmN, 0
+lmR, 0
+lmS, 0
+lmD, 0
+
+// lsLen -- the number of lines in the list whose address is in IO, 0 for no
+// list. AC is the number; IO is preserved.
+lsLen, dac llX
+    dio llP
+    lac llP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i llX
+    lac i llP
+    and [REC_LEN]
+    jmp i llX
+llX, 0
+llP, 0
+
+// lsElem -- the record at place IO, 0 the first, of the list whose address
+// is in lsList. AC is the record's address; IO is preserved.
+lsElem, dac leX
+    dio leI
+    lac lsList
+    add [REC_HDR]
+    add leI
+    dac leP
+    lac i leP
+    jmp i leX
+leX, 0
+leI, 0
+leP, 0
+
+// lnChange -- 3.7's change(): the buffer is modified. AC is clobbered, IO
+// preserved.
+lnChange, dac chX
+    idx chng
+    jmp i chX
+chX, 0
+
+// lnDelete -- 3.7's delete, for lines lnA to lnB: they become undo's list
+// and leave the table, and dot is the line after them, or the last. When the
+// heap has no room for the list, nothing is deleted and undo has nothing.
+// AC is ST_OK or ST_MEM; IO is clobbered, and lnN.
+lnDelete, dac ldX
+    dzm undList             // 3.7's squish: the old list goes first
+    jsp lsMake
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ldMem
+    dac undList
+    jsp lnChange
+    law UND_CHANGE
+    dac undKind
+    lac lnB
+    sub lnA
+    add [1]
+    dac lnN
+    jsp lnClose
+    lac lnA
+    sub [1]
+    dac undDel
+    lac lnA
+    dac dot
+    sub dol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ldLast
+    jmp ldOk
+ldLast, lac dol
+    dac dot
+ldOk, law ST_OK
+    jmp i ldX
+ldMem, dzm undKind
+    law ST_MEM
+    jmp i ldX
+ldX, 0
+
+// lnSave -- 3.7's save, for lines lnA to lnB: their records as undo's list,
+// the kind UND_ALL, undo's other words as 3.7 sets them. When the heap has
+// no room, undo has nothing.
+// AC is ST_OK or ST_MEM; IO is clobbered.
+lnSave, dac svX
+    dzm undKind
+    dzm undList
+    lac dot
+    dac undADot
+    jsp lsMake
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp svMem
+    dac undList
+    law UND_ALL
+    dac undKind
+    lac lnA
+    sub [1]
+    dac undDel
+    lac lnA
+    dac undAp1
+    lac lnB
+    add [1]
+    dac undAp2
+    law ST_OK
+    jmp i svX
+svMem, law ST_MEM
+    jmp i svX
+svX, 0
+
+// lnAppStart -- what 3.7's append does before its first line, after line
+// lnA: dot is lnA, and, unless IO is not 0 (a substitute's lines) or g is
+// running, undo's put-in range starts empty after it. AC and IO are
+// clobbered.
+lnAppStart, dac asX
+    dio asF
+    lac lnA
+    dac dot
+    lac asF
+    ior inGlobal
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i asX
+    lac lnA
+    add [1]
+    dac undAp1
+    dac undAp2
+    law UND_CHANGE
+    dac undKind
+    jmp i asX
+asX, 0
+asF, 0
+
+// lnInsert -- one more line after dot, the record whose address is in IO, as
+// 3.7's append puts each: dot moves to it, undo's put-in range grows.
+// AC is ST_OK, or ST_FULL when the table is full (nothing changed); IO is
+// clobbered, and lnA and lnN.
+lnInsert, dac inX
+    dio inP
+    lac dol
+    SKIP_NEXT_IF_DIFFERENT [LT_MAX]
+    jmp inFull
+    lac dot
+    dac lnA
+    law 1
+    dac lnN
+    jsp lnOpen
+    idx dot
+    add [LT_BASE]
+    dac inQ
+    lac inP
+    dac i inQ
+    idx undAp2
+    law ST_OK
+    jmp i inX
+inFull, law ST_FULL
+    jmp i inX
+inX, 0
+inP, 0
+inQ, 0
+
+// lnDelNone -- 3.7's deletenone: a change that takes nothing out, at line
+// lnA. AC is clobbered, IO preserved.
+lnDelNone, dac dnX
+    law UND_CHANGE
+    dac undKind
+    dzm undList
+    lac lnA
+    dac undDel
+    jmp i dnX
+dnX, 0
+
+// lnAppNone -- 3.7's appendnone: a change that puts nothing in, at line lnA.
+// AC is clobbered, IO preserved.
+lnAppNone, dac anX
+    law UND_CHANGE
+    dac undKind
+    lac lnA
+    dac undAp1
+    dac undAp2
+    jmp i anX
+anX, 0
+
+// lnCopyIn -- 3.7's append of copies: the lines of cpSrc, each unpacked and
+// packed again as a new record, so no mark names a copy, inserted after dot.
+// cpSrc is CP_TABLE, lines cpFrom to cpTo of the table (none of them after
+// dot), or CP_LIST, the list in the register slot whose full address is in
+// cpSlot, or undo's list when cpSlot is 0. cpCnt counts the lines put in;
+// those put in before a failure stay.
+// AC is ST_OK, ST_MEM or ST_FULL; IO is clobbered, and lnA and lnN.
+lnCopyIn, dac cpX
+    dzm cpCnt
+cpLoop, lac cpSrc
+    SKIP_NEXT_IF_SAME [CP_TABLE]
+    jmp cpList
+    lac cpFrom
+    add cpCnt
+    dac cpL
+    sub cpTo
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp cpDone
+    lio cpL
+    jsp lnPtr
+    jmp cpGot
+// a list, found again for each line, since packing one may move it
+cpList, lac cpSlot
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cpReg
+    lac undList
+    jmp cpLst
+cpReg, lac i cpSlot
+cpLst, dac lsList
+    lia
+    jsp lsLen
+    sub cpCnt
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp cpElem
+    jmp cpDone
+cpElem, lio cpCnt
+    jsp lsElem
+cpGot, lia
+    jsp getLine
+    jsp putLine
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpMem
+    lia
+    jsp lnInsert
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i cpX
+    idx cpCnt
+    jmp cpLoop
+cpDone, law ST_OK
+    jmp i cpX
+cpMem, law ST_MEM
+    jmp i cpX
+cpX, 0
+cpL, 0
+
+// lnMove1 -- 3.7's move1: lines lnA to lnB moved, or with IO not 0 copied,
+// to after line lnT; dot the last of them; undo as 3.7 leaves it. lnA, lnB
+// and lnT are kept.
+// AC is ST_OK, ST_NOTHING, ST_MOVED, or for a copy ST_MEM or ST_FULL (the
+// copies made staying at the end, for u to take out); IO is clobbered.
+lnMove1, dac mvX
+    dio mvC
+    lac lnT
+    dac mvAdt
+    lac lnA
+    dac mvA1
+    lac lnB
+    dac mvA2
+    sub mvA1
+    add [1]
+    dac mvLines
+    lac mvC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mvClr
+// a copy: the copies put at the end first, as 3.7's append does
+    lac dol
+    dac mvAd1
+    dac lnA
+    cli
+    jsp lnAppStart
+    law CP_TABLE
+    dac cpSrc
+    lac mvA1
+    dac cpFrom
+    lac mvA2
+    dac cpTo
+    jsp lnCopyIn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mvErr
+    idx mvAd1
+    lac dol
+    dac mvAd2
+    jmp mvPlace
+// a move: g's marks off the lines moved
+mvClr, lac mvA1
+    add [LT_BASE]
+    dac mvP
+    lac mvLines
+    dac mvN
+mvClrL, lac i mvP
+    and [LT_PTR]
+    dac i mvP
+    idx mvP
+    lac mvN
+    sub [1]
+    dac mvN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mvClrL
+    lac mvA1
+    dac mvAd1
+    lac mvA2
+    dac mvAd2
+mvPlace, idx mvAd2
+    lac mvAdt
+    sub mvAd1
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp mvFwd
+// the target before the lines
+    lac mvAdt
+    add [1]
+    SKIP_NEXT_IF_SAME mvAd1
+    jmp mvBack
+    lac mvC
+    ior inGlobal
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mvNoth
+mvBack, lac mvAd2
+    sub mvAd1
+    add mvAdt
+    dac dot
+    lac mvAdt
+    add [1]
+    dac mvAdt
+    SKIP_NEXT_IF_DIFFERENT mvAd1
+    jmp mvDone
+    dac lnA
+    lac mvAd1
+    dac lnB
+    jsp lnRev
+    lac mvAd1
+    dac lnA
+    lac mvAd2
+    dac lnB
+    jsp lnRev
+    lac mvAdt
+    dac lnA
+    lac mvAd2
+    dac lnB
+    jsp lnRev
+    jmp mvDone
+// the target after them, or among them
+mvFwd, lac mvAdt
+    sub mvAd2
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp mvAmong
+    lac mvAdt
+    dac dot
+    add [1]
+    dac mvAdt
+    lac mvAd1
+    dac lnA
+    lac mvAd2
+    dac lnB
+    jsp lnRev
+    lac mvAd2
+    dac lnA
+    lac mvAdt
+    dac lnB
+    jsp lnRev
+    lac mvAd1
+    dac lnA
+    lac mvAdt
+    dac lnB
+    jsp lnRev
+mvDone, jsp lnChange
+    lac inGlobal
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mvOk
+    lac mvC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mvUnd
+// a copy: undo takes the copies out
+    lac lnT
+    add [1]
+    dac undAp1
+    add mvLines
+    dac undAp2
+    lac mvA1
+    dac lnA
+    jsp lnDelNone
+    jmp mvOk
+mvUnd, law UND_MOVE
+    dac undKind
+    lac mvA1
+    dac undAp1
+    lac mvA2
+    dac undAp2
+    lac lnT
+    dac undDel
+    dzm undList
+mvOk, law ST_OK
+    jmp mvErr
+mvNoth, law ST_NOTHING
+    jmp mvErr
+mvAmong, law ST_MOVED
+mvErr, dac mvE
+    lac mvA1
+    dac lnA
+    lac mvA2
+    dac lnB
+    lac mvE
+    jmp i mvX
+mvX, 0
+mvC, 0
+mvE, 0
+mvAdt, 0
+mvAd1, 0
+mvAd2, 0
+mvA1, 0
+mvA2, 0
+mvLines, 0
+mvP, 0
+mvN, 0
+
+// lnUndo -- 3.7's undo; with IO not 0 (vi's U), without its check that the
+// last change changed anything. unCnt0 is dol before, for the message on the
+// change in lines; unMoved is not 0 when it undid a move, the lines moved in
+// lnA to lnB. With no room in the heap for the list of the lines it takes
+// out, it still undoes, and leaves nothing to undo.
+// AC is ST_OK, ST_NOUNDO, ST_SAME or ST_GLOBAL; IO is clobbered.
+lnUndo, dac unX
+    dio unC
+    dzm unMoved
+    lac dol
+    dac unCnt0
+    lac inGlobal
+    SKIP_NEXT_IF_AC_ZERO
+    jmp unGlob
+    lac unC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp unGo
+    jsp unCheck
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i unX
+unGo, lac undKind
+    SKIP_NEXT_IF_DIFFERENT [UND_MOVE]
+    jmp unMv
+// not a move: the lines it put in come out, as undo's next list
+    lac dot
+    dac unNew
+    dzm unRem
+    dzm unNoRd
+    lac undAp2
+    sub undAp1
+    dac unI
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp unTake
+    jmp unPut
+unTake, lac undAp1
+    dac lnA
+    lac undAp2
+    sub [1]
+    dac lnB
+// with no room for their list (a change that ran out of memory), the change
+// is undone all the same, and this undo is not to be undone
+    jsp lsMake
+    dac unRem
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx unNoRd
+    lac unI
+    dac lnN
+    jsp lnClose
+    lac undDel
+    sub undAp1
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp unDot
+    lac undDel
+    sub unI
+    dac undDel
+unDot, lac undAp1
+    sub [1]
+    dac dot
+// a put's list is the register's, not the buffer's: it is dropped
+unPut, lac undKind
+    SKIP_NEXT_IF_SAME [UND_PUT]
+    jmp unBack
+    lac undAp1
+    sub [1]
+    dac undDel
+    dzm undList
+// the list's lines back after undDel
+unBack, lac undDel
+    add [1]
+    dac unJp
+    lio undList
+    jsp lsLen
+    dac unI
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp unInv
+    lac undDel
+    dac lnA
+    lac unI
+    dac lnN
+    jsp lnOpen
+    lac undList
+    add [REC_HDR]
+    dac unP
+    lac unJp
+    add [LT_BASE]
+    dac unQ
+    lac unI
+    dac unN
+unCopy, lac i unP
+    dac i unQ
+    idx unP
+    idx unQ
+    lac unN
+    sub [1]
+    dac unN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp unCopy
+unAdj, lac undAp1
+    sub unJp
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp unSetDot
+    lac undAp1
+    add unI
+    dac undAp1
+unSetDot, lac unJp
+    dac dot
+// so it can be undone in turn
+unInv, lac undAp1
+    sub [1]
+    dac undDel
+    lac unJp
+    dac undAp1
+    add unI
+    dac undAp2
+    lac unRem
+    dac undList
+    jsp lnChange
+    lac undKind
+    SKIP_NEXT_IF_SAME [UND_ALL]
+    jmp unChg
+    lac undADot
+    dac dot
+    lac unNew
+    dac undADot
+    jmp unNR
+unChg, law UND_CHANGE
+    dac undKind
+unNR, lac unNoRd
+    SKIP_NEXT_IF_AC_ZERO
+    dzm undKind             // UND_NONE: nothing kept to undo it with
+    jmp unFix
+// a move: undone by another move
+unMv, lac undDel
+    sub undAp2
+    dac unI
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp unMvF
+// the lines went back: the inverse moves them after undAp2
+    lac undDel
+    add [1]
+    dac lnA
+    add undAp2
+    sub undAp1
+    dac lnB
+    lac undAp2
+    dac lnT
+    jmp unMvGo
+// the lines went forward: the inverse moves them after undAp1-1
+unMvF, lac undDel
+    dac lnB
+    lac undAp1
+    add unI
+    dac lnA
+    lac undAp1
+    sub [1]
+    dac lnT
+unMvGo, lac undAp1
+    dac unKp
+    cli
+    jsp lnMove1
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i unX
+    lac unKp
+    dac dot
+    law 1
+    dac unMoved
+// 3.7's defense: dot within the buffer, or 0 in an empty one
+unFix, lac dot
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp unFx2
+    jmp unFx3
+unFx2, lac dot
+    sub dol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp unFx3
+    jmp unOk
+unFx3, lac dot
+    SKIP_NEXT_IF_DIFFERENT dol
+    jmp unOk
+    law 1
+    dac dot
+unOk, law ST_OK
+    jmp i unX
+unGlob, law ST_GLOBAL
+    jmp i unX
+unX, 0
+unNoRd, 0
+unC, 0
+unNew, 0
+unRem, 0
+unI, 0
+unJp, 0
+unKp, 0
+unP, 0
+unQ, 0
+unN, 0
+
+// unCheck -- 3.7's somechange: whether the last change changed anything.
+// AC is ST_OK when it did, else ST_NOUNDO or ST_SAME; IO is clobbered.
+unCheck, dac ucX
+    lac undKind
+    SKIP_NEXT_IF_DIFFERENT [UND_MOVE]
+    jmp ucYes
+    SKIP_NEXT_IF_DIFFERENT [UND_NONE]
+    jmp ucNone
+    SKIP_NEXT_IF_DIFFERENT [UND_CHANGE]
+    jmp ucChg
+    SKIP_NEXT_IF_DIFFERENT [UND_PUT]
+    jmp ucPut
+// UND_ALL: changed unless the list is the whole buffer, line for line
+    lio undList
+    jsp lsLen
+    SKIP_NEXT_IF_SAME dol
+    jmp ucYes
+    lac undList
+    add [REC_HDR]
+    dac ucP
+    lac [LT_BASE+1]
+    dac ucQ
+    lac dol
+    dac ucN
+ucAll, lac ucN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ucSame
+    lac i ucQ
+    and [LT_PTR]
+    SKIP_NEXT_IF_SAME i ucP
+    jmp ucYes
+    idx ucP
+    idx ucQ
+    lac ucN
+    sub [1]
+    dac ucN
+    jmp ucAll
+ucChg, lac undAp1
+    SKIP_NEXT_IF_SAME undAp2
+    jmp ucYes
+    lio undList
+    jsp lsLen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ucYes
+    jmp ucSame
+ucPut, lac undAp1
+    SKIP_NEXT_IF_SAME undAp2
+    jmp ucYes
+ucSame, law ST_SAME
+    jmp i ucX
+ucNone, law ST_NOUNDO
+    jmp i ucX
+ucYes, law ST_OK
+    jmp i ucX
+ucX, 0
+ucP, 0
+ucQ, 0
+ucN, 0
+
+// lnMarkSet -- mark IO (0 to 25 for a to z, MARK_PREV for '') on line lnA's
+// record. AC and IO are clobbered.
+lnMarkSet, dac msX
+    dio msI
+    lac [marks]
+    add msI
+    dac msP
+    lio lnA
+    jsp lnPtr
+    dac i msP
+    jmp i msX
+msX, 0
+msI, 0
+msP, 0
+
+// lnMarkFind -- the line mark IO is on (0 to 25 for a to z, MARK_PREV for
+// ''). AC is its number, 0 for a mark not set or whose line is gone; IO is
+// clobbered.
+lnMarkFind, dac mfX
+    dio mfI
+    lac [marks]
+    add mfI
+    dac mfP
+    lac i mfP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i mfX
+    dac mfR
+    law 1
+    dac mfI
+    lac [LT_BASE+1]
+    dac mfP
+mfLoop, lac mfI
+    sub dol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp mfNo
+    lac i mfP
+    and [LT_PTR]
+    SKIP_NEXT_IF_DIFFERENT mfR
+    jmp mfYes
+    idx mfP
+    idx mfI
+    jmp mfLoop
+mfYes, lac mfI
+    jmp i mfX
+mfNo, cla
+    jmp i mfX
+mfX, 0
+mfI, 0
+mfP, 0
+mfR, 0
+
+// lnPutMark -- 3.7's putmk1: line IO's record replaced by lnR, g's mark
+// kept, and every mark on the old record moved to the new.
+// AC and IO are clobbered.
+lnPutMark, dac mpX
+    dio mpN
+    lac mpN
+    add [LT_BASE]
+    dac mpP
+    lac i mpP
+    and [LT_PTR]
+    dac mpOld
+    lac i mpP
+    and [LT_GMARK]
+    ior lnR
+    dac i mpP
+    lac mpOld
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i mpX
+    lac [marks]
+    dac mpP
+    law NMARK
+    dac mpI
+mpLoop, lac i mpP
+    SKIP_NEXT_IF_SAME mpOld
+    jmp mpNext
+    lac lnR
+    dac i mpP
+mpNext, idx mpP
+    lac mpI
+    sub [1]
+    dac mpI
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mpLoop
+    jmp i mpX
+mpX, 0
+mpN, 0
+mpP, 0
+mpI, 0
+mpOld, 0
+
+// lnMarkPrev -- 3.7's markpr: '' on line IO, except while g runs.
+// AC and IO are clobbered.
+lnMarkPrev, dac mpvX
+    lac inGlobal
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i mpvX
+    jsp lnPtr
+    dac i [marks+MARK_PREV]
+    jmp i mpvX
+mpvX, 0
+
+// lnReset -- 3.7's init: an empty buffer, nothing to undo, no marks, not
+// modified. The registers are kept. AC and IO are clobbered.
+lnReset, dac lrX
+    dzm dot
+    dzm dol
+    dzm chng
+    dzm undKind
+    dzm undList
+    dzm undAp1
+    dzm undAp2
+    dzm undDel
+    dzm undADot
+    dzm uLine
+    dzm uLnum
+    dzm uSync
+    dzm inGlobal
+    dzm gList
+    dzm i [LT_BASE]         // the empty line before the first
+    lac [marks]
+    dac lrP
+    law NMARK
+    dac lrN
+lrLoop, dzm i lrP
+    idx lrP
+    lac lrN
+    sub [1]
+    dac lrN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lrLoop
+    jmp i lrX
+lrX, 0
+lrP, 0
+lrN, 0
+
+// rgClear -- every register empty. AC and IO are clobbered.
+rgClear, dac rsX
+    lac [REG_BASE]
+    dac rsP
+    law NREG*REG_WORDS
+    dac rsN
+rsLoop, dzm i rsP
+    idx rsP
+    lac rsN
+    sub [1]
+    dac rsN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rsLoop
+    jmp i rsX
+rsX, 0
+rsP, 0
+rsN, 0
+
+// rgSlot -- the full address of the slot of register IO: 0 the unnamed one,
+// a to z, A to Z (the same slots), 1 to 9. AC is the address; IO is
+// preserved.
+    assert REG_WORDS == 2, "rgSlot doubles a register's number"
+rgSlot, dac rgX
+    dio rgC
+    lac rgC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rgAddr              // REG_UNNAMED is 0
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rgLet
+    lac rgC
+    sub [CH_A]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rgLet
+    lac rgC
+    sub [CH_0+1]
+    add [REG_1]
+    jmp rgAddr
+rgLet, add [REG_A]
+rgAddr, ral 1s
+    add [REG_BASE]
+    jmp i rgX
+rgX, 0
+rgC, 0
+
+// rgYank -- 3.7's YANKreg for the register in IO: lines lnA to lnB into it,
+// in place of what it held for a to z, after it for A to Z. For 1 to 9 the
+// numbered registers shift first (3.7's kshift: 9 dropped, each moved up
+// one, 1 left empty), then the lines go after what the register then holds.
+// With rgPart set (vi's operators that start or end within a line, 3.7's
+// rg_flags) the first line is taken from column rgPC and the last cut at
+// column rgPW, both as new records, and the slot's mode is REG_PART;
+// rgPart is cleared. When the heap has no room the register is unchanged.
+// AC is ST_OK or ST_MEM; IO is clobbered, and LINEBUF when rgPart is set.
+rgYank, dac ryX
+    dio ryC
+    lac ryC
+    sub [CH_0+1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ryNoD
+    sub [0d9]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ryNoD
+    jsp rgShift
+ryNoD, lio ryC
+    jsp rgSlot
+    dac ryS
+    dzm ryOld               // a to z: what it held is dropped
+    lac ryC
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ryCnt
+    lio i ryS
+    jsp lsLen
+    dac ryOld
+ryCnt, lac lnB
+    sub lnA
+    add [1]
+    dac ryN
+// partial: the first and last lines made anew, held as roots meanwhile
+    dzm hpHold1
+    dzm hpHold2
+    lac rgPart
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ryAl
+    lio lnA
+    jsp lnPtr
+    lia
+    jsp getLine
+    lac lnA
+    SKIP_NEXT_IF_SAME lnB
+    jmp ryF
+    lac rgPW                // one line: cut at rgPW as well
+    dac lbLen
+ryF, jsp ryFrom
+    jsp putLine
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ryMem
+    dac hpHold1
+    lac lnA
+    SKIP_NEXT_IF_DIFFERENT lnB
+    jmp ryAl
+    lio lnB
+    jsp lnPtr
+    lia
+    jsp getLine
+    lac rgPW
+    dac lbLen
+    jsp putLine
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ryMem
+    dac hpHold2
+// the list: what the register keeps, then these lines
+ryAl, lac ryN
+    add ryOld
+    add [REC_HDR]
+    lia
+    jsp hpAlloc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ryMem
+    dac ryNew
+    lac ryN
+    add ryOld
+    ior [REC_LIST]
+    dac i ryNew
+    lac ryNew
+    add [1]
+    dac ryD
+    dzm i ryD
+    idx ryD
+// the old list, found in its slot after the allocation, which may move it
+    lac i ryS
+    add [REC_HDR]
+    dac ryP
+ryOldL, lac ryOld
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ryTab
+    lac i ryP
+    dac i ryD
+    idx ryP
+    idx ryD
+    lac ryOld
+    sub [1]
+    dac ryOld
+    jmp ryOldL
+ryTab, lac lnA
+    add [LT_BASE]
+    dac ryP
+    dzm ryI
+ryNewL, lac ryI
+    SKIP_NEXT_IF_DIFFERENT ryN
+    jmp ryDone
+    lac i ryP
+    and [LT_PTR]
+    dac ryW
+    lac rgPart
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ryPut
+    lac ryI                 // partial: the first and last are the new ones
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ryH1
+    add [1]
+    SKIP_NEXT_IF_SAME ryN
+    jmp ryPut
+    lac hpHold2
+    jmp ryPw
+ryH1, lac hpHold1
+ryPw, dac ryW
+ryPut, lac ryW
+    dac i ryD
+    idx ryP
+    idx ryD
+    idx ryI
+    jmp ryNewL
+ryDone, lac ryNew
+    dac i ryS
+    lac ryS
+    add [1]
+    dac ryD
+    lac rgPart
+    dac i ryD               // REG_LINES or REG_PART
+    dzm rgPart
+    dzm hpHold1
+    dzm hpHold2
+    law ST_OK
+    jmp i ryX
+ryMem, dzm rgPart
+    dzm hpHold1
+    dzm hpHold2
+    law ST_MEM
+    jmp i ryX
+
+// ryFrom -- LINEBUF's first rgPC characters taken out. AC and IO are
+// clobbered.
+ryFrom, dac rfX
+    lac rgPC
+    sub lbLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rfAll
+    lac [LINEBUF]
+    dac rfD
+    add rgPC
+    dac rfS
+    lac lbLen
+    sub rgPC
+    dac lbLen
+    dac rfN
+rfL, lac rfN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rfE
+    lac i rfS
+    dac i rfD
+    idx rfS
+    idx rfD
+    lac rfN
+    sub [1]
+    dac rfN
+    jmp rfL
+rfAll, dzm lbLen
+    lac [LINEBUF]
+    dac rfD
+rfE, dzm i rfD
+    jmp i rfX
+
+// rgShift -- 3.7's kshift: register 9's lines dropped, 1 to 8 each moved up
+// one, 1 left empty. AC is clobbered, IO preserved.
+rgShift, dac rkX
+    lac [REG_BASE+REG_9*REG_WORDS]
+    dac rkD
+    sub [REG_WORDS]
+    dac rkS
+    law 0d8
+    dac rkN
+rkL, lac i rkS
+    dac i rkD
+    idx rkS
+    idx rkD
+    lac i rkS
+    dac i rkD
+    lac rkS
+    sub [REG_WORDS+1]
+    dac rkS
+    lac rkD
+    sub [REG_WORDS+1]
+    dac rkD
+    lac rkN
+    sub [1]
+    dac rkN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rkL
+    dzm i rkD               // 1, at rkD now
+    idx rkD
+    dzm i rkD
+    jmp i rkX
+
+// lnRepl -- the record in lnR as dot's line in place of its own, the marks
+// moved to it, undoable as a change of dot: a change within a line, as vi
+// makes them (vops.ac, vinsert.ac). lnR is held as a root meanwhile. When
+// the heap has no room for undo's list, nothing changes and undo has
+// nothing.
+// AC is ST_OK or ST_MEM; IO is clobbered, and lnA and lnB.
+lnRepl, dac rpX
+    lac lnR
+    dac hpHold1
+    dzm undList
+    lac dot
+    dac lnA
+    dac lnB
+    jsp lsMake
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rpMem
+    dac undList
+    jsp lnChange
+    law UND_CHANGE
+    dac undKind
+    lac dot
+    dac undAp1
+    add [1]
+    dac undAp2
+    sub [2]
+    dac undDel
+    lac hpHold1
+    dac lnR
+    dzm hpHold1
+    lio dot
+    jsp lnPutMark
+    law ST_OK
+    jmp i rpX
+rpMem, dzm undKind
+    dzm hpHold1
+    law ST_MEM
+    jmp i rpX
+
+// lnPutPart -- 3.7's pragged: the lines of the list pgSrc put into dot's
+// line at column pgAt, the first taken from its column pgF, the last cut at
+// pgW: dot's line becomes its head, the first, the lines between, then the
+// last and dot's tail, as new records. Undo puts dot's line back; dot is
+// the first of them. pgSrc is held as a root meanwhile. A failure part way
+// leaves the lines put in so far, and undo takes them out.
+// AC is ST_OK, ST_MEM, ST_FULL or ST_LONG; IO is clobbered, and LINEBUF,
+// GENBUF, lnA, lnB, lnN and rgPC.
+lnPutPart, dac pgX
+    lac pgSrc
+    dac hpHold2
+    lio pgSrc
+    jsp lsLen
+    dac pgN
+// dot's line into GENBUF, kept for its head and tail
+    lio dot
+    jsp lnPtr
+    lia
+    jsp getLine
+    lac lbLen
+    dac pgG
+    lac [LINEBUF]
+    dac pgS
+    lac [GENBUF]
+    dac pgD
+    lac lbLen
+    add [1]
+    dac pgK
+    jsp pgCopy
+// undo: dot's line taken out, the lines that follow put in
+    dzm undList
+    lac dot
+    dac lnA
+    dac lnB
+    jsp lsMake
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pgNoU
+    dac undList
+    jsp lnChange
+    law UND_CHANGE
+    dac undKind
+    lac dot
+    dac undAp1
+    add [1]
+    dac undAp2
+    sub [2]
+    dac undDel
+    dzm pgI
+pgL, lac pgI
+    SKIP_NEXT_IF_DIFFERENT pgN
+    jmp pgEnd
+    lac hpHold2
+    dac lsList
+    lio pgI
+    jsp lsElem
+    lia
+    jsp getLine
+    lac pgI                 // the last: cut at pgW
+    add [1]
+    SKIP_NEXT_IF_SAME pgN
+    jmp pgF1
+    lac pgW
+    sub lbLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp pgF1
+    lac pgW
+    dac lbLen
+pgF1, lac pgI               // the first: from pgF, after dot's head
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pgT
+    lac pgF
+    dac rgPC
+    jsp ryFrom
+    lac lbLen               // room for the head: the text moves up pgAt
+    add pgAt
+    sub [LB_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp pgLong
+    lac lbLen
+    add [LINEBUF]
+    dac pgS
+    add pgAt
+    dac pgD
+    lac lbLen
+    add [1]
+    dac pgK
+pgUp, lac pgK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pgHd
+    lac i pgS
+    dac i pgD
+    lac pgS
+    sub [1]
+    dac pgS
+    lac pgD
+    sub [1]
+    dac pgD
+    lac pgK
+    sub [1]
+    dac pgK
+    jmp pgUp
+pgHd, lac [GENBUF]
+    dac pgS
+    lac [LINEBUF]
+    dac pgD
+    lac pgAt
+    dac pgK
+    jsp pgCopy
+    lac lbLen
+    add pgAt
+    dac lbLen
+pgT, lac pgI                // the last: dot's tail after it
+    add [1]
+    SKIP_NEXT_IF_SAME pgN
+    jmp pgPut
+    lac pgG
+    sub pgAt
+    dac pgK
+    add lbLen
+    sub [LB_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp pgLong
+    lac pgAt
+    add [GENBUF]
+    dac pgS
+    lac lbLen
+    add [LINEBUF]
+    dac pgD
+    lac pgK
+    add lbLen
+    dac lbLen
+    idx pgK                 // and the 0 after it
+    jsp pgCopy
+pgPut, jsp putLine
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pgMem
+    dac lnR
+    lac pgI
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pgIns
+    lio dot                 // the first in dot's place, its marks kept
+    jsp lnPutMark
+    jmp pgNx
+pgIns, lio lnR
+    jsp lnInsert
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pgOut
+pgNx, idx pgI
+    jmp pgL
+pgEnd, lac undAp1
+    dac dot
+    law ST_OK
+    jmp pgOut
+pgNoU, dzm undKind          // no undo list: nothing changed
+    law ST_MEM
+    jmp pgOut
+pgLong, law ST_LONG
+    jmp pgOut
+pgMem, law ST_MEM
+pgOut, dzm hpHold2
+    jmp i pgX
+
+// pgCopy -- pgK words from pgS up to pgD. AC is clobbered, IO preserved.
+pgCopy, dac pcyX
+pcyL, lac pgK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i pcyX
+    lac i pgS
+    dac i pgD
+    idx pgS
+    idx pgD
+    lac pgK
+    sub [1]
+    dac pgK
+    jmp pcyL
+rpX, 0
+pgX, 0
+pgN, 0
+pgG, 0
+pgS, 0
+pgD, 0
+pgK, 0
+pgI, 0
+pcyX, 0
+ryX, 0
+ryC, 0
+ryS, 0
+ryOld, 0
+ryN, 0
+ryNew, 0
+ryD, 0
+ryP, 0
+ryI, 0
+ryW, 0
+rfX, 0
+rfS, 0
+rfD, 0
+rfN, 0
+rkX, 0
+rkS, 0
+rkD, 0
+rkN, 0
+endloc
+
+// The buffer's state.
+dot, 0                      // the current line, 0 for none
+dol, 0                      // the last line, 0 when the buffer is empty
+chng, 0                     // changes made, counting on; 0 is not modified
+lbLen, 0                    // LINEBUF's length in characters
+inGlobal, 0                 // not 0 while g runs its commands
+undKind, 0                  // UND_NONE ... UND_MOVE
+undAp1, 0                   // the lines the last change put in: undAp1 up to
+undAp2, 0                   //   undAp2, not including it
+undDel, 0                   // the line after which the lines it took out go back
+undADot, 0                  // dot before an UND_ALL change
+undList, 0                  // the lines it took out: a list record, 0 for none
+unMoved, 0                  // lnUndo undid a move
+unCnt0, 0                   // dol before lnUndo
+uLine, 0                    // U's line as it was, a record (visual mode's)
+uLnum, 0                    //   and its line number, 0 for none
+uSync, 0                    // dot's line before vi's first change on it since
+                            //   dot came there (3.7's *dot), a record
+gList, 0                    // the buffer as g found it, a list record
+ltLow, 0                    // the lowest table word moved since g looked
+lnA, 0                      // the routines' lines
+lnB, 0
+lnN, 0
+lnT, 0
+lnR, 0                      // lnPutMark's record
+lsList, 0                   // lsElem's list
+cpSrc, 0                    // lnCopyIn's source: CP_TABLE or CP_LIST
+cpFrom, 0                   //   the table's lines cpFrom to cpTo
+cpTo, 0
+cpSlot, 0                   //   a register slot's full address, 0 for undo's list
+cpCnt, 0                    //   lines put in
+rgPart, 0                   // rgYank's: REG_PART for a partial yank, else 0
+rgPC, 0                     //   the first line taken from this column
+rgPW, 0                     //   the last line cut at this one
+pgSrc, 0                    // lnPutPart's: the list put in
+pgF, 0                      //   its first line taken from this column
+pgW, 0                      //   its last cut at this one
+pgAt, 0                     //   dot's line split at this column
+marks,                      // a to z and '': a record's address, 0 for none
+    table NMARK, 0

@@ -1,0 +1,209 @@
+001 Paper tape is read and punched in FOCAL's ASCII form.
+002 The light pen sees a point at the moment it is drawn.
+003 A microtape is mounted on a drive from one to eight.
+004 The line printer takes what is written to LP:.
+005 Sense switch 2 starts each caller in visual mode.
+006 A word of eighteen bits holds three six bit characters.
+007 One caller at a time talks to the editor over telnet.
+008 Every line ends in a carriage return on the volume.
+009 Core memory keeps what it holds when the power is off.
+010 The drum keeps the files the editors share.
+011 Paper tape is read and punched in FOCAL's ASCII form.
+012 The light pen sees a point at the moment it is drawn.
+013 A microtape is mounted on a drive from one to eight.
+014 The line printer takes what is written to LP:.
+015 Sense switch 2 starts each caller in visual mode.
+016 A word of eighteen bits holds three six bit characters.
+017 One caller at a time talks to the editor over telnet.
+018 Every line ends in a carriage return on the volume.
+019 Core memory keeps what it holds when the power is off.
+020 The drum keeps the files the editors share.
+
+021 Paper tape is read and punched in FOCAL's ASCII form.
+022 The light pen sees a point at the moment it is drawn.
+023 A microtape is mounted on a drive from one to eight.
+024 The line printer takes what is written to LP:.
+025 Sense switch 2 starts each caller in visual mode.
+026 A word of eighteen bits holds three six bit characters.
+027 One caller at a time talks to the editor over telnet.
+028 Every line ends in a carriage return on the volume.
+029 Core memory keeps what it holds when the power is off.
+030 The drum keeps the files the editors share.
+031 Paper tape is read and punched in FOCAL's ASCII form.
+032 The light pen sees a point at the moment it is drawn.
+033 A microtape is mounted on a drive from one to eight.
+034 The line printer takes what is written to LP:.
+035 Sense switch 2 starts each caller in visual mode.
+036 A word of eighteen bits holds three six bit characters.
+037 One caller at a time talks to the editor over telnet.
+038 Every line ends in a carriage return on the volume.
+039 Core memory keeps what it holds when the power is off.
+040 The drum keeps the files the editors share.
+
+041 Paper tape is read and punched in FOCAL's ASCII form.
+042 The light pen sees a point at the moment it is drawn.
+043 A microtape is mounted on a drive from one to eight.
+044 The line printer takes what is written to LP:.
+045 Sense switch 2 starts each caller in visual mode.
+046 A word of eighteen bits holds three six bit characters.
+047 One caller at a time talks to the editor over telnet.
+048 Every line ends in a carriage return on the volume.
+049 Core memory keeps what it holds when the power is off.
+050 The drum keeps the files the editors share.
+051 Paper tape is read and punched in FOCAL's ASCII form.
+052 The light pen sees a point at the moment it is drawn.
+053 A microtape is mounted on a drive from one to eight.
+054 The line printer takes what is written to LP:.
+055 Sense switch 2 starts each caller in visual mode.
+056 A word of eighteen bits holds three six bit characters.
+057 One caller at a time talks to the editor over telnet.
+058 Every line ends in a carriage return on the volume.
+059 Core memory keeps what it holds when the power is off.
+060 The drum keeps the files the editors share.
+
+061 Paper tape is read and punched in FOCAL's ASCII form.
+062 The light pen sees a point at the moment it is drawn.
+063 A microtape is mounted on a drive from one to eight.
+064 The line printer takes what is written to LP:.
+065 Sense switch 2 starts each caller in visual mode.
+066 A word of eighteen bits holds three six bit characters.
+067 One caller at a time talks to the editor over telnet.
+068 Every line ends in a carriage return on the volume.
+069 Core memory keeps what it holds when the power is off.
+070 The drum keeps the files the editors share.
+071 Paper tape is read and punched in FOCAL's ASCII form.
+072 The light pen sees a point at the moment it is drawn.
+073 A microtape is mounted on a drive from one to eight.
+074 The line printer takes what is written to LP:.
+075 Sense switch 2 starts each caller in visual mode.
+076 A word of eighteen bits holds three six bit characters.
+077 One caller at a time talks to the editor over telnet.
+078 Every line ends in a carriage return on the volume.
+079 Core memory keeps what it holds when the power is off.
+080 The drum keeps the files the editors share.
+
+081 Paper tape is read and punched in FOCAL's ASCII form.
+082 The light pen sees a point at the moment it is drawn.
+083 A microtape is mounted on a drive from one to eight.
+084 The line printer takes what is written to LP:.
+085 Sense switch 2 starts each caller in visual mode.
+086 A word of eighteen bits holds three six bit characters.
+087 One caller at a time talks to the editor over telnet.
+088 Every line ends in a carriage return on the volume.
+089 Core memory keeps what it holds when the power is off.
+090 The drum keeps the files the editors share.
+091 Paper tape is read and punched in FOCAL's ASCII form.
+092 The light pen sees a point at the moment it is drawn.
+093 A microtape is mounted on a drive from one to eight.
+094 The line printer takes what is written to LP:.
+095 Sense switch 2 starts each caller in visual mode.
+096 A word of eighteen bits holds three six bit characters.
+097 One caller at a time talks to the editor over telnet.
+098 Every line ends in a carriage return on the volume.
+099 Core memory keeps what it holds when the power is off.
+100 The drum keeps the files the editors share.
+
+101 Paper tape is read and punched in FOCAL's ASCII form.
+102 The light pen sees a point at the moment it is drawn.
+103 A microtape is mounted on a drive from one to eight.
+104 The line printer takes what is written to LP:.
+105 Sense switch 2 starts each caller in visual mode.
+106 A word of eighteen bits holds three six bit characters.
+107 One caller at a time talks to the editor over telnet.
+108 Every line ends in a carriage return on the volume.
+109 Core memory keeps what it holds when the power is off.
+110 The drum keeps the files the editors share.
+111 Paper tape is read and punched in FOCAL's ASCII form.
+112 The light pen sees a point at the moment it is drawn.
+113 A microtape is mounted on a drive from one to eight.
+114 The line printer takes what is written to LP:.
+115 Sense switch 2 starts each caller in visual mode.
+116 A word of eighteen bits holds three six bit characters.
+117 One caller at a time talks to the editor over telnet.
+118 Every line ends in a carriage return on the volume.
+119 Core memory keeps what it holds when the power is off.
+120 The drum keeps the files the editors share.
+
+121 Paper tape is read and punched in FOCAL's ASCII form.
+122 The light pen sees a point at the moment it is drawn.
+123 A microtape is mounted on a drive from one to eight.
+124 The line printer takes what is written to LP:.
+125 Sense switch 2 starts each caller in visual mode.
+126 A word of eighteen bits holds three six bit characters.
+127 One caller at a time talks to the editor over telnet.
+128 Every line ends in a carriage return on the volume.
+129 Core memory keeps what it holds when the power is off.
+130 The drum keeps the files the editors share.
+131 Paper tape is read and punched in FOCAL's ASCII form.
+132 The light pen sees a point at the moment it is drawn.
+133 A microtape is mounted on a drive from one to eight.
+134 The line printer takes what is written to LP:.
+135 Sense switch 2 starts each caller in visual mode.
+136 A word of eighteen bits holds three six bit characters.
+137 One caller at a time talks to the editor over telnet.
+138 Every line ends in a carriage return on the volume.
+139 Core memory keeps what it holds when the power is off.
+140 The drum keeps the files the editors share.
+
+141 Paper tape is read and punched in FOCAL's ASCII form.
+142 The light pen sees a point at the moment it is drawn.
+143 A microtape is mounted on a drive from one to eight.
+144 The line printer takes what is written to LP:.
+145 Sense switch 2 starts each caller in visual mode.
+146 A word of eighteen bits holds three six bit characters.
+147 One caller at a time talks to the editor over telnet.
+148 Every line ends in a carriage return on the volume.
+149 Core memory keeps what it holds when the power is off.
+150 The drum keeps the files the editors share.
+151 Paper tape is read and punched in FOCAL's ASCII form.
+152 The light pen sees a point at the moment it is drawn.
+153 A microtape is mounted on a drive from one to eight.
+154 The line printer takes what is written to LP:.
+155 Sense switch 2 starts each caller in visual mode.
+156 A word of eighteen bits holds three six bit characters.
+157 One caller at a time talks to the editor over telnet.
+158 Every line ends in a carriage return on the volume.
+159 Core memory keeps what it holds when the power is off.
+160 The drum keeps the files the editors share.
+
+161 Paper tape is read and punched in FOCAL's ASCII form.
+162 The light pen sees a point at the moment it is drawn.
+163 A microtape is mounted on a drive from one to eight.
+164 The line printer takes what is written to LP:.
+165 Sense switch 2 starts each caller in visual mode.
+166 A word of eighteen bits holds three six bit characters.
+167 One caller at a time talks to the editor over telnet.
+168 Every line ends in a carriage return on the volume.
+169 Core memory keeps what it holds when the power is off.
+170 The drum keeps the files the editors share.
+171 Paper tape is read and punched in FOCAL's ASCII form.
+172 The light pen sees a point at the moment it is drawn.
+173 A microtape is mounted on a drive from one to eight.
+174 The line printer takes what is written to LP:.
+175 Sense switch 2 starts each caller in visual mode.
+176 A word of eighteen bits holds three six bit characters.
+177 One caller at a time talks to the editor over telnet.
+178 Every line ends in a carriage return on the volume.
+179 Core memory keeps what it holds when the power is off.
+180 The drum keeps the files the editors share.
+
+181 Paper tape is read and punched in FOCAL's ASCII form.
+182 The light pen sees a point at the moment it is drawn.
+183 A microtape is mounted on a drive from one to eight.
+184 The line printer takes what is written to LP:.
+185 Sense switch 2 starts each caller in visual mode.
+186 A word of eighteen bits holds three six bit characters.
+187 One caller at a time talks to the editor over telnet.
+188 Every line ends in a carriage return on the volume.
+189 Core memory keeps what it holds when the power is off.
+190 The drum keeps the files the editors share.
+191 Paper tape is read and punched in FOCAL's ASCII form.
+192 The light pen sees a point at the moment it is drawn.
+193 A microtape is mounted on a drive from one to eight.
+194 The line printer takes what is written to LP:.
+195 Sense switch 2 starts each caller in visual mode.
+196 A word of eighteen bits holds three six bit characters.
+197 One caller at a time talks to the editor over telnet.
+198 Every line ends in a carriage return on the volume.
+199 Core memory keeps what it holds when the power is off.
+200 The drum keeps the files the editors share.

@@ -1,0 +1,1614 @@
+// exops.ac -- ex's line commands, as 3.7's ex_cmds.c and ex_cmdsub.c do
+// them: a i c, d ya pu, co t m, j, < >, k mark, p l nu # =, z and ^D, u,
+// q x wq w, ve; text input (ex_get.c's gettty, with autoindent), the
+// printing of lines (ex_put.c), and the reports of lines changed (killcnt,
+// netchange). A command is reached by jmp from the dispatch (excmd.ac) and
+// goes back to exNext; the routines are entered by jsp and return by jmp i.
+// In bank EX_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, excmd.ac, exaddr.ac,
+// options.ac, lines.ac and heap.ac (bank 0), termio.ac and messages.ac,
+// files.ac (fiNoMore, fiXit, fiWq, fiWrite).
+
+#define Z_EOF       0777                  // z's op for ^D: no character is it
+
+local caGo, cdR, cyR, cyMem, cpN, cpP, cpR, cpGo, cmIsC, cmGo, cmMk, cmMk2, \
+    cmT, cmHave, cmErr, cmE1, cmE2, stFull, cjC, cjGo, cjG, cjA, cjS, cjP, \
+    cjCh, cjL, cjWh, cjSkip, cjCp, cjNext, cjEnd, cjOut, cjDel, cjMem, csC, \
+    csN, csCnt, csGo, csW, csA, csL, csI, csS, csLt, csNew, csG, csCp, csP, \
+    csCh, csPut, csPL, csMk, csNext, csEnd, csLong, ckC, ckOk, ckSet, cPr0, \
+    cdE, cdNe, cdZ, zEof, zHadpr, czGo, czW, czEx, czC, czOp, czEo, czUp, \
+    czRep, czNx, czDig, czLn, czDL, czDE, czNoD, czScr, czScr2, czSetL, \
+    czSet, czS2, czDot, czDone, z2S, z2Eof, z2Pl, z2Def, z2Mid, z2M1, z2M2, \
+    z2Up, z2U1, z2Fix, z2F1, z2F2, z2F3, z2Pr, z2Lines, z2AtE, z2AtZ, \
+    z2Bot, z2Top, z2F4, z2F5, cuC, cuNet, cuErr, cuE1, cuE2, cuE3, cqEol, \
+    cqGo, cqNm, aiflag, lastin, atX, atL, atMem, gtX, gtC, gtUp, gtOff, \
+    gtAi, gtD, gtCase, gtUp0, gtUnget, gtDot, gtNl, gtAiE, gtRd, gtLoop, gtN, \
+    gtL, gtP, gtLong, gtEnd, gtS, gtD0, gtSm, gtSp, gtTb, gtSmN, gtInd, \
+    gtCp, gtCh, gtFin, gtEof, gtLine, gtTbX, siX, siN, wcX, wcC, wcI, wcP, \
+    wcL, wcSp, wcTb, wcN, ntX, ntC, ntGo, ntL, btX, btI, btGo, btL, idX, \
+    idN, idK, idT, idT1, idS, idS1, idPut, idPC, ipX, idP, mlX, mlA, mlS, \
+    mlL, mlAdd, spX, spN, sp40, spGo, spL, spE, spE2, d0X, ryX, kdX, kcX, \
+    kcN, kcGo, kcP, kcL, kcE, kcD, kcEnd, ncX, ncI, ncW, ncMore, ncS, ncDo, \
+    pxX, pxL, pxLoop, pxN, plA, plB, plMove, p1X, p1N, p1Txt, p1K, p1L, \
+    p1P, p1E, pcX, pcC, pcCtl, pcTab, pcSelf, sbX, sbC, sbDo, appTty, \
+    getTty, gtTab, setIn, whiteCnt, backTab, indent, mult, \
+    delete0, yankReg, killed, killCnt, pLines, putCh, gtEf, \
+    slobber, splitIt, stErr
+
+// cAppend -- a: text after the line addressed.
+cAppend, jsp setDot
+    jsp exclam
+    dac aiflag
+    jsp newLine
+    lac addr1
+    dac LNA
+    jsp i [lnDelNone:0]
+    lio addr2
+    jsp setIn
+    lio addr2
+    jmp caGo
+// cInsert -- i: text before it.
+cInsert, jsp setDot
+    jsp nonZero
+    jsp exclam
+    dac aiflag
+    jsp newLine
+    lac addr1
+    dac LNA
+    jsp i [lnDelNone:0]
+    lio addr2
+    jsp setIn
+    lac addr2
+    sub [1]
+    lia
+// as 3.7's nochng, what is typed is not printed again
+caGo, jsp appTty
+    lac CHNG
+    dac lchng
+    jmp exNext
+
+// cChange -- c: the lines deleted, text in their place.
+cChange, jsp exclam
+    dac aiflag
+    jsp setCNL
+    lio addr1
+    jsp setIn
+    jsp delete0
+    lac addr1
+    sub [1]
+    lia
+    jmp caGo
+
+// cDelete -- d: the lines deleted, into a register first when one is named.
+cDelete, jsp cmdReg
+    dac cdR
+    jsp setCNL
+    lac cdR
+    SKIP_NEXT_IF_AC_ZERO
+    jsp yankReg
+    jsp delete0
+    lac addr1
+    dac LNA
+    jsp i [lnAppNone:0]
+    jmp exNext
+
+// cYank -- ya: the lines into a register, or into undo's list for pu.
+cYank, jsp cmdReg
+    dac cdR
+    jsp setCount
+    jsp eol
+    lac cdR
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cyR
+    lac addr1
+    dac LNA
+    lac addr2
+    dac LNB
+    jsp i [lnSave:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cyMem
+    dzm i [undKind:0]       // UND_NONE: a yank is not undone
+    jsp killed
+    jmp exNext
+cyR, jsp yankReg
+    jmp exNext
+cyMem, lac [mOutUndo:MSG_BANK]
+    jmp exErr
+
+// cPut -- pu: a register's lines, or undo's list, after the line.
+cPut, jsp setDot
+    jsp cmdReg
+    dac cdR
+    jsp eol
+    law CP_LIST
+    dac i [cpSrc:0]
+    lac cdR
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cpR
+// undo's list: as 3.7's put, the change in lines reported
+    lio i [undList:0]
+    jsp i [lsLen:0]
+    dac cpN
+    dzm i [cpSlot:0]
+    lac addr2
+    dac LNA
+    cli
+    jsp i [lnAppStart:0]
+    jsp i [lnCopyIn:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp stErr
+    law UND_PUT
+    dac i [undKind:0]
+    lio cpN
+    jsp netChange
+    jmp exNext
+// a register: as 3.7's putreg, its lines counted
+cpR, lac addr1
+    dac LNA
+    jsp i [lnDelNone:0]
+    jsp i [lnAppNone:0]
+    lio cdR
+    jsp i [rgSlot:0]
+    dac i [cpSlot:0]
+    dac cpP
+    lac i cpP
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cpGo
+    lac cdR
+    dac i [msgC:MSG_BANK]
+    lac [mNoReg:MSG_BANK]
+    jmp exErr
+cpGo, lac addr2
+    dac LNA
+    cli
+    jsp i [lnAppStart:0]
+    jsp i [lnCopyIn:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp stErr
+    lio i [cpCnt:0]
+    jsp killCnt
+    jmp exNext
+
+// cCopy, cMove -- co and t, m: 3.7's move.
+cCopy, jsp setDot
+    law 1
+    dac cmIsC
+    jmp cmGo
+// m: '' where the lines were, as 3.7's markpr; past the last line 3.7's
+// table names no line, and the mark is left naming none
+cMove, jsp setDot1
+    dzm cmIsC
+    lac addr2
+    SKIP_NEXT_IF_SAME DOT
+    jmp cmMk2
+    lac addr1
+    sub [1]
+    jmp cmMk
+cmMk2, lac addr2
+    add [1]
+    dac cmT
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    dzm cmT
+    lac cmT
+cmMk, lia
+    jsp i [lnMarkPrev:0]
+cmGo, jsp nonZero
+    jsp address
+    dac cmT
+    lai
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cmHave
+    lac [cmdName:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mWhere:MSG_BANK]
+    jmp exErr
+cmHave, jsp newLine
+    lac addr1
+    dac LNA
+    lac addr2
+    dac LNB
+    lac cmT
+    dac LNT
+    lio cmIsC
+    jsp i [lnMove1:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cmErr
+    jsp killed
+    jmp exNext
+cmErr, SKIP_NEXT_IF_DIFFERENT [ST_NOTHING]
+    jmp cmE1
+    SKIP_NEXT_IF_DIFFERENT [ST_MOVED]
+    jmp cmE2
+    jmp stErr
+cmE1, lac [mNothing:MSG_BANK]
+    jmp exErr
+cmE2, lac [mMoved:MSG_BANK]
+    jmp exErr
+
+// stErr -- ST_MEM or ST_FULL, in AC, as its error. Reached by jmp.
+stErr, SKIP_NEXT_IF_DIFFERENT [ST_FULL]
+    jmp stFull
+    lac [mOutMem:MSG_BANK]
+    jmp exErr
+stFull, lac [mTooMany:MSG_BANK]
+    jmp exErr
+
+// cJoin -- j: the lines joined, with 3.7's blanks between them unless j!.
+cJoin, jsp exclam
+    dac cjC
+    jsp setCount
+    jsp nonZero
+    jsp newLine
+    lac given
+    sub [2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cjGo
+    lac addr2
+    SKIP_NEXT_IF_DIFFERENT DOL
+    jmp cjGo
+    idx addr2
+cjGo, dzm cjG               // GENBUF's length
+    lac addr1
+    dac cjA
+cjL, lio cjA
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    dzm cjS                 // the place in LINEBUF
+    lac cjA
+    SKIP_NEXT_IF_DIFFERENT addr1
+    jmp cjCp
+    lac cjC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cjCp
+// after the first, unless j!: its leading blanks dropped, and when there is
+// text on both sides, a blank between, two after a period, none before a )
+cjWh, lac cjS
+    add [LINEBUF]
+    dac cjP
+    lac i cjP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp cjSkip
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp cjSkip
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cjCp
+    dac cjCh
+    lac cjG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cjCp
+    add [GENBUF-1]
+    dac cjP
+    lac i cjP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp cjCp
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp cjCp
+    lac cjCh
+    SKIP_NEXT_IF_DIFFERENT [')']
+    jmp cjCp
+    lac cjG
+    add [GENBUF]
+    dac cjP
+    law CH_SP
+    dac i cjP
+    idx cjG
+    lac cjP
+    sub [1]
+    dac cjP
+    lac i cjP
+    SKIP_NEXT_IF_SAME [CH_DOT]
+    jmp cjCp
+    lac cjG
+    add [GENBUF]
+    dac cjP
+    law CH_SP
+    dac i cjP
+    idx cjG
+    jmp cjCp
+cjSkip, idx cjS
+    jmp cjWh
+// the line's text, held to 3.7's length
+cjCp, lac cjS
+    add [LINEBUF]
+    dac cjP
+    lac i cjP
+    dac cjCh
+    lac cjG
+    add [GENBUF]
+    dac cjP
+    lac cjCh
+    dac i cjP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cjNext
+    idx cjS
+    idx cjG
+    sub [LB_SIZE-1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cjCp
+    lac [mJoinLong:MSG_BANK]
+    jmp exErr
+cjNext, lac cjA
+    SKIP_NEXT_IF_DIFFERENT addr2
+    jmp cjEnd
+    idx cjA
+    jmp cjL
+// the lines deleted, then the joined line put in their place
+cjEnd, jsp delete0
+    lac cjG
+    dac LBLEN
+    dzm cjS
+cjOut, lac cjS
+    add [GENBUF]
+    dac cjP
+    lac i cjP
+    dac cjCh
+    lac cjS
+    add [LINEBUF]
+    dac cjP
+    lac cjCh
+    dac i cjP
+    lac cjS
+    SKIP_NEXT_IF_DIFFERENT cjG
+    jmp cjDel
+    idx cjS
+    jmp cjOut
+cjDel, lac addr1
+    sub [1]
+    dac LNA
+    cli
+    jsp i [lnAppStart:0]
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cjMem
+    lia
+    jsp i [lnInsert:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp stErr
+    jmp exNext
+cjMem, law ST_MEM
+    jmp stErr
+
+// cShift -- < and >: the lines shifted by shiftwidth, once for each < or >.
+cShift, lac cmdName
+    dac csC
+    law 1
+    dac csN
+csCnt, jsp peekChar
+    SKIP_NEXT_IF_SAME csC
+    jmp csGo
+    jsp ignChar
+    idx csN
+    jmp csCnt
+csGo, jsp setCNL
+    lac addr1
+    dac LNA
+    lac addr2
+    dac LNB
+    jsp i [lnSave:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cyMem
+    law UND_CHANGE
+    dac i [undKind:0]
+    lac csN
+    dac mlB
+    lio oShiftW
+    jsp mult
+    dac csW                 // the columns to shift by
+    lac addr1
+    dac csA
+csL, lac csA
+    dac DOT
+    lio csA
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    jsp whiteCnt
+    dac csI                 // the indent's columns
+    dio csS                 // where the text starts
+    lac csC
+    SKIP_NEXT_IF_SAME [CH_GT]
+    jmp csLt
+    lac LBLEN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp csNext
+    lac csI
+    add csW
+    jmp csNew
+csLt, lac csI
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp csNext
+    sub csW
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    cla
+// the new indent in GENBUF, then the text, the whole into LINEBUF
+csNew, dac csG
+    lac [GENBUF]
+    dac idDst
+    lio csG
+    jsp indent
+    dac csG                 // GENBUF's length
+    add LBLEN
+    sub csS
+    sub [LB_SIZE-2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp csLong
+csCp, lac csS
+    add [LINEBUF]
+    dac csP
+    lac i csP
+    dac csCh
+    lac csG
+    add [GENBUF]
+    dac csP
+    lac csCh
+    dac i csP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp csPut
+    idx csS
+    idx csG
+    jmp csCp
+csPut, lac csG
+    dac LBLEN
+    dzm csS
+csPL, lac csS
+    add [GENBUF]
+    dac csP
+    lac i csP
+    dac csCh
+    lac csS
+    add [LINEBUF]
+    dac csP
+    lac csCh
+    dac i csP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp csMk
+    idx csS
+    jmp csPL
+csMk, jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cjMem
+    dac i [lnR:0]
+    lio csA
+    jsp i [lnPutMark:0]
+csNext, lac csA
+    SKIP_NEXT_IF_DIFFERENT addr2
+    jmp csEnd
+    idx csA
+    jmp csL
+csEnd, jsp killed
+    jmp exNext
+csLong, lac [mShiftLong:MSG_BANK]
+    jmp exErr
+
+// cMarkK, cMark -- k and mark: 3.7's casek.
+cMarkK,
+cMark, jsp pastWh
+    jsp getChar
+    dac ckC
+    lia
+    jsp endCmd
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ckOk
+    lac [cmdName:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mMarkWhat:MSG_BANK]
+    jmp exErr
+ckOk, jsp newLine
+    lio ckC
+    jsp isLower
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ckSet
+    lac [mBadMark:MSG_BANK]
+    jmp exErr
+ckSet, jsp setDot
+    jsp nonZero
+    lac addr2
+    dac LNA
+    lac ckC
+    sub ['a']
+    lia
+    jsp i [lnMarkSet:0]
+    jmp exNext
+
+// cPrint, cList, cNumber, cNumberIt -- p, l, nu and #: the lines in the
+// flavor asked for, which lasts until the next command's flags.
+cList, jsp setCNL
+    law 1
+    dac listf
+    jmp cPr0
+cNumber,
+cNumberIt, jsp setCNL
+    law 1
+    dac numbf
+    jmp cPr0
+cPrint, jsp setCNL
+cPr0, dzm pflag
+// exPrint -- 3.7's print: label: the lines addressed typed, dot the last.
+// exPrint1 skips the check that the first is not line 0.
+exPrint, jsp nonZero
+exPrint1, lac addr1
+    dac plA
+    lac addr2
+    dac plB
+    law 1
+    dac plMove
+    jsp pLines
+    jmp exNext
+
+// cEquals -- =: the line's number, the last's when none is given.
+cEquals, jsp newLine
+    jsp setAll
+    lio addr2
+    jsp i [putDec:TERM_BANK]
+    jsp i [newline:TERM_BANK]
+    jmp exNext
+
+// cCtlD -- ^D alone on a command line: 3.7's EOF, the next scroll's worth
+// of lines; after an address, a new line first, as ^D does not echo one.
+cCtlD, lac addr2
+    SKIP_NEXT_IF_DIFFERENT [ADDR_NONE]
+    jmp cdE
+    jsp i [newline:TERM_BANK]
+cdE, lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cdZ
+    lac addr2
+    SKIP_NEXT_IF_SAME [ADDR_NONE]
+    jmp cdNe
+    jsp i [newline:TERM_BANK]
+cdNe, jsp notEmpty
+cdZ, law 1
+    dac zEof
+    lac hadpr
+    dac zHadpr
+    jmp czGo
+// cZ -- z: a window of lines, 3.7's zop: z[!][+-^=.]...[count][flags].
+cZ, dzm zEof
+    dzm zHadpr
+czGo, jsp notEmpty
+    dzm czW                 // 3.7's zweight
+    dzm czEx
+    lac zEof
+    SKIP_NEXT_IF_AC_ZERO
+    jmp czEo
+    jsp exclam
+    dac czEx
+    jsp getChar
+    dac czC
+    dac czOp
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp czUp
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp czRep
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp czRep
+    SKIP_NEXT_IF_DIFFERENT [CH_EQ]
+    jmp czNx
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp czNx
+    dzm czOp
+    jmp czDig
+czEo, law Z_EOF
+    dac czC
+    dac czOp
+    jmp czDig
+czUp, law 1
+    dac czW
+czRep, jsp peekChar
+    SKIP_NEXT_IF_SAME czOp
+    jmp czNx
+    jsp ignChar
+    idx czW
+    jmp czRep
+czNx, jsp getChar
+    dac czC
+// a count: the window option, and the lines typed
+czDig, lio czC
+    jsp isDigit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp czNoD
+    lac czC
+    sub ['0']
+    dac czLn
+czDL, jsp getChar
+    dac czC
+    lia
+    jsp isDigit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp czDE
+    lac czLn
+    sub [COUNT_CAP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp czDL                // held
+    lac czLn
+    ral 2s
+    add czLn
+    ral 1s
+    add czC
+    sub ['0']
+    dac czLn
+    jmp czDL
+czDE, lac czLn
+    dac oWindow
+    lac czOp
+    SKIP_NEXT_IF_SAME [CH_EQ]
+    jmp czSet
+    lac czLn
+    add [2]
+    dac czLn
+    jmp czSet
+// no count: scroll for ^D, a screen less one for z!, else two scrolls
+czNoD, lac czOp
+    SKIP_NEXT_IF_DIFFERENT [Z_EOF]
+    jmp czScr
+    lac czEx
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp czScr2
+    lac oLines
+    sub [1]
+    jmp czSetL
+czScr, lac oScroll
+    jmp czSetL
+czScr2, lac oScroll
+    ral 1s
+czSetL, dac czLn
+czSet, lac czC
+    SKIP_NEXT_IF_DIFFERENT [Z_EOF]
+    jmp czS2
+    jsp unGetChar
+    jsp newLine
+// with no address and no op, the line after dot
+czS2, lac addr2
+    dac addr1
+    SKIP_NEXT_IF_SAME [ADDR_NONE]
+    jmp czDot
+    lac czOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp czDot
+    lac DOT
+    sub DOL
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp czDot
+    lac DOT
+    add [1]
+    dac addr1
+    dac addr2
+czDot, jsp setDot
+// 3.7's zop2
+    dzm z2S                 // the split line, 0 for none
+    lac czOp
+    SKIP_NEXT_IF_DIFFERENT [Z_EOF]
+    jmp z2Eof
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp z2Pl
+    SKIP_NEXT_IF_DIFFERENT [CH_EQ]
+    jmp z2Mid
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp z2Mid
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp z2Up
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp z2Up
+    jmp z2Def
+z2Eof, lac addr2
+    SKIP_NEXT_IF_DIFFERENT DOL
+    jmp z2AtE
+z2Pl, lac addr2
+    SKIP_NEXT_IF_DIFFERENT DOL
+    jmp z2AtZ
+    lac czLn
+    dac mlB
+    lio czW
+    jsp mult
+    add addr2
+    dac addr2
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp z2Bot
+    idx addr2
+z2Def, lac addr2
+    dac addr1
+    add czLn
+    sub [1]
+    dac addr2
+    dac DOT
+    jmp z2Fix
+z2Mid, lac czLn
+    sub [1]
+    sar 1s
+    dac czLn
+    lac czOp
+    SKIP_NEXT_IF_SAME [CH_EQ]
+    jmp z2M1
+    lac czLn
+    sub [1]
+    dac czLn
+z2M1, lac addr2
+    sub czLn
+    dac addr1
+    lac czOp
+    SKIP_NEXT_IF_SAME [CH_EQ]
+    jmp z2M2
+    lac addr2
+    dac DOT
+    dac z2S
+z2M2, lac addr2
+    add czLn
+    dac addr2
+    lac czOp
+    SKIP_NEXT_IF_SAME [CH_DOT]
+    jmp z2Fix
+    jsp markDot
+    lac addr2
+    dac DOT
+    jmp z2Fix
+z2Up, lac czLn
+    dac mlB
+    lio czW
+    jsp mult
+    cma
+    add addr2
+    dac addr2
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp z2U1
+    jmp z2Top
+z2U1, sub czLn
+    add [1]
+    dac addr1
+    lac addr2
+    dac DOT
+// the window kept within the buffer
+z2Fix, lac addr1
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp z2F1
+    law 1
+    dac addr1
+z2F1, lac addr2
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp z2F2
+    jmp z2F3
+z2F2, lac DOL
+    dac addr2
+z2F3, lac DOT
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp z2F4
+    jmp z2F5
+z2F4, lac DOL
+    dac DOT
+z2F5, lac addr2
+    sub addr1
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp czDone
+// ^D after the prompt prints its first line over the prompt
+    lac czOp
+    SKIP_NEXT_IF_SAME [Z_EOF]
+    jmp z2Pr
+    lac zHadpr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp z2Pr
+    lio [CH_CR]
+    jsp i [putc:TERM_BANK]
+    law 1
+    dac shudclob
+z2Pr, dzm plMove
+    lac z2S
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp z2Lines
+    lac addr1
+    dac plA
+    lac z2S
+    sub [1]
+    dac plB
+    jsp pLines
+    jsp splitIt
+    lac z2S
+    dac plA
+    dac plB
+    jsp pLines
+    jsp splitIt
+    lac z2S
+    add [1]
+    dac addr1
+z2Lines, lac addr1
+    dac plA
+    lac addr2
+    dac plB
+    jsp pLines
+czDone, dzm pflag
+    jmp exNext
+z2AtE, lac [mAtEofNl:MSG_BANK]
+    jmp exErr
+z2AtZ, lac [mAtEofZ:MSG_BANK]
+    jmp exErr
+z2Bot, lac [mHitBot:MSG_BANK]
+    jmp exErr
+z2Top, lac [mHitTop:MSG_BANK]
+    jmp exErr
+
+// splitIt -- z='s line of dashes: 40 on a terminal wider than 80, else half
+// its width. AC and IO are clobbered.
+splitIt, dac spX
+    lac oColumns
+    sub [0d81]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sp40
+    lac oColumns
+    sar 1s
+    jmp spGo
+sp40, law 0d40
+spGo, dac spN
+spL, lac spN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp spE
+    jmp spE2
+spE, lio [CH_MINUS]
+    jsp i [putc:TERM_BANK]
+    lac spN
+    sub [1]
+    dac spN
+    jmp spL
+spE2, jsp i [newline:TERM_BANK]
+    jmp i spX
+
+// cUndo -- u: 3.7's undo, then what it did reported.
+cUndo, jsp setNoAddr
+    jsp markDot
+    jsp exclam
+    dac cuC
+    jsp newLine
+    lio cuC
+    jsp i [lnUndo:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cuErr
+    lac i [unMoved:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cuNet
+// a move undone is reported as a move
+    lac [nmMove:EX_BANK]
+    dac pkStr
+    jsp pkUnp
+    lac LNB
+    sub LNA
+    add [1]
+    lia
+    jsp killCnt
+    jmp exNext
+cuNet, lac DOL
+    sub i [unCnt0:0]
+    lia
+    jsp netChange
+    jmp exNext
+cuErr, SKIP_NEXT_IF_DIFFERENT [ST_NOUNDO]
+    jmp cuE1
+    SKIP_NEXT_IF_DIFFERENT [ST_SAME]
+    jmp cuE2
+    SKIP_NEXT_IF_DIFFERENT [ST_GLOBAL]
+    jmp cuE3
+    jmp cyMem
+cuE1, lac [mNoUndo:MSG_BANK]
+    jmp exErr
+cuE2, lac [mSame:MSG_BANK]
+    jmp exErr
+cuE3, lac [mUndoGlob:MSG_BANK]
+    jmp exErr
+
+// cQuit -- q and q!: leave, the caller dropped, unless the buffer was
+// changed and no ! says so (3.7's quickly), or, without !, files of the
+// argument list are not yet edited (3.7's nomore, files.ac's fiNoMore).
+cQuit, jsp setNoAddr
+    jsp exclam
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cqEol
+    lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cqNm
+    lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cqNm
+    lac [cmdName:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mNoWrite:MSG_BANK]
+    jmp exErr
+cqNm, jsp eol
+    jsp i [fiNoMore:FILE_BANK]
+    jmp cqGo
+cqEol, jsp eol
+cqGo, jsp i [tmQuit:TERM_BANK]
+
+// cXit, cWq, cWrite -- x, wq and w: files.ac's.
+cXit, jmp i [fiXit:FILE_BANK]
+cWq, jmp i [fiWq:FILE_BANK]
+cWrite, jmp i [fiWrite:FILE_BANK]
+
+// cVersion -- ve: the version.
+cVersion, jsp setNAEOL
+    lio [mVersion:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jsp i [newline:TERM_BANK]
+    jmp exNext
+
+// appTty -- 3.7's append(gettty, a): lines typed put in after line IO, until
+// a line of a lone period. AC and IO are clobbered.
+appTty, dac atX
+    dio LNA
+    cli
+    jsp i [lnAppStart:0]
+atL, jsp getTty
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i atX
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp atMem
+    lia
+    jsp i [lnInsert:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp stErr
+    jmp atL
+atMem, law ST_MEM
+    jmp stErr
+
+// getTty -- 3.7's gettty: a line typed into LINEBUF, lbLen its length. With
+// numbered lines its number is typed first; with autoindent (autoindent
+// xor a!), the indent is typed, ^D at the start backs it up a shiftwidth,
+// ^^D drops it for this line and 0^D for good, and what is typed before the
+// text adds to it.
+// AC is 0 for a line, 1 for the end of the text; IO is clobbered.
+getTty, dac gtX
+    dzm gtC
+    dzm gtUp                // 3.7's hadup: no indent on this line
+    dzm gtOff
+    lac i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gtRd
+    lac numbf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gtAi
+    law NUM_COLS
+    dac gtOff
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    law 4
+    dac i [pdWid:TERM_BANK]
+    lac DOT
+    add [1]
+    lia
+    jsp i [putDec:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+gtAi, lac oAutoInd
+    xor aiflag
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gtRd
+    law 1
+    dac i [tlCtlD:TERM_BANK]
+    jsp gtTab
+gtD, jsp getCd
+    dac gtC
+    SKIP_NEXT_IF_SAME [CH_CTLD]
+    jmp gtCase
+    lio lastin
+    jsp backTab
+    dac lastin
+    jsp gtTab
+    jmp gtD
+gtCase, SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp gtUp0
+    SKIP_NEXT_IF_DIFFERENT ['0']
+    jmp gtUp0
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp gtDot
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp gtNl
+    jmp gtAiE
+// ^ or 0 then ^D: the indent dropped, the ^ or 0 rubbed out
+gtUp0, jsp getCd
+    SKIP_NEXT_IF_SAME [CH_CTLD]
+    jmp gtUnget
+    lac gtC
+    SKIP_NEXT_IF_DIFFERENT ['0']
+    dzm lastin
+    lio [CH_BS]
+    jsp i [putc:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio [CH_BS]
+    jsp i [putc:TERM_BANK]
+    lio gtOff
+    jsp i [tabTo:TERM_BANK]
+    law 1
+    dac gtUp
+    jsp getChar
+    dac gtC
+    jmp gtAiE
+gtUnget, jsp unGetChar
+    jmp gtAiE
+gtDot, jsp peekChar
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp gtAiE
+    jsp ignChar
+    dzm i [tlCtlD:TERM_BANK]
+    jmp gtEof
+gtNl, law 1
+    dac gtUp
+gtAiE, dzm i [tlCtlD:TERM_BANK]
+// the line's text into GENBUF
+gtRd, lac gtC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gtLoop
+    jsp getChar
+    dac gtC
+gtLoop, dzm gtN
+gtL, lac gtC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp gtEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]     // a command list's end: the text's
+    jmp gtEf
+    lac gtN
+    sub [LB_SIZE-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gtLong
+    lac gtN
+    add [GENBUF]
+    dac gtP
+    lac gtC
+    dac i gtP
+    idx gtN
+    jsp getChar
+    dac gtC
+    jmp gtL
+gtLong, lac [mInLong:MSG_BANK]
+    jmp exErr
+gtEf, jsp unGetChar         // left for the dispatch, as 3.7's gettty
+    jmp gtEof
+// with autoindent, the blanks typed first added to the indent, and the
+// indent made again of TABs and blanks
+gtEnd, lac gtN
+    add [GENBUF]
+    dac gtP
+    dzm i gtP
+    dzm gtS                 // where GENBUF's text starts
+    dzm gtD0                // LINEBUF's length so far
+    lac oAutoInd
+    xor aiflag
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gtCp
+    lac gtUp
+    ior i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gtCp
+gtSm, lac gtS
+    add [GENBUF]
+    dac gtP
+    lac i gtP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp gtSp
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp gtTb
+    jmp gtInd
+gtSp, idx lastin
+    jmp gtSmN
+gtTb, lio lastin
+    jsp nextTab
+    dac lastin
+gtSmN, idx gtS
+    jmp gtSm
+gtInd, lac [LINEBUF]
+    dac idDst
+    lio lastin
+    jsp indent
+    dac gtD0
+gtCp, lac gtS
+    add [GENBUF]
+    dac gtP
+    lac i gtP
+    dac gtCh
+    lac gtD0
+    sub [LB_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gtLong
+    lac gtD0
+    add [LINEBUF]
+    dac gtP
+    lac gtCh
+    dac i gtP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gtFin
+    idx gtS
+    idx gtD0
+    jmp gtCp
+// a line of a lone period ends the text
+gtFin, lac gtD0
+    dac LBLEN
+    SKIP_NEXT_IF_SAME [1]
+    jmp gtLine
+    lac i [LINEBUF]
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp gtEof
+gtLine, cla
+    jmp i gtX
+gtEof, law 1
+    jmp i gtX
+
+// gtTab -- the cursor to the indent's column, after the line's number.
+// AC and IO are clobbered.
+gtTab, dac gtTbX
+    lac lastin
+    add gtOff
+    lia
+    jsp i [tabTo:TERM_BANK]
+    jmp i gtTbX
+
+// setIn -- 3.7's setin: the indent, for autoindent, of line IO; 0 for line 0.
+// AC and IO are clobbered.
+setIn, dac siX
+    dzm lastin
+    dio siN
+    lac siN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i siX
+    lio siN
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    jsp whiteCnt
+    dac lastin
+    jmp i siX
+
+// whiteCnt -- 3.7's whitecnt: the columns LINEBUF's leading blanks and TABs
+// take. AC is the columns; IO is the place of the first other character.
+whiteCnt, dac wcX
+    dzm wcC
+    dzm wcI
+wcL, lac wcI
+    add [LINEBUF]
+    dac wcP
+    lac i wcP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp wcSp
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp wcTb
+    lio wcI
+    lac wcC
+    jmp i wcX
+wcSp, idx wcC
+    jmp wcN
+wcTb, lio wcC
+    jsp nextTab
+    dac wcC
+wcN, idx wcI
+    jmp wcL
+
+// nextTab -- the column a TAB at column IO moves to, by tabstop; a tabstop
+// of 0 is taken as 1. AC is the column; IO is clobbered.
+nextTab, dac ntX
+    dio ntC
+    lac oTabStop
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ntGo
+    lac ntC
+    add [1]
+    jmp i ntX
+ntGo, lac ntC
+ntL, sub oTabStop
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ntL
+    cma                     // tabstop less the column's remainder
+    add ntC
+    jmp i ntX
+
+// backTab -- 3.7's backtab: column IO back to the shiftwidth stop before
+// it, not below 0. AC is the column; IO is clobbered.
+backTab, dac btX
+    dio btI
+    lac oShiftW
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp btGo
+    lac btI
+    jmp i btX
+btGo, lac btI
+btL, sub oShiftW
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp btL
+    add oShiftW             // the remainder
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    lac oShiftW
+    cma
+    add btI
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    cla
+    jmp i btX
+
+// indent -- 3.7's genindent: an indent of IO columns, TABs by tabstop then
+// blanks, written from the full address in idDst; its characters are all
+// counted, but none is written past LB_SIZE.
+// AC is the number of characters; IO is clobbered.
+indent, dac idX
+    dio idN
+    dzm idK
+idT, lac oTabStop
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp idT1
+    jmp idS
+idT1, lac idN
+    sub oTabStop
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp idS
+    dac idN
+    lio [CH_TAB]
+    jsp idPut
+    jmp idT
+idS, lac idN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp idS1
+    lac idK
+    jmp i idX
+idS1, sub [1]
+    dac idN
+    lio [CH_SP]
+    jsp idPut
+    jmp idS
+idPut, dac ipX
+    lac idK
+    sub [LB_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp idPC
+    lac idDst
+    add idK
+    dac idP
+    dio i idP
+idPC, idx idK
+    jmp i ipX
+
+// mult -- IO times mlB, both not negative. AC is the product; IO is
+// clobbered, and mlB.
+mult, dac mlX
+    dio mlA
+    dzm mlS
+mlL, lac mlB
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp mlAdd
+    lac mlS
+    jmp i mlX
+mlAdd, sub [1]
+    dac mlB
+    lac mlS
+    add mlA
+    dac mlS
+    jmp mlL
+
+// delete0 -- 3.7's delete(0): lines addr1 to addr2 deleted, and reported.
+// AC and IO are clobbered.
+delete0, dac d0X
+    jsp nonZero
+    lac addr1
+    dac LNA
+    lac addr2
+    dac LNB
+    jsp i [lnDelete:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cyMem
+    jsp killed
+    jmp i d0X
+
+// yankReg -- 3.7's YANKreg: lines addr1 to addr2 into register cdR, and
+// reported. AC and IO are clobbered.
+yankReg, dac ryX
+    lac addr1
+    dac LNA
+    lac addr2
+    dac LNB
+    lio cdR
+    jsp i [rgYank:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cjMem
+    jsp killed
+    jmp i ryX
+
+// killed, killCnt -- 3.7's killed and killcnt: "N lines" and the command's
+// name made a past tense, when N is more than report and g is not running;
+// killed counts addr1 to addr2, killCnt the number in IO.
+// AC and IO are clobbered.
+killed, dac kdX
+    lac addr2
+    sub addr1
+    add [1]
+    lia
+    jsp killCnt
+    jmp i kdX
+killCnt, dac kcX
+    dio kcN
+    lac i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i kcX
+    lac kcN
+    sub oReport
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp kcGo
+    jmp i kcX
+kcGo, lio kcN
+    jsp i [putDec:TERM_BANK]
+    lio [kcLines:EX_BANK]
+    jsp i [putStr:TERM_BANK]
+    lac oTerse
+    SKIP_NEXT_IF_AC_ZERO
+    jmp kcEnd
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lac cmdName
+    ior [040]               // 3.7's Command[0] | ' '
+    lia
+    jsp i [putc:TERM_BANK]
+    lac [cmdName:EX_BANK]
+    add [1]
+    dac kcP
+kcL, lac i kcP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp kcE
+    lia
+    jsp i [putc:TERM_BANK]
+    idx kcP
+    jmp kcL
+kcE, lac kcP                // the name's last letter
+    sub [1]
+    dac kcP
+    lac i kcP
+    SKIP_NEXT_IF_DIFFERENT ['e']
+    jmp kcD
+    lio ['e']
+    jsp i [putc:TERM_BANK]
+kcD, lio ['d']
+    jsp i [putc:TERM_BANK]
+kcEnd, jsp i [newline:TERM_BANK]
+    jmp i kcX
+
+// netChange -- 3.7's netchange: the change in the number of lines, signed,
+// in IO, reported as more or fewer when it is more than report.
+// AC and IO are clobbered.
+netChange, dac ncX
+    dio ncI
+    lac ncI
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ncMore
+    cla
+    sub ncI
+    dac ncI
+    lac [mFewer:MSG_BANK]
+    jmp ncS
+ncMore, lac [mMore:MSG_BANK]
+ncS, dac ncW
+    lac i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i ncX
+    lac ncI
+    sub oReport
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ncDo
+    jmp i ncX
+ncDo, lio ncI
+    jsp i [putDec:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio ncW
+    jsp i [putStr:TERM_BANK]
+    lac [cmdName:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lio [mNetChg:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jsp i [newline:TERM_BANK]
+    jmp i ncX
+
+// pLines -- 3.7's plines: lines plA to plB typed, dot moved along when
+// plMove is not 0. AC and IO are clobbered.
+pLines, dac pxX
+    lac plA
+    dac pxL
+pxLoop, lac pxL
+    sub plB
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp i pxX
+    lio pxL
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    lio pxL
+    jsp pLine
+    lac plMove
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pxN
+    lac pxL
+    dac DOT
+pxN, idx pxL
+    jmp pxLoop
+
+// pLine -- 3.7's pline: LINEBUF typed as line IO, numbered when numbf is
+// set, in list's form when listf is, then a new line.
+// AC and IO are clobbered.
+pLine, dac p1X
+    dio p1N
+    lac numbf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp p1Txt
+    lio [CH_SP]
+    jsp slobber
+    law NUM_W
+    dac i [pdWid:TERM_BANK]
+    lio p1N
+    jsp i [putDec:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+p1Txt, lio i [LINEBUF]
+    jsp slobber
+    dzm p1K
+p1L, lac p1K
+    add [LINEBUF]
+    dac p1P
+    lac i p1P
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp p1E
+    lia
+    jsp putCh
+    idx p1K
+    jmp p1L
+p1E, lio [CH_DOLLAR]
+    lac listf
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [putc:TERM_BANK]
+    jsp i [newline:TERM_BANK]
+    jmp i p1X
+
+// putCh -- the character in IO typed as 3.7's normchar and listchar do: a
+// control character as ^ and its letter, DEL as ^?, a TAB as itself unless
+// listf is set. AC and IO are clobbered.
+putCh, dac pcX
+    dio pcC
+    lac pcC
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp pcCtl
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp pcSelf
+    lac pcC
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp pcTab
+pcCtl, lio [CH_CARET]
+    jsp i [putc:TERM_BANK]
+    lac pcC
+    ior [0100]
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    law CH_QMARK
+    lia
+    jsp i [putc:TERM_BANK]
+    jmp i pcX
+pcTab, lac listf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pcCtl
+pcSelf, lio pcC
+    jsp i [putc:TERM_BANK]
+    jmp i pcX
+
+// slobber -- 3.7's slobber: when the line typed next may not cover the
+// prompt (shudclob), and it starts with the character in IO, a blank, a 0
+// or a TAB not shown as ^I, the prompt is rubbed out first.
+// AC and IO are clobbered.
+slobber, dac sbX
+    dio sbC
+    lac shudclob
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i sbX
+    dzm shudclob
+    lac sbC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp sbDo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbDo
+    SKIP_NEXT_IF_SAME [CH_TAB]
+    jmp i sbX
+    lac listf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i sbX
+sbDo, lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio [CH_BS]
+    jsp i [putc:TERM_BANK]
+    jmp i sbX
+
+kcLines,
+    ascii " lines"
+aiflag, 0                   // a! or i! or c!: autoindent the other way
+lastin, 0                   // 3.7's lastin: the indent of text typed
+cdR, 0
+cpN, 0
+cpP, 0
+cmIsC, 0
+cmT, 0
+cjC, 0
+cjG, 0
+cjA, 0
+cjS, 0
+cjP, 0
+cjCh, 0
+csC, 0
+csN, 0
+csW, 0
+csA, 0
+csI, 0
+csS, 0
+csG, 0
+csP, 0
+csCh, 0
+ckC, 0
+zEof, 0
+zHadpr, 0
+czW, 0
+czEx, 0
+czC, 0
+czOp, 0
+czLn, 0
+z2S, 0
+cuC, 0
+atX, 0
+gtX, 0
+gtC, 0
+gtUp, 0
+gtOff, 0
+gtN, 0
+gtP, 0
+gtS, 0
+gtD0, 0
+gtCh, 0
+gtTbX, 0
+siX, 0
+siN, 0
+wcX, 0
+wcC, 0
+wcI, 0
+wcP, 0
+ntX, 0
+ntC, 0
+btX, 0
+btI, 0
+idX, 0
+idN, 0
+idK, 0
+ipX, 0
+idP, 0
+mlX, 0
+mlA, 0
+mlS, 0
+spX, 0
+spN, 0
+d0X, 0
+ryX, 0
+kdX, 0
+kcX, 0
+kcN, 0
+kcP, 0
+ncX, 0
+ncI, 0
+ncW, 0
+pxX, 0
+pxL, 0
+plA, 0
+plB, 0
+plMove, 0
+p1X, 0
+p1N, 0
+p1K, 0
+p1P, 0
+pcX, 0
+pcC, 0
+sbX, 0
+sbC, 0
+endloc
+
+idDst, 0                    // indent's destination: a full address
+mlB, 0                      // mult's second factor

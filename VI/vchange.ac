@@ -1,0 +1,310 @@
+// vchange.ac -- vi's c, and d across lines, after
+// 3.7's vchange, smallchange and notpart (ex_vops.c): vops.ac's operator
+// code, kept in bank SCR_BANK beside insert mode, which it starts, for
+// room. Its words in bank VI_BANK (vops.ac's, vmotion.ac's, vmain.ac's)
+// are reached through full addresses.
+//
+// Reached by jmp i from vops.ac's vOpGo and vDel; ends at vops.ac's
+// commands' ends or in insert mode (vinsert.ac's vaGo). In bank SCR_BANK.
+// Needs vi.ah, <AIDS/skipmacros.ah>, vops.ac, vmotion.ac and vmain.ac (bank
+// VI_BANK), lines.ac (bank 0), options.ac (bank EX_BANK), vinsert.ac and
+// messages.ac (bank MSG_BANK).
+
+local vc2, vc3, vc3a, vc4, vc5, vc6, vc7, vc8, vc9, vcAw, vcI0, vcI1, \
+    vcHd, vcTl, vcW, vcWh, vcCp, vcCl, vcC, vcN, vcA, vcInd, vcG, vcS, \
+    vcD, vcK, cdX, vcWi
+
+// vChg, vChgD -- 3.7's vchange, for c and for d: lines, or across lines
+// from a column to a column, taken out and a line put in their place, the
+// head of the first and the tail of the last when not whole lines; then,
+// for c, insert mode in it. Within dot's line, c is vSmall. Reached by
+// jmp i.
+vChg, law 0143
+    jmp .+2
+vChgD, law 0144
+    dac vcC
+    lac i [wSet:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vSmall
+    jsp i [vXdw:VI_BANK]
+    dac vcN
+    lac i [wCur:VI_BANK]    // one line, from a column: within it after all
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vc2
+    lac vcN
+    SKIP_NEXT_IF_SAME [1]
+    jmp vc2
+    dzm i [wSet:VI_BANK]
+    lac vcC
+    SKIP_NEXT_IF_SAME [0144]
+    jmp vSmall
+    jmp i [vdIn:VI_BANK]
+vc2, lac i [vOpCur:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vc3
+    lac i [wCur:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vc3
+// across lines, not whole ones: dot's head and wdot's tail, in GENBUF
+    jsp i [vGetDot:VI_BANK]
+    lac [LINEBUF]
+    dac vcS
+    lac [GENBUF]
+    dac vcD
+    lac i [vOpCur:VI_BANK]
+    dac vcK
+    dac vcG
+vcHd, lac vcK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcTl
+    lac i vcS
+    dac i vcD
+    idx vcS
+    idx vcD
+    lac vcK
+    sub [1]
+    dac vcK
+    jmp vcHd
+vcTl, lio i [wDot:VI_BANK]
+    jsp i [vLoad:VI_BANK]
+    lac LBLEN
+    sub i [wCur:VI_BANK]
+    dac vcK
+    add vcG
+    sub [LB_SIZE-2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i [vFail:VI_BANK]   // too long: the bell, as 3.7
+    lac i [wCur:VI_BANK]
+    add [LINEBUF]
+    dac vcS
+    lac vcK
+    add vcG
+    dac vcG
+vcCp, lac vcK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcW
+    lac i vcS
+    dac i vcD
+    idx vcS
+    idx vcD
+    lac vcK
+    sub [1]
+    dac vcK
+    jmp vcCp
+// d leaving only white: whole lines after all, the registers not partial
+vcW, lac vcC
+    SKIP_NEXT_IF_SAME [0144]
+    jmp vcWh
+    lac [GENBUF]
+    dac vcS
+    lac vcG
+    dac vcK
+vcCl, lac vcK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcAw                // all white
+    lio i vcS
+    jsp i [vSpace:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vcWh
+    idx vcS
+    lac vcK
+    sub [1]
+    dac vcK
+    jmp vcCl
+vcAw, lac [0777776]         // whole lines
+    dac i [wCur:VI_BANK]
+    dzm i [vOpKey:VI_BANK]
+    lio i [vLReg:VI_BANK]
+    jsp vNotPart
+    lio [CH_0+1]
+    jsp vNotPart
+    jmp i [vdLn:VI_BANK]
+vcWh, lac [0777776]
+    dac vcInd
+    jmp vc4
+vc3, lac vcC
+    SKIP_NEXT_IF_SAME [0144]
+    jmp vc3a
+    lac i [wCur:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i [vdLn:VI_BANK]    // d of whole lines
+vc3a, dzm vcInd             // whole lines changed: the new line starts empty,
+    lio DOT                 //   given the first one's indent for autoindent
+    jsp i [ivWcR:FILE_BANK]
+    dac vcWi
+// the lines taken out
+vc4, dzm i [vSyncLn:VI_BANK]
+    lac vcN
+    dac i [vsN:VI_BANK]
+    dzm i [vsM:VI_BANK]
+    jsp i [vSaveN:VI_BANK]
+    lac DOT
+    dac vcA
+    dac LNA
+    add vcN
+    sub [1]
+    dac LNB
+    jsp i [lnDelete:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [vNoUnd:VI_BANK]
+    jsp i [vKillLn:VI_BANK]
+    lac i [wCur:VI_BANK]    // 3.7's setpk
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vc5
+    law 1
+    dac i [vPk:VI_BANK]
+    dac i [REG_BASE+1]      // REG_PART
+    lac i [vOpCur:VI_BANK]
+    dac i [vPk0:VI_BANK]
+    lac i [wCur:VI_BANK]
+    dac i [vPk1:VI_BANK]
+vc5, lac vcN
+    dac i [vNcnt:VI_BANK]
+    lac [nmDel:MSG_BANK]
+    dac i [vNnam:VI_BANK]
+    lac vcC
+    SKIP_NEXT_IF_SAME [0144]
+    jmp .+2
+    jmp .+3
+    lac [nmChg:MSG_BANK]
+    dac i [vNnam:VI_BANK]
+    lac vcN
+    sub [2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jsp i [vKillU:VI_BANK]
+    law VU_MANY
+    dac i [vUndK:VI_BANK]
+    lac vcA                 // the line before them, unless they were the last
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vc6
+    lac DOT
+    sub [1]
+    dac DOT
+// the line put in after dot: empty, or the head and tail in GENBUF
+vc6, dzm LBLEN
+    lac vcInd
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vc8
+    lac [GENBUF]
+    dac vcS
+    lac [LINEBUF]
+    dac vcD
+    lac vcG
+    dac vcK
+    dac LBLEN
+vc7, lac vcK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vc8
+    lac i vcS
+    dac i vcD
+    idx vcS
+    idx vcD
+    lac vcK
+    sub [1]
+    dac vcK
+    jmp vc7
+vc8, lac DOT
+    dac LNA
+    cli
+    jsp i [lnAppStart:0]
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [vNoMem:VI_BANK]
+    lia
+    jsp i [lnInsert:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [vStErr:VI_BANK]
+    lac i [vNcnt:VI_BANK]   // 3.7's noteit(1): more than report noted
+    sub i [oReport:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp .+3
+    law 1
+    dac i [vNsav:VI_BANK]
+    jsp i [vNote:VI_BANK]
+    lac vcC
+    SKIP_NEXT_IF_DIFFERENT [0144]
+    jmp vc9
+// c: insert mode on the new line, at the join or at its start
+    lac vcInd
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vcI0
+    lac i [vOpCur:VI_BANK]
+    jmp vcI1
+vcI0, lac vcWi
+    dac vaInd0
+    cla
+vcI1, dac i [vCurs:VI_BANK]
+    law 0170                // 3.7's vappend('x', ...)
+    dac i [viCh:VI_BANK]
+    law 1
+    dac i [viCnt:VI_BANK]
+    dzm i [viS0:VI_BANK]
+    dzm i [viDol:VI_BANK]
+    dzm i [viUnd:VI_BANK]
+    lac [viLoop:VI_BANK]
+    dac i [viRet:VI_BANK]
+    jmp vaGo
+// d across lines: the cursor at the join, back one at the line's end
+vc9, lac i [vOpCur:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [vdC:VI_BANK]
+    SKIP_NEXT_IF_SAME LBLEN
+    jmp i [vdC:VI_BANK]
+    sub [1]
+    jmp i [vdC:VI_BANK]
+
+// vNotPart -- 3.7's notpart: the register in IO, if any, whole lines.
+// AC and IO are clobbered.
+vNotPart, dac cdX
+    dio vcS
+    lac vcS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i cdX
+    jsp i [rgSlot:0]
+    add [1]
+    dac vcS
+    dzm i vcS
+    jmp i cdX
+
+// vSmall -- 3.7's smallchange: within dot's line, the text from the cursor
+// to wCur into DEL and left on the screen with $ on its last character,
+// then insert mode over it. Reached by jmp.
+vSmall, jsp i [vGetDot:VI_BANK]
+    lac i [wCur:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    dzm i [wCur:VI_BANK]
+    lac i [vOpCur:VI_BANK]
+    SKIP_NEXT_IF_DIFFERENT i [wCur:VI_BANK]
+    jmp i [vFail:VI_BANK]
+    jsp i [vDcMid:VI_BANK]
+    jsp i [vSetDel:VI_BANK]
+    law VU_CHNG
+    dac i [vUndK:VI_BANK]
+    lac i [vOpCur:VI_BANK]
+    dac i [vCurs:VI_BANK]
+    lac i [wCur:VI_BANK]
+    sub i [vOpCur:VI_BANK]
+    dac i [viS0:VI_BANK]
+    law 1
+    dac i [viDol:VI_BANK]
+    dac i [viCnt:VI_BANK]
+    dac i [viUnd:VI_BANK]
+    law 0143
+    dac i [viCh:VI_BANK]
+    lac [viLoop:VI_BANK]
+    dac i [viRet:VI_BANK]
+    jmp vaGo
+
+vcC, 0
+vcN, 0
+vcA, 0
+vcInd, 0
+vcG, 0
+vcS, 0
+vcD, 0
+vcK, 0
+cdX, 0
+vcWi, 0                     // the first changed line's indent
+endloc

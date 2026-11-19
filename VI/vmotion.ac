@@ -1,0 +1,1826 @@
+// vmotion.ac -- vi's motions, after 3.7's operate()
+// with vmove as its operator (ex_voper.c), its scanners (ex_vops3.c: lfind,
+// lnext, lskipa1, endsent, endPS, isa, lmatchp, lskipbal, lbrack) and its
+// search (ex_addr.c's address with a cursor in the line; its offsets are
+// vaddr.ac's, in bank FILE_BANK).
+//
+// A motion computes 3.7's wdot and wcursor: wDot with wSet when it names a
+// line, wCur an index in that line or -1 for none (3.7's NOSTR); LINEBUF
+// holds wDot's line while the scanners walk (wLoad). vMove then does what
+// vmove does: a line named goes through screen.ac's scDown or scUp (scHold
+// for ', `, [[ and ]], 3.7's HOLDWIG), the cursor then at wCur, or the
+// column vMovCol when vMoving, or the first character that is not white;
+// no line named moves the cursor in dot's line. A motion that cannot be
+// made is the bell (vmain.ac's vFail). Under an operator (vops.ac's vOp not
+// 0, 3.7's opf not vmove) a motion marks nothing, some end a character
+// further on, and vMove hands the range to vops.ac's vOpGo; the operator's
+// key again (dd) is _, the line itself. x, X and D are 3.7's deleteit.
+//
+// Reached by jmp from vmain.ac's loop (vMotion) with the key in vC and the
+// count in vCnt and vHad; routines entered by jsp, returning by jmp i. In
+// bank VI_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, vmain.ac, lines.ac (bank
+// 0), excmd.ac and options.ac (bank EX_BANK), regex.ac (bank RE_BANK),
+// screen.ac (bank SCR_BANK) and termio.ac (bank TERM_BANK).
+
+local mtL, mtHit, mvUd, mvDn, mvNl, mvFw, mvCur, wLoad, wAt, waZ, wCh, \
+    wSpace, wsY, wBlank, wMargin, wmY, wEdge, weB, weY, wWordCh, wwY, \
+    wWordOf, woN, woY, wNext, wnEnd, wnB, wnB1, wnY, wnN, wLimit, mhL, mhE, \
+    mhOk, mdLn, mjk, mpm, mLine, mMk, mWd, mwL, mwE, mwLn, mE, vWord, vwF, \
+    vwF2, vwF3, vwB, vwB1, vwB2, vwB3, vwB4, vwB5, vwY, vwN, vwBk, vEend, \
+    veB, veW, veL, veN, veE, mfSet, mfGo, mfL, mfF, mfFix, mPs, vLfind, lf1, \
+    lf2, lf3, lfBeg, lfFnd, lfCnt, lfOn, lfOn1, lfOn2, lfDone, lfRev, lfRv1, \
+    lfAdv, lfA1, lfA2, lfRet, lfIc, vSkipA1, saL, sa1, sa2, saSol, saS2, \
+    saS3, saY, saN, vEndSent, es1, es2, esPs, esY, esN, vEndPS, epY, vIsa, \
+    isL, isY, isN, mpL, mpS, mpNx, mpGot, mpCl, mpGo, mpB, mpDn, mpUp, mpLvS, \
+    mbL, mbOut, mbHit, mAp, map1, map2, map3, map4, vMarkReg, mrPrev, mrNo, \
+    srN, srGo, srFw, srBk, srQ, srQe, srNope, srNb, srTry, srMiss, srBot, \
+    srTop, srFnd, srF1, srF2, srF3, srDo, srD1, srD2, srD3, srD4, srAdv, \
+    srCtx, scx1, mtP, wlX, waX, wT, wcX, wsX, wbX, wmX, weX, wwX, wT2, woX, \
+    wnX, wiX, vwX, vbkX, veeX, mfK, mfC, lfX, lfRc, lfIC, lfID, lcX, saX, \
+    esX, esP, esC, epX, isX, isC1, isC2, mpC, mpP, mpO, mpE, mpLv, mbA, mmI, \
+    mmB, mrX2, mrC, mdX, miX, miA, srC, srP, srT, srIn, srA, srLast, srZ, \
+    sdvX, scxX, mtNo, mvIn, mhB, mdOp, mdOl, vwF1, vwF4, mpMk, mpFw, srOl, \
+    srOp, \
+    mpSet, mbG, mbSec, mbEnd, vxGo, vxL, vxE, vwIc, vwId, srD0
+
+// vMotion -- the motion of key vC, or the bell for a key that is none; under
+// an operator its own key again is _ (3.7's stuttered operators).
+vMotion, lac DOT
+    dac wDot
+    dzm wSet
+    dzm vHold
+    lac vCurs
+    dac wCur
+    law 1
+    dac vDir
+    jsp wLoad
+    lac [vMoTab:SCR_BANK]
+    dac mtP
+mtL, lac i mtP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mtNo
+    SKIP_NEXT_IF_DIFFERENT vC
+    jmp mtHit
+    idx mtP
+    idx mtP
+    jmp mtL
+mtHit, idx mtP
+    lac i mtP
+    dac mtP
+    jmp i mtP
+mtNo, lac vOp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    lac vC
+    SKIP_NEXT_IF_SAME vWcmd
+    jmp vFail
+    jmp vmUs
+
+// vMove -- 3.7's vmove, as above; under an operator, vops.ac's vOpGo.
+// U's line forgotten on a move to another line, and taken on the line the
+// move ends on (3.7's vnline calls vmove). Reached by jmp; ends at viLoop.
+vMove, lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vOpGo
+    lac wSet
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mvIn
+    lac wDot                // the line: 1 to dol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vFail
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vFail
+    lac wDot
+    SKIP_NEXT_IF_SAME DOT
+    jsp vKillU
+    lac vHold
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mvUd
+    lio wDot
+    jsp i [scHold:SCR_BANK]
+    jmp mvNl
+// vupdown(wdot - dot, wcursor)
+mvUd, dzm i [scInd:SCR_BANK]
+    dzm i [scScr:SCR_BANK]
+    lac wDot
+    sub DOT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mvNl
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp mvDn
+    cma
+    dac i [scN:SCR_BANK]
+    jsp i [scUp:SCR_BANK]
+    jmp mvNl
+mvDn, dac i [scN:SCR_BANK]
+    jsp i [scDown:SCR_BANK]
+// vnline(wcursor), whose vmove takes U's line on the line arrived at
+mvNl, jsp vURec
+    lac wCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp mvCur
+    lac vMoving
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mvFw
+    lac vMovCol
+    dac i [scN:SCR_BANK]
+    lio DOT
+    jsp i [scFindCol:SCR_BANK]
+    dac vCurs
+    jmp viLoop
+mvFw, jsp vFirst
+    dac vCurs
+    jmp viLoop
+mvIn, jsp vURec
+mvCur, lac wCur
+    dac vCurs
+    jmp viLoop
+
+// --- the scanners' primitives
+
+// wLoad -- line wDot into LINEBUF, its length in wLen. AC and IO are
+// clobbered.
+wLoad, dac wlX
+    lio wDot
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    lac LBLEN
+    dac wLen
+    jmp i wlX
+
+// wAt -- LINEBUF's character IO, 0 at or past the end or before the start.
+// AC is it; IO is clobbered.
+wAt, dac waX
+    dio wT
+    lac wT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp waZ
+    sub wLen
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp waZ
+    lac wT
+    add [LINEBUF]
+    dac wT
+    lac i wT
+    jmp i waX
+waZ, cla
+    jmp i waX
+
+// wCh -- the character at wCur (3.7's *wcursor). AC is it; IO is
+// clobbered.
+wCh, dac wcX
+    lio wCur
+    jsp wAt
+    jmp i wcX
+
+// wSpace -- whether the character in IO is a blank or a TAB (isspace).
+// AC is 1 or 0; IO preserved.
+wSpace, dac wsX
+    dio wT
+    lac wT
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp wsY
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp wsY
+    cla
+    jmp i wsX
+wsY, law 1
+    jmp i wsX
+
+// wBlank -- 3.7's blank(): whether wCur is on a blank or a TAB. AC is 1
+// or 0; IO is clobbered.
+wBlank, dac wbX
+    jsp wCh
+    lia
+    jsp wSpace
+    jmp i wbX
+
+// wMargin -- 3.7's margin(): wCur before the line or at its end. AC is 1
+// or 0; IO is clobbered.
+wMargin, dac wmX
+    lac wCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp wmY
+    jsp wCh
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wmY
+    cla
+    jmp i wmX
+wmY, law 1
+    jmp i wmX
+
+// wEdge -- 3.7's edge(): the line empty, or wCur on its last character
+// going forward, its first going back. AC is 1 or 0; IO is clobbered.
+wEdge, dac weX
+    lac wLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp weY
+    lac vDir
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp weB
+    lac wCur
+    add [1]
+    lia
+    jsp wAt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp weY
+    cla
+    jmp i weX
+weB, lac wCur
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp weY
+    cla
+    jmp i weX
+weY, law 1
+    jmp i weX
+
+// wWordCh -- 3.7's wordch: whether the character in IO is a letter, a
+// digit or _. AC is 1 or 0; IO is clobbered.
+wWordCh, dac wwX
+    dio wT2
+    lac wT2
+    SKIP_NEXT_IF_DIFFERENT [CH_USCORE]
+    jmp wwY
+    lio wT2
+    jsp i [isAlnum:EX_BANK]
+    jmp i wwX
+wwY, law 1
+    jmp i wwX
+
+// wWordOf -- 3.7's wordof(wWhich, wcursor): not white, and with wKind a
+// word character as wWhich says. AC is 1 or 0; IO is clobbered.
+wWordOf, dac woX
+    jsp wBlank
+    SKIP_NEXT_IF_AC_ZERO
+    jmp woN
+    lac wKind
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp woY
+    jsp wCh
+    lia
+    jsp wWordCh
+    SKIP_NEXT_IF_DIFFERENT wWhich
+    jmp woY
+woN, cla
+    jmp i woX
+woY, law 1
+    jmp i woX
+
+// wNext -- 3.7's lnext: wCur a character on in vDir, into the next line
+// (wDot, LINEBUF) at the end of this one, no further than line vLim; at
+// vLim going forward, back onto its last character unless under an
+// operator.
+// AC is 1, or 0 when stopped at vLim; IO is clobbered.
+wNext, dac wnX
+    lac vDir
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp wnB
+    jsp wCh
+    SKIP_NEXT_IF_AC_ZERO
+    idx wCur
+    jsp wCh
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wnY
+    lac wDot
+    sub vLim
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp wnEnd
+    idx wDot
+    jsp wLoad
+    dzm wCur
+    jmp wnY
+wnEnd, lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wnN
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    sub [1]
+    dac wCur
+    jmp wnN
+wnB, lac wCur
+    sub [1]
+    dac wCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp wnY
+    lac wDot
+    sub vLim
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp wnB1
+    dzm wCur
+    jmp wnN
+wnB1, lac wDot
+    sub [1]
+    dac wDot
+    jsp wLoad
+    lac wLen
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac wCur
+wnY, law 1
+    jmp i wnX
+wnN, cla
+    jmp i wnX
+
+// wLimit -- vLim the buffer's end in vDir: dol forward, 1 back.
+// AC is clobbered.
+wLimit, dac wiX
+    lac DOL
+    dac vLim
+    lac vDir
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i wiX
+    law 1
+    dac vLim
+    jmp i wiX
+
+// --- the motions
+
+// h, BS -- left; l, SP -- right: 3.7's margin and edge; under an operator
+// the edge is no bar and the end of the line is not stepped back from.
+vmH, lac [0777776]
+    dac vDir
+vmL, jsp wMargin
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mhL
+    jsp wEdge
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+mhL, lac vCnt
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp mhE
+    jsp wMargin
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mhE
+    lac wCur
+    add vDir
+    dac wCur
+    lac vCnt
+    sub [1]
+    dac vCnt
+    jmp mhL
+mhE, lac wCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp mhB
+    lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mhOk
+    jsp wMargin
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mhOk
+mhB, lac wCur
+    sub vDir
+    dac wCur
+mhOk, dzm vMoving
+    jmp vMove
+
+// 0 -- the line's start. ^ -- its first character not white.
+vm0, dzm wCur
+    dzm vMoving
+    jmp vMove
+vmCaret, jsp vFirst
+    dac wCur
+    dzm vMoving
+    jmp vMove
+
+// $ -- the line's end; a count, lines down; up and down keep to the end.
+// Under an operator, past the line's last character, or the start of the
+// count's line, which vops.ac's vXdw takes back to the line before.
+vmDollar, lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mdOp
+    law 1
+    dac vMoving
+    lac [0d20000]
+    dac vMovCol
+    lac vCnt
+    sub [1]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp mdLn
+    lac wLen
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac wCur
+    jmp vMove
+mdLn, add DOT
+    dac wDot
+    law 1
+    dac wSet
+    lac [0777776]
+    dac wCur
+    jmp vMove
+mdOp, dzm vMoving
+    lac vCnt
+    sub [1]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp mdOl
+    lac wLen
+    dac wCur
+    jmp vMove
+mdOl, lac vCnt
+    add DOT
+    dac wDot
+    law 1
+    dac wSet
+    dzm wCur
+    jmp vMove
+
+// | -- the column the count names, number's columns counted.
+vmBar, lac vCnt
+    dac wT
+    lac i [oNumber:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    law NUM_COLS
+    add wT
+    dac vMovCol
+    dac i [scN:SCR_BANK]
+    law 1
+    dac vMoving
+    lio DOT
+    jsp i [scFindCol:SCR_BANK]
+    dac wCur
+    jmp vMove
+
+// j, ^N -- down; k, ^P -- up: the column kept (vMoving, vMovCol).
+vmJ, lac DOT
+    add vCnt
+    jmp mjk
+vmK, lac DOT
+    sub vCnt
+mjk, dac wDot
+    law 1
+    dac wSet
+    lac [0777776]
+    dac wCur
+    lac vMoving
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vMove
+    law 1
+    dac vMoving
+    lac vCurs
+    dac i [scIdx:SCR_BANK]
+    lio DOT
+    jsp i [scColOf:SCR_BANK]
+    dac vMovCol
+    jmp vMove
+
+// +, CR, LF -- down; - -- up: to the first character not white.
+vmPlus, lac DOT
+    add vCnt
+    jmp mpm
+vmMinus, lac DOT
+    sub vCnt
+mpm, dac wDot
+mLine, law 1
+    dac wSet
+    lac [0777776]
+    dac wCur
+    dzm vMoving
+    jmp vMove
+
+// _ -- the count's lines from dot's, whole: an operator's own key again.
+vmUs, lac DOT
+    add vCnt
+    sub [1]
+    jmp mpm
+
+// H, L, M -- the window's top, bottom, middle; G -- the count's line, or
+// dol: each marked as '' 's when dot moves, unless under an operator.
+vmBigH, jsp vLay
+    lac i [scTop:SCR_BANK]
+    add vCnt
+    sub [1]
+    jmp mMk
+vmBigL, jsp vLay
+    lac i [scTop:SCR_BANK]
+    add i [scCnt:SCR_BANK]
+    sub vCnt
+    jmp mMk
+vmBigM, jsp vLay
+    lac i [scCnt:SCR_BANK]
+    add [1]
+    rar 1s
+    and [0377777]
+    add i [scTop:SCR_BANK]
+    sub [1]
+    jmp mMk
+vmBigG, lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp .+3
+    lac DOL
+    jmp mMk
+    lac vCnt
+mMk, dac wDot
+    lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mLine
+    lio wDot
+    jsp vMarkIt
+    jmp mLine
+
+// w, W, b, B, e, E -- words: 3.7's lfind(2 or 3, ...), lowercase with wKind.
+vmSmB, lac [0777776]
+    dac vDir
+vmSmW, law 1
+    dac wKind
+    jmp mWd
+vmBigB, lac [0777776]
+    dac vDir
+vmBigW, dzm wKind
+mWd, jsp wLimit
+mwL, lac vCnt
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp mwE
+    jsp vWord
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mwE
+    lac vCnt
+    sub [1]
+    dac vCnt
+    jmp mwL
+mwE, lac mwEnd
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vEend
+    dzm mwEnd
+// dot's line: no line named; nowhere moved, the bell
+    lac wDot
+    SKIP_NEXT_IF_SAME DOT
+    jmp mwLn
+    lac wCur
+    SKIP_NEXT_IF_DIFFERENT vCurs
+    jmp vFail
+    dzm vMoving
+    jmp vMove
+mwLn, law 1
+    dac wSet
+    dzm vMoving
+    jmp vMove
+vmSmE, law 1
+    dac wKind
+    jmp mE
+vmBigE, dzm wKind
+mE, law 1
+    dac mwEnd
+    lac vCnt
+    sub [1]
+    dac vCnt
+    jmp mWd
+
+// vWord -- 3.7's word(vmove, cnt). AC is 1, or 0 when the buffer ended;
+// IO is clobbered.
+vWord, dac vwX
+    lac vDir
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vwB
+    lac wCur
+    dac vwIc
+    lac wDot
+    dac vwId
+    jsp wCh
+    lia
+    jsp wWordCh
+    dac wWhich
+vwF, jsp wWordOf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwF2
+    lac vOp                 // an operator's last word ending its line:
+    SKIP_NEXT_IF_AC_NOT_ZERO // to the line's end, not the next line
+    jmp vwF1
+    lac vCnt
+    SKIP_NEXT_IF_SAME [1]
+    jmp vwF1
+    lac wCur
+    add [1]
+    lia
+    jsp wAt
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwF1
+    idx wCur
+    jmp vwF2
+vwF1, jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwN
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwF
+// a change's last word keeps the blanks after it; on a blank, it is one
+vwF2, lac vOp
+    SKIP_NEXT_IF_SAME [0143]
+    jmp vwF4
+    lac vCnt
+    SKIP_NEXT_IF_SAME [1]
+    jmp vwF4
+    lac wCur
+    SKIP_NEXT_IF_SAME vwIc
+    jmp vwF3
+    lac wDot
+    SKIP_NEXT_IF_SAME vwId
+    jmp vwF3
+    lio vwIc
+    jsp wAt
+    SKIP_NEXT_IF_AC_ZERO
+    idx wCur
+    jmp vwF3
+vwF4, jsp wMargin           // past the blanks
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwF3
+    jsp wBlank
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwF3
+    idx wCur
+    jmp vwF4
+vwF3, lac vOp               // a move does not end past the line
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwY
+    jsp wMargin
+    SKIP_NEXT_IF_AC_ZERO
+    jsp vwBk
+    jmp vwY
+vwB, jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwN
+vwB1, jsp wBlank
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwB2
+    jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwN
+    jmp vwB1
+vwB2, jsp wMargin
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwB4
+    jsp wCh
+    lia
+    jsp wWordCh
+    dac wWhich
+vwB3, jsp wMargin
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwB4
+    jsp wWordOf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vwB4
+    lac wCur
+    sub [1]
+    dac wCur
+    jmp vwB3
+vwB4, lac wCur
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vwB5
+    jsp wWordOf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vwY
+vwB5, idx wCur
+vwY, law 1
+    jmp i vwX
+vwN, cla
+    jmp i vwX
+vwBk, dac vbkX              // wCur back one
+    lac wCur
+    sub [1]
+    dac wCur
+    jmp i vbkX
+
+// vEend -- 3.7's eend(vmove). AC and IO are clobbered.
+vEend, dac veeX
+    jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i veeX
+veB, jsp wBlank
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp veW
+    jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i veeX
+    jmp veB
+veW, jsp wCh
+    lia
+    jsp wWordCh
+    dac wWhich
+veL, jsp wWordOf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp veE
+    lac wCur
+    add [1]
+    lia
+    jsp wAt
+    SKIP_NEXT_IF_AC_ZERO
+    jmp veN
+    idx wCur
+    jmp veE
+veN, jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i veeX
+    jmp veL
+veE, lac vOp                // c and d take the word's last character
+    SKIP_NEXT_IF_DIFFERENT [0143]
+    jmp i veeX
+    SKIP_NEXT_IF_DIFFERENT [0144]
+    jmp i veeX
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    sub [1]
+    dac wCur
+    jmp i veeX
+
+// f, F, t, T -- the count'th such character in the line; ; and , repeat
+// the last, , the other way.
+vmSmF, law 1
+    jmp mfSet
+vmBigF, law 2
+    jmp mfSet
+vmSmT, law 3
+    jmp mfSet
+vmBigT, law 4
+mfSet, dac mfK
+    jsp vKey
+    dio mfC
+    lac mfC
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp viLoop
+    jsp vAddW               // kept for .; a replay's not kept for ;
+    lac vGlob
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mfGo
+    lac mfK
+    dac vLastFK
+    lac mfC
+    dac vLastFC
+    jmp mfGo
+vmSemi, lac vLastFK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    dac mfK
+    lac vLastFC
+    dac mfC
+    jmp mfGo
+vmComma, lac vLastFK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    xor [3]                 // f and F, t and T: 1-2, 3-4
+    SKIP_NEXT_IF_DIFFERENT [7]
+    law 3
+    SKIP_NEXT_IF_DIFFERENT [0]
+    law 4
+    dac mfK
+    lac vLastFC
+    dac mfC
+// mfK: 1 f, 2 F, 3 t, 4 T
+mfGo, lac mfK
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mfL
+    lac [0777776]
+    dac vDir
+mfL, lac vCnt
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp mfFix
+mfF, jsp wEdge              // 3.7's find
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    lac wCur
+    add vDir
+    dac wCur
+    jsp wCh
+    SKIP_NEXT_IF_SAME mfC
+    jmp mfF
+    lac vCnt
+    sub [1]
+    dac vCnt
+    jmp mfL
+mfFix, dzm vMoving
+    lac mfK
+    SKIP_NEXT_IF_DIFFERENT [3]
+    jsp vwBk                // t: one before
+    lac mfK
+    SKIP_NEXT_IF_DIFFERENT [4]
+    idx wCur                // T: one after
+    lac vOp                 // f and t under an operator: one after that
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vMove
+    lac mfK
+    SKIP_NEXT_IF_DIFFERENT [1]
+    idx wCur
+    lac mfK
+    SKIP_NEXT_IF_DIFFERENT [3]
+    idx wCur
+    jmp vMove
+
+// ( ) -- sentences; { } -- paragraphs: 3.7's lfind(0 or 1, ...). The
+// previous context marked.
+vmLpar, lac [0777776]
+    dac vDir
+vmRpar, dzm lfPa
+    jmp mPs
+vmLbrc, lac [0777776]
+    dac vDir
+vmRbrc, law 1
+    dac lfPa
+mPs, jsp vLfind
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vFail
+    jsp vMarkDot
+    law 1
+    dac wSet
+    jmp vMove
+
+// vLfind -- 3.7's lfind(lfPa, vCnt, vmove, 0) for sentences (lfPa 0) and
+// paragraphs (1). AC is -1 when nothing could be moved over, else 0; IO is
+// clobbered.
+vLfind, dac lfX
+    dzm lfRc
+    jsp wLimit
+    lac wLen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lf2
+lf1, jsp wNext              // past the empty lines
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfRet
+    lac wLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lf1
+    lac vDir
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp lf2
+    lac wDot                // forward: back to the empty line, as empty
+    sub [1]
+    dac wDot
+    dzm wLen
+    dzm i [LINEBUF]
+    dzm wCur
+    lac lfPa
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lf2
+    jsp lfIc
+    jmp lfBeg
+lf2, jsp lfIc
+    lac vDir                // not to find the same again
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp lf3
+    jsp wNext
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfBeg
+    lac [0777776]
+    dac lfRc
+    jmp lfRet
+lf3, jsp vSkipA1
+// count the ends found
+lfBeg, jsp vEndSent
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfFnd
+    jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfRet
+    jmp lfBeg
+lfFnd, lac lfPa
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfCnt
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfOn
+    jsp vEndPS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfOn
+lfCnt, lac vCnt
+    sub [1]
+    dac vCnt
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp lfOn
+    jmp lfDone
+lfOn, lac wLen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfOn2
+lfOn1, jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfRet
+    lac wLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfOn1
+    jmp lfBeg
+lfOn2, jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfRet
+    jmp lfBeg
+// back: turned forward unless the buffer's start was reached
+lfDone, lac vDir
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp lfAdv
+    lac wDot
+    SKIP_NEXT_IF_SAME vLim
+    jmp lfRev
+    lac wCur
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfAdv
+lfRev, law 1
+    dac vDir
+    lac DOT
+    dac vLim
+    lac wLen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfAdv
+    lac lfPa
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfAdv
+    lac DOT
+    sub [1]
+    SKIP_NEXT_IF_SAME wDot
+    jmp lfRv1
+    lac vCurs
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp lfAdv
+lfRv1, jsp wNext
+    jmp lfRet
+// not at a section or paragraph's division: on to the next
+lfAdv, lac wCur
+    SKIP_NEXT_IF_SAME lfIC
+    jmp lfA1
+    lac wDot
+    SKIP_NEXT_IF_DIFFERENT lfID
+    jmp lfA2
+lfA1, lac wCur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp lfA2
+    jsp vEndPS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+lfA2, jsp vSkipA1
+lfRet, lac lfRc
+    jmp i lfX
+lfIc, dac lcX               // icurs and idot
+    lac wCur
+    dac lfIC
+    lac wDot
+    dac lfID
+    jmp i lcX
+
+// vSkipA1 -- 3.7's lskipa1(""): past the rest of a word, then to the next
+// that is not white; going back, to that word's start. AC is 1, or 0 when
+// the buffer ended; IO is clobbered.
+vSkipA1, dac saX
+saL, lac vDir
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sa1
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sa1
+    jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp saN
+    jmp saSol
+sa1, jsp wCh
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sa2
+    jsp wBlank
+    SKIP_NEXT_IF_AC_ZERO
+    jmp saSol
+sa2, jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp saN
+    lac vDir
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp saL
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp saL
+// ltosol1(""): past white; going back, to the word's start
+saSol, jsp wBlank
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp saS2
+    jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp saN
+    jmp saSol
+saS2, lac vDir
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp saY
+saS3, lac wCur
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp saY
+    sub [1]
+    lia
+    jsp wAt
+    lia
+    jsp wSpace
+    SKIP_NEXT_IF_AC_ZERO
+    jmp saY
+    lac wCur
+    sub [1]
+    dac wCur
+    jmp saS3
+saY, law 1
+    jmp i saX
+saN, cla
+    jmp i saX
+
+// vEndSent -- 3.7's endsent(lfPa): wCur at a sentence's end: . ! or ?,
+// then any ) ] ', then the line's end or two blanks; at a line's start, a
+// paragraph's or section's division; on a line's last character, too.
+// AC is 1 or 0; IO is clobbered.
+vEndSent, dac esX
+    lac wCur
+    SKIP_NEXT_IF_AC_ZERO
+    jmp es1
+    jsp vEndPS
+    jmp i esX
+es1, dac esP
+    jsp wCh
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp es2
+    SKIP_NEXT_IF_DIFFERENT [CH_EXCL]
+    jmp es2
+    SKIP_NEXT_IF_DIFFERENT [CH_QMARK]
+    jmp es2
+    jmp esPs
+es2, idx esP                // past ) ] '
+    lio esP
+    jsp wAt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp esY
+    SKIP_NEXT_IF_DIFFERENT [CH_RPAR]
+    jmp es2
+    SKIP_NEXT_IF_DIFFERENT [CH_RBRK]
+    jmp es2
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp es2
+    dac esC                 // two blanks
+    idx esP
+    lac esC
+    SKIP_NEXT_IF_SAME [CH_SP]
+    jmp esPs
+    lio esP
+    jsp wAt
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp esY
+esPs, lac esP               // tryps
+    add [1]
+    lia
+    jsp wAt
+    SKIP_NEXT_IF_AC_ZERO
+    jmp esN
+    jsp vEndPS
+    jmp i esX
+esY, law 1
+    jmp i esX
+esN, cla
+    jmp i esX
+
+// vEndPS -- 3.7's endPS: LINEBUF empty, or a paragraph's or section's
+// macro (the paragraphs and sections options, isa). AC is 1 or 0; IO is
+// clobbered.
+vEndPS, dac epX
+    lac i [LINEBUF]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp epY
+    lac [OPT_STR]
+    dac isS
+    jsp vIsa
+    SKIP_NEXT_IF_AC_ZERO
+    jmp epY
+    lac [OPT_STR+OPT_SLEN]
+    dac isS
+    jsp vIsa
+    jmp i epX
+epY, law 1
+    jmp i epX
+
+// vIsa -- 3.7's isa: LINEBUF a . and one of the macros in the option
+// string whose address is in isS (two characters each, a character a word);
+// a macro's second character a blank matching a one-letter name.
+// AC is 1 or 0; IO is clobbered.
+vIsa, dac isX
+    lac i [LINEBUF]
+    SKIP_NEXT_IF_SAME [CH_DOT]
+    jmp isN
+isL, lac i isS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp isN
+    dac isC1
+    idx isS
+    lac i isS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp isN
+    dac isC2
+    idx isS
+    lac i [LINEBUF+1]
+    SKIP_NEXT_IF_SAME isC1
+    jmp isL
+    lac i [LINEBUF+2]
+    SKIP_NEXT_IF_DIFFERENT isC2
+    jmp isY
+    SKIP_NEXT_IF_AC_ZERO
+    jmp isL
+    lac isC2
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp isY
+    jmp isL
+isY, law 1
+    jmp i isX
+isN, cla
+    jmp i isX
+
+// % -- the bracket matching the first of ( ) [ ] { } at or after the
+// cursor: 3.7's lmatchp and lskipbal. The previous context marked.
+vmPct, lac vCurs
+    dac wCur
+mpL, jsp wCh
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    dac mpC
+    lac [mpPar:VI_BANK]
+    dac mpP
+mpS, lac i mpP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mpNx
+    SKIP_NEXT_IF_DIFFERENT mpC
+    jmp mpGot
+    idx mpP
+    jmp mpS
+mpNx, idx wCur
+    jmp mpL
+// mpP at the bracket in its pair's table: an opening one goes forward
+mpGot, lac mpP
+    sub [mpPar:VI_BANK]
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mpCl
+    lac i mpP
+    dac mpO
+    idx mpP
+    lac i mpP
+    dac mpE
+    law 1
+    dac vDir
+    jmp mpGo
+mpCl, lac i mpP
+    dac mpE
+    lac mpP
+    sub [1]
+    dac mpP
+    lac i mpP
+    dac mpO
+    lac [0777776]
+    dac vDir
+mpGo, jsp wLimit
+    lac vDir                // lskipbal: level from dir
+    dac mpLv
+mpB, jsp wNext
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    jsp wCh
+    SKIP_NEXT_IF_DIFFERENT mpE
+    jmp mpDn
+    SKIP_NEXT_IF_DIFFERENT mpO
+    jmp mpUp
+    jmp mpB
+mpDn, lac mpLv
+    sub [1]
+    jmp mpLvS
+mpUp, lac mpLv
+    add [1]
+mpLvS, dac mpLv
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mpB
+    lac vOp                 // under an operator both brackets are taken
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mpMk
+    lac vDir
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp mpFw
+    idx vOpCur
+    jmp mpSet
+mpFw, idx wCur
+    jmp mpSet
+mpMk, jsp vMarkDot
+mpSet, law 1
+    dac wSet
+    dzm vMoving
+    jmp vMove
+mpPar, CH_LPAR
+    CH_RPAR
+    0173
+    0175
+    CH_LBRK
+    CH_RBRK
+    0
+
+// [[ ]] -- the previous or next section: a line starting { or a sections
+// macro (3.7's lbrack); the second key must be the same; no count.
+vmLbk, lac [0777776]
+    dac vDir
+vmRbk, lac vGlob            // a replay has the one key
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mbG
+    jsp vKey
+    dio mpC
+    lac mpC
+    SKIP_NEXT_IF_SAME vC
+    jmp vFail
+mbG, lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    lac DOT
+    dac mbA
+mbL, lac mbA
+    add vDir
+    dac mbA
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp mbOut
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp mbOut
+    lac mbA
+    dac wDot
+    jsp wLoad
+    lac i [LINEBUF]
+    SKIP_NEXT_IF_DIFFERENT [0173]
+    jmp mbSec
+    lac [OPT_STR+OPT_SLEN]
+    dac isS
+    jsp vIsa
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mbSec
+    lac vOp                 // ] under an operator: a } line ends it too
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mbL
+    lac vC
+    SKIP_NEXT_IF_SAME [CH_RBRK]
+    jmp mbL
+    lac i [LINEBUF]
+    SKIP_NEXT_IF_SAME [0175]
+    jmp mbL
+    jmp mbHit
+mbOut, lac mbA
+    sub vDir
+    dac mbA
+    jmp mbHit
+// ] under an operator stops at the line before the section
+mbSec, lac vOp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mbHit
+    lac vC
+    SKIP_NEXT_IF_SAME [CH_RBRK]
+    jmp mbHit
+    lac mbA
+    sub [1]
+    dac mbA
+    dac wDot
+    jsp wLoad
+mbHit, lac mbA
+    SKIP_NEXT_IF_DIFFERENT DOT
+    jmp vFail
+    dac wDot
+    law 1
+    dac wSet
+    lac [0777776]
+    dac wCur
+    lac vOp                 // an operator's range: ] to the line's end
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mbEnd
+    dzm wCur
+    lac vC
+    SKIP_NEXT_IF_SAME [CH_RBRK]
+    jmp mbEnd
+    lac wLen
+    dac wCur
+mbEnd, dzm vMoving
+    jsp vMarkDot
+    law 1
+    dac vHold
+    jmp vMove
+
+// m -- mark a to z (or ' and `, the previous context) at the cursor; not a
+// motion an operator takes.
+vmM, lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    jsp vKey
+    dio mpC
+    lac mpC
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp viLoop
+    lio mpC
+    jsp vMarkReg
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vFail
+    dac mmI
+    lac DOT
+    dac LNA
+    lio mmI
+    jsp i [lnMarkSet:0]
+    lac mmI
+    add [ncols:VI_BANK]
+    dac mmI
+    lac vCurs
+    add [1]
+    dac i mmI
+    jmp viLoop
+
+// ' ` -- to a mark's line, its first character not white, or with ` its
+// column; the previous context marked when dot or the cursor moves.
+vmApos, dzm mmB
+    jmp mAp
+vmGrave, law 1
+    dac mmB
+mAp, jsp vKey
+    dio mpC
+    lac mpC
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp viLoop
+    lio mpC
+    jsp vMarkReg
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vFail
+    dac mmI
+    lio mmI
+    jsp i [lnMarkFind:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vFail
+    dac wDot
+    lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    dzm vMoving
+    lac [0777776]
+    dac wCur
+    lac mmB
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp map1
+    lac mmI
+    add [ncols:VI_BANK]
+    dac mmI
+    lac i mmI
+    sub [1]
+    dac wCur
+map1, lac vOp                // under an operator nothing is marked
+    SKIP_NEXT_IF_AC_ZERO
+    jmp map3
+    lac wDot
+    SKIP_NEXT_IF_SAME DOT
+    jmp map2
+    lac mmB
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp map3
+    lac wCur
+    SKIP_NEXT_IF_DIFFERENT vCurs
+    jmp map3
+map2, jsp vMarkDot
+map3, lac wCur              // a column past the line's end: none
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp map4
+    jsp wLoad
+    lac wLen
+    sub wCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp map4
+    lac [0777776]
+    dac wCur
+map4, law 1
+    dac wSet
+    dac vHold
+    jmp vMove
+
+// vMarkReg -- 3.7's markreg: a to z its index, ' and ` the previous
+// context's. IO is the character. AC is the index, or -1 for any other;
+// IO is preserved.
+vMarkReg, dac mrX2
+    dio mrC
+    lac mrC
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp mrPrev
+    SKIP_NEXT_IF_DIFFERENT [CH_GRAVE]
+    jmp mrPrev
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp mrNo
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp mrNo
+    lac mrC
+    sub [CH_LA]
+    jmp i mrX2
+mrPrev, law MARK_PREV
+    jmp i mrX2
+mrNo, lac [0777776]
+    jmp i mrX2
+
+// vMarkDot -- 3.7's markDOT: '' at dot, its column the cursor's.
+// AC and IO are clobbered.
+vMarkDot, dac mdX
+    lio DOT
+    jsp i [lnMarkPrev:0]
+    lac [ncols:VI_BANK]
+    add [MARK_PREV]
+    dac miA
+    lac vCurs
+    add [1]
+    dac i miA
+    jmp i mdX
+
+// vMarkIt -- 3.7's markit: markDOT when line IO is another line, 1 to
+// dol. AC and IO are clobbered.
+vMarkIt, dac miX
+    dio miA
+    lac miA
+    SKIP_NEXT_IF_DIFFERENT DOT
+    jmp i miX
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp i miX
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp i miX
+    jsp vMarkDot
+    jmp i miX
+
+// / ? -- a search from the cursor, read on the status line; n N -- the
+// last again, the same way or the other, the direction shown on the status
+// line. After the expression's end, + - ^ and numbers name another line
+// and make the motion whole lines (vaddr.ac); then z, a window size and one
+// of ^ + - . place the window as z does.
+vmSlash, lac vC
+    dac srC
+    lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    lac srC
+    dac vrC
+    jsp vRead
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp viLoop
+    lac srC
+    dac vScan
+    jmp srGo
+vmSmN, lac vScan
+    jmp srN
+vmBigN, lac vScan
+    xor [020]               // / and ?
+srN, dac srC
+    lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    dzm vLen
+    jsp i [scStat:SCR_BANK] // its direction on the status line, as 3.7's
+    lio srC                 // readecho shows it
+    jsp i [putc:TERM_BANK]
+srGo, dzm i [srOLn:FILE_BANK]
+    law 1
+    dac vSrch
+    lac vLen                // the line, LF and CH_EOF, as ex's input
+    add [CMDBUF]
+    dac srP
+    law CH_LF
+    dac i srP
+    idx srP
+    law CH_EOF
+    dac i srP
+    lac vLen
+    add [2]
+    dac i [cbEnd:EX_BANK]
+    dzm i [cbPos:EX_BANK]
+    jsp i [scExArm:SCR_BANK]
+    law 1
+    dac i [reOkNl:RE_BANK]
+    lio srC
+    jsp i [reCompile:RE_BANK]
+    dac srT
+    lio [RE_SCAN]
+    jsp i [reSave:RE_BANK]
+// the line: after the cursor forward, before it back
+    lac vCurs
+    add [LINEBUF]
+    dac srIn
+    lac DOT
+    dac srA
+    dzm i [reGf:RE_BANK]
+    lio DOT
+    jsp i [reExec:RE_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp srNope
+    lac srC
+    SKIP_NEXT_IF_SAME [CH_SLASH]
+    jmp srBk
+srFw, lac i [reLoc1:RE_BANK]
+    sub srIn
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp srFnd
+    jsp srAdv
+    SKIP_NEXT_IF_AC_ZERO
+    jmp srFw
+    jmp srNope
+srBk, lac i [reLoc1:RE_BANK]
+    sub srIn
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp srNope
+srQ, lac i [reLoc1:RE_BANK] // doques: the last match before the cursor
+    dac srLast
+    jsp srAdv
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp srQe
+    lac i [reLoc1:RE_BANK]
+    sub srIn
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp srQ
+srQe, lac srLast
+    dac i [reLoc1:RE_BANK]
+    jmp srFnd
+// the other lines, round the end with wrapscan
+srNope, lac srC
+    SKIP_NEXT_IF_SAME [CH_SLASH]
+    jmp srNb
+    idx srA
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp srTry
+    lac i [oWrapScan:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp srBot
+    dzm srA
+    jmp srTry
+srNb, lac srA
+    sub [1]
+    dac srA
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp srTry
+    lac i [oWrapScan:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp srTop
+    lac DOL
+    dac srA
+srTry, dzm i [reGf:RE_BANK]
+    lio srA
+    jsp i [reExec:RE_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp srMiss
+    lac srC
+    SKIP_NEXT_IF_SAME [CH_QMARK]
+    jmp srFnd
+    lac [LINEBUF+LB_SIZE]   // back: the line's last match
+    dac srIn
+    jmp srQ
+srMiss, lac srA
+    SKIP_NEXT_IF_SAME DOT
+    jmp srNope
+    lac [mFail:RE_BANK]
+    jmp i [exErr:EX_BANK]
+srBot, lac [mNoBot:RE_BANK]
+    jmp i [exErr:EX_BANK]
+srTop, lac [mNoTop:RE_BANK]
+    jmp i [exErr:EX_BANK]
+// found at srA, reLoc1: the rest after the expression
+srFnd, dzm srZ
+    lac srT
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp srDo
+    lio srA                 // + - and numbers: another line (vaddr.ac)
+    jsp i [srOffs:FILE_BANK]
+    jsp i [getChar:EX_BANK]
+    dac srT
+    SKIP_NEXT_IF_SAME [0172]
+    jmp srF1
+    law CH_LF
+    dac srZ
+    jsp i [getChar:EX_BANK]
+    dac srT
+srF1, jsp srCtx
+srF2, lac srT               // a window size, passed over
+    sub [CH_0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp srF3
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp srF3
+    jsp i [getChar:EX_BANK]
+    dac srT
+    jmp srF2
+srF3, jsp srCtx
+    lac srT
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp srDo
+    jsp i [scExDone:SCR_BANK]
+    lac vSvDot
+    dac DOT
+    jsp i [ringBell:TERM_BANK]
+    jmp viLoop
+// moved: the previous context marked; z's placing, or as j and k do
+srDo, jsp i [scExDone:SCR_BANK]
+    dzm vSrch
+    lac i [reLoc1:RE_BANK]
+    sub [LINEBUF]
+    dac wCur
+    lac LBLEN
+    dac wLen
+    lac i [srOLn:FILE_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp srOl
+    lac vOp                 // an operator's range ends at the match; .
+    SKIP_NEXT_IF_AC_NOT_ZERO // repeats it as n
+    jmp srD0
+srOp, lac srA
+    dac wDot
+    law 1
+    dac wSet
+    lac vWcP
+    sub [1]
+    dac srP
+    law 0156
+    dac i srP
+    jmp vOpGo
+srOl, dac srA               // offsets: whole lines, to the line they gave
+    lac [0777776]
+    dac wCur
+    lac vOp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp srOp
+    lio srZ
+    jmp i [srLine:FILE_BANK]
+srD0, lac srA               // another line or column: marked, before
+    SKIP_NEXT_IF_SAME DOT   // the step back, as 3.7
+    jmp srD2
+    lac wCur
+    SKIP_NEXT_IF_DIFFERENT vCurs
+    jmp srD1
+srD2, jsp vMarkDot
+srD1, lac wCur
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp srD3
+    lio wCur
+    jsp wAt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jsp vwBk                // at the end: back one
+srD3, lac srZ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp srD4
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    cla
+    dac i [scCtx:SCR_BANK]
+    lio srA
+    jsp i [scContext:SCR_BANK]
+    lac wCur
+    dac vCurs
+    dzm vMoving
+    jmp viLoop
+srD4, law 1
+    dac vMoving
+    lac wCur
+    dac i [scIdx:SCR_BANK]
+    lio srA
+    jsp i [scColOf:SCR_BANK]
+    dac vMovCol
+    lac srA
+    dac wDot
+    law 1
+    dac wSet
+    lac [0777776]
+    dac wCur
+    jmp vMove
+
+// srAdv -- 3.7's execute(1): an empty match passed over, the search on in
+// the line. AC is 1 at a match, else 0; IO is clobbered.
+srAdv, dac sdvX
+    lac i [reLoc1:RE_BANK]
+    SKIP_NEXT_IF_SAME i [reLoc2:RE_BANK]
+    jmp .+3
+    add [1]
+    dac i [reLoc2:RE_BANK]
+    law 1
+    dac i [reGf:RE_BANK]
+    jsp i [reExec:RE_BANK]
+    jmp i sdvX
+
+// srCtx -- one of ^ + - . taken as z's character from srT, the next read.
+// AC and IO are clobbered.
+srCtx, dac scxX
+    lac srT
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp scx1
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp scx1
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp scx1
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp scx1
+    jmp i scxX
+scx1, dac srZ
+    jsp i [getChar:EX_BANK]
+    dac srT
+    jmp i scxX
+
+// x, X, D -- 3.7's deleteit: the count's characters at the cursor, before
+// it, or to the line's end deleted, as d does them (vops.ac's vOpGo); at
+// the line's end, or X at its start, the bell. Reached by jmp from
+// vmain.ac's table.
+vcBigD, lac [COUNT_CAP]
+    dac vCnt
+vcX, law 1
+    jmp vxGo
+vcBigX, lac [0777776]
+vxGo, dac vDir
+    lac DOT
+    dac wDot
+    dzm wSet
+    lac vCurs
+    dac wCur
+    dac vOpCur
+    jsp wLoad
+    jsp wMargin
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+vxL, lac vCnt
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vxE
+    jsp wMargin
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vxE
+    lac wCur
+    add vDir
+    dac wCur
+    lac vCnt
+    sub [1]
+    dac vCnt
+    jmp vxL
+vxE, dzm vMoving
+    law 0144
+    dac vOp
+    jmp vOpGo
+
+mtP, 0
+wlX, 0
+waX, 0
+wT, 0
+wcX, 0
+wsX, 0
+wbX, 0
+wmX, 0
+weX, 0
+wwX, 0
+wT2, 0
+woX, 0
+wnX, 0
+wiX, 0
+vwX, 0
+vbkX, 0
+veeX, 0
+mfK, 0
+mfC, 0
+lfX, 0
+lfRc, 0
+lfIC, 0
+lfID, 0
+lcX, 0
+saX, 0
+esX, 0
+esP, 0
+esC, 0
+epX, 0
+isX, 0
+isC1, 0
+isC2, 0
+mpC, 0
+mpP, 0
+mpO, 0
+mpE, 0
+mpLv, 0
+mbA, 0
+mmI, 0
+mmB, 0
+mrX2, 0
+mrC, 0
+mdX, 0
+miX, 0
+miA, 0
+srC, 0
+srP, 0
+srT, 0
+srIn, 0
+srA, 0
+srLast, 0
+srZ, 0
+sdvX, 0
+scxX, 0
+vwIc, 0
+vwId, 0
+endloc
+
+wDot, 0                     // 3.7's wdot: the line a motion names
+wSet, 0                     //   1 when it names one
+wCur, 0                     // 3.7's wcursor: an index in wDot's line, -1 none
+wLen, 0                     // LINEBUF's length
+vDir, 0                     // 3.7's dir: 1 or -1
+vLim, 0                     // 3.7's llimit
+vHold, 0                    // 3.7's HOLDWIG
+wKind, 0                    // 3.7's wdkind: 1 for w, b, e
+wWhich, 0                   // 3.7's which
+mwEnd, 0                    // 1 for e and E: eend after the words
+lfPa, 0                     // lfind's pastatom: 0 sentences, 1 paragraphs
+isS, 0                      // vIsa's string

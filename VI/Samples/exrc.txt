@@ -1,0 +1,4 @@
+set shiftwidth=4 showmatch
+set report=1
+ab teh the
+map g 1G

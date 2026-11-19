@@ -1,0 +1,1528 @@
+// subst.ac -- ex's s, & and ~ (3.7's substitute, compsub, comprhs,
+// dosubcon, confirmed, dosub, fixcase, place, snote), g and v (global), and
+// :ta (tagfind), with the stack of command lists that g and :ta run.
+//
+// A command list is run as 3.7 runs globp in commands(1,1): it is put in
+// CMDBUF ending in CH_EOF, a continuation is pushed (rnPush), and ex's loop
+// starts; when the dispatch reads CH_EOF (rnEof), dot is the address given
+// before it, if any, and the continuation is popped and jumped to. g puts its
+// list there once for each marked line; :ta puts e! and the tag's address.
+// An error empties the stack (excmd.ac's exErr).
+//
+// g's lines are marked with LT_GMARK in the line table. A command g runs may
+// move lines; lines.ac keeps ltLow, the lowest table word moved since g last
+// looked, so the search for the next marked line starts there instead of at
+// line 1, as 3.7's does. The buffer as g found it is kept as a list (gList,
+// a root of the heap), and becomes undo's whole at g's end (glFix), since the
+// commands g runs overwrite undo's list.
+//
+// Handlers are reached by jmp from ex's dispatch (cmdTab, excmd.ac) and end
+// by jmp i [exNext:EX_BANK] or [exLoop:EX_BANK]; an error is jmp i
+// [exErr:EX_BANK] with its message's full address in AC. Routines are
+// entered by jsp with the extend window open and return by jmp i. In bank
+// RE_BANK, after regex.ac. Needs vi.ah, <AIDS/skipmacros.ah>, regex.ac,
+// excmd.ac, exaddr.ac, exops.ac and options.ac (bank EX_BANK), lines.ac
+// (bank 0), termio.ac (bank TERM_BANK), messages.ac (bank MSG_BANK),
+// files.ac (bank FILE_BANK).
+
+#define RN_MAX       4                    // command lists within lists
+#define TAGS_STR     OPT_STR+2*OPT_SLEN   // the tags option, a character a word
+#define MARK_T       023                  // mark t, 't'-'a'
+
+local sbCh, sbGo, sbNm, sbA, sbN, sbTot, sbLns, sbCnt, sbHop, sbUse, \
+    sbL, sbGl, sbPt, sbNx, sb1, sbDone, sbNote, sbMemU, sbLoopE, sbFailE, \
+    sbComp, cpX, cpE, cpS, cpS2, cpTil, cpChk, cpRedo, cpFl, cpG, cpC, cpR, \
+    cpRes, cpNoRe, cpNoPrv, cpNoSub, \
+    sbRhs, rhX, rhE, rhC, rhP, rhG, rhCp, rh0, rhL, rhBsl, rhNl, rhUn, rhMg, \
+    rhMagic, rhQ, rhSt, rhOld, rhOL, rhBig, rhEnd, \
+    sbCon, snX, snN, snDo, snOne, \
+    sbDo, sdX, sdL, sdS, sdR, sdC, sdT, sdA, sdB, sdP, sdCase, sdUc, sdPre, \
+    sdR0, sdRL, sdAmp, sdl, sdLL, sdu, sdUU, sdE, sdTr, sdPlain, sdPut, \
+    sdTail, sdTL, sdCp, sdCL, sdEnd, sdOvf, \
+    sdPlace, spX, spL, sdFix, sfX, sfC, sfUp, sfRet, \
+    sbPut, puX, puS, puD, puN, puM, puC, puC2, puL, puE, puMem, puFull, \
+    spCut, ctX, ctD, ctN, ctC, ctL, ctNl, ctZ, ctEnd, \
+    sbConf, cfX, cfA, cfB, cfNo, sbUgo, ugX, ugC, ugN, ugL, ug1, \
+    sbCol, clX, clE, clN, clP, clC, clL, cl2, clTab, clRet, \
+    sbSnote, ssX, ss1, ss2, \
+    glK, glNm, glGo, glP, glQ, glC, glT, glI, glN, glLen, glLines, glADot, \
+    glRd, glSt, glBs, glBB, glBE, glBrk, glMk, glMN, glRun, glF, glFN, glCp, \
+    glEnd, glNest, glNoRe, glMem, glNx, glPut, gpX, glLong, gfX, gfNone, \
+    glRst, gsL, gsE, geL, geE, \
+    rpX, rpC, rpT, rnE1, rnDeep, \
+    tgQ, tgOMg, tgEl, tgP, tgN, tgC, tgW, tgS, tgDif, tgPth, tgCnt, tgOk, \
+    tgRd, tgRE, tgOld, tgEnd, tgNxF, tgSkB, tgAdv, tgAd2, tgLn, tgHit, \
+    tgH1, tgH2, tgH3, tgH4, tgH5, tgH6, tgSv, tgSv2, tgSv3, tgSv4, tgT1, \
+    tgT2, tgT3, tgBld, tgB3, tgB4, tgB5, tgB6, tgB7, tgB8, tgB9, tgPush, \
+    tgNone, tgBad, tgNoPrv, tgEnt, tgNoWr, tgNoF, \
+    tgCmp, tcX, tcL, tcC, tcLp, tcE, tcNt1, tcNo, tcYes, \
+    tgPut, tpX, tgLong
+
+// cSubst, cAmp, cTilde -- s, & and ~: 3.7's substitute(c). The expression
+// and replacement taken (sbComp), the lines saved for undo unless g is
+// running, then each line's matches replaced, every one with g, those
+// confirmed with c; a line holding LFs is split there.
+cSubst, law 's'
+    jmp sbGo
+cAmp, law CH_AMP
+    jmp sbNm
+cTilde, law CH_TILDE
+sbNm, dac sbCh              // & and ~ are named substitute
+    lac [nmSubst:RE_BANK]
+    dac i [pkStr:EX_BANK]
+    jsp i [pkUnp:EX_BANK]
+    lac sbCh
+sbGo, dac sbCh
+    jsp sbComp
+    lac i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sb1
+    lac i [addr1:EX_BANK]
+    dac LNA
+    lac i [addr2:EX_BANK]
+    dac LNB
+    jsp i [lnSave:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sbMemU
+    law UND_CHANGE
+    dac i [undKind:0]
+sb1, dzm sbTot
+    dzm sbLns
+    lac i [addr1:EX_BANK]
+    dac sbA
+sbL, lac sbA
+    sub i [addr2:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp sbDone
+    jsp i [brkChk:TERM_BANK]
+    dzm sbCnt
+    dzm sbHop
+    dzm reGf
+    lio sbA
+    jsp sbCon
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbNx
+    lac sbGs
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbPt
+// g: on from the last match while the line goes on, as 3.7 does, a loop
+// held at a line buffer's worth of matches
+sbGl, lac i reLoc2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbPt
+    idx sbHop
+    sub [LB_SIZE+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sbLoopE
+    law 1
+    dac reGf
+    lio sbA
+    jsp sbCon
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sbGl
+sbPt, lac sbCnt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbNx
+    add sbTot
+    dac sbTot
+    idx sbLns
+    jsp sbPut
+    dac sbN
+    add sbA
+    dac sbA
+    lac i [addr2:EX_BANK]
+    add sbN
+    dac i [addr2:EX_BANK]
+sbNx, idx sbA
+    jmp sbL
+sbDone, lac sbTot
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sbNote
+    lac i [inGlobal:0]
+    ior sbCf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sbFailE
+sbNote, jsp sbSnote
+    lac sbTot
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    dzm i [pflag:EX_BANK]
+    jmp i [exNext:EX_BANK]
+sbMemU, lac [mOutUndo:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+sbLoopE, lac [mSubLoop:RE_BANK]
+    jmp i [exErr:EX_BANK]
+sbFailE, lac [mSubFail:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+// sbComp -- 3.7's compsub(sbCh): for s, the expression and the replacement,
+// unless what follows is the command's end or a flag, which is &; then the
+// flags g, c and r, the count and the trailing flags. The expression used
+// is saved as the substitute's, or the substitute's made the last.
+// AC and IO are clobbered.
+sbComp, dac cpX
+    lac i [oEdComp:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cpS
+    dzm sbGs
+    dzm sbCf
+cpS, dzm sbUse
+    lac sbCh
+    SKIP_NEXT_IF_DIFFERENT ['s']
+    jmp cpS2
+    SKIP_NEXT_IF_DIFFERENT [CH_TILDE]
+    jmp cpTil
+    jmp cpChk
+cpS2, jsp i [pastWh:EX_BANK]
+    jsp i [getChar:EX_BANK]
+    dac cpE
+    lia
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cpRedo
+    lac cpE
+    SKIP_NEXT_IF_DIFFERENT ['g']
+    jmp cpRedo
+    SKIP_NEXT_IF_DIFFERENT ['c']
+    jmp cpRedo
+    SKIP_NEXT_IF_DIFFERENT ['r']
+    jmp cpRedo
+    lio cpE
+    jsp i [isAlnum:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cpNoRe
+    law 1
+    dac reOkNl
+    lio cpE
+    jsp reCompile
+    dac cpE
+    law 1
+    dac sbUse
+    lio cpE
+    jsp sbRhs
+    dzm sbGs
+    dzm sbCf
+    jmp cpFl
+cpTil, law 1
+    dac sbUse
+    jmp cpChk
+cpRedo, jsp i [unGetChar:EX_BANK]
+cpChk, lac i [RE_LAST+2]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpNoPrv
+    lac i [RE_SUB+2]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpNoSub
+cpFl, jsp i [getChar:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT ['g']
+    jmp cpG
+    SKIP_NEXT_IF_DIFFERENT ['c']
+    jmp cpC
+    SKIP_NEXT_IF_DIFFERENT ['r']
+    jmp cpR
+    jsp i [unGetChar:EX_BANK]
+    jsp i [setCount:EX_BANK]
+    jsp i [newLine:EX_BANK]
+    lio [RE_SUB]
+    lac sbUse
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cpRes
+    jsp reSave
+    jmp i cpX
+cpRes, jsp reRes
+    jmp i cpX
+cpG, lac sbGs
+    xor [1]
+    dac sbGs
+    jmp cpFl
+cpC, lac sbCf
+    xor [1]
+    dac sbCf
+    jmp cpFl
+cpR, law 1
+    dac sbUse
+    jmp cpFl
+cpNoRe, lac [mSubNoRe:RE_BANK]
+    jmp i [exErr:EX_BANK]
+cpNoPrv, lac [mNoPrevRe:RE_BANK]
+    jmp i [exErr:EX_BANK]
+cpNoSub, lac [mNoSubRep:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+// sbRhs -- 3.7's comprhs(seof), the delimiter in IO: the replacement up to
+// it into reRhs, a character a word, RE_QUOTE on each character a \ made
+// special (& with magic unless \&). ~ (\~ with nomagic) is the last
+// replacement, kept in GENBUF meanwhile. An LF ends it, unless more of a
+// command list follows (3.7's globp[0]); a \ before an LF keeps the LF, which
+// splits the line. AC and IO are clobbered.
+sbRhs, dac rhX
+    dio rhE
+    lac [reRhs:RE_BANK]
+    dac rhP
+    lac [GENBUF]
+    dac rhG
+rhCp, lac i rhP
+    dac i rhG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rh0
+    idx rhP
+    idx rhG
+    jmp rhCp
+rh0, lac [reRhs:RE_BANK]
+    dac rhP
+rhL, jsp i [getChar:EX_BANK]
+    dac rhC
+    SKIP_NEXT_IF_DIFFERENT rhE
+    jmp rhEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp rhBsl
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp rhNl
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp rhUn
+    SKIP_NEXT_IF_DIFFERENT [CH_TILDE]
+    jmp rhMg
+    SKIP_NEXT_IF_DIFFERENT [CH_AMP]
+    jmp rhMg
+    jmp rhSt
+rhBsl, jsp i [getChar:EX_BANK]
+    dac rhC
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp rhUn
+    lac i [oMagic:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rhMagic
+    lac rhC
+    SKIP_NEXT_IF_DIFFERENT [CH_AMP]
+    jmp rhSt
+    jmp rhQ
+rhNl, lac rnDepth
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rhUn
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp rhUn
+    jmp rhMg
+rhUn, jsp i [unGetChar:EX_BANK]
+    jmp rhEnd
+rhMg, lac i [oMagic:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rhSt
+rhMagic, lac rhC
+    SKIP_NEXT_IF_DIFFERENT [CH_TILDE]
+    jmp rhOld
+rhQ, lac rhC
+    ior [RE_QUOTE]
+    dac rhC
+rhSt, lac rhP
+    sub [reRhs:RE_BANK]
+    sub [RHS_SIZE-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rhBig
+    lac rhC
+    dac i rhP
+    idx rhP
+    jmp rhL
+rhOld, lac [GENBUF]
+    dac rhG
+rhOL, lac i rhG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rhL
+    lac rhP
+    sub [reRhs:RE_BANK]
+    sub [RHS_SIZE-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rhBig
+    lac i rhG
+    dac i rhP
+    idx rhP
+    idx rhG
+    jmp rhOL
+rhBig, dzm i rhP
+    lac [mRhsLong:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rhEnd, dzm i rhP
+    jmp i rhX
+
+// sbCon -- 3.7's dosubcon(reGf, line IO): a match, and when it is
+// confirmed (c), its replacement, counted in sbCnt.
+// AC is 1 at a match, else 0; IO is clobbered.
+sbCon, dac snX
+    dio snN
+    jsp reExec
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i snX
+    lac sbCf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp snDo
+    lio snN
+    jsp sbConf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp snOne
+snDo, jsp sbDo
+    idx sbCnt
+snOne, law 1
+    jmp i snX
+
+// sbDo -- 3.7's dosub: the line in LINEBUF with reLoc1 to reLoc2 replaced
+// by reRhs, built in GENBUF and copied back; reLoc2 after the replacement,
+// lbLen its length. AC and IO are clobbered.
+sbDo, dac sdX
+    lac [LINEBUF]
+    dac sdL
+    lac [GENBUF]
+    dac sdS
+sdPre, lac sdL
+    sub reLoc1
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sdR0
+    lac i sdL
+    dac i sdS
+    idx sdL
+    idx sdS
+    jmp sdPre
+sdR0, dzm sdCase
+    lac [reRhs:RE_BANK]
+    dac sdR
+sdRL, lac i sdR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sdTail
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]   // vi's ^V CR splits, as LF
+    law CH_LF
+    dac sdC
+    idx sdR
+    lac sdC
+    and [RE_QUOTE]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sdPlain
+    lac sdC
+    and [RE_TRIM]
+    dac sdT
+    SKIP_NEXT_IF_DIFFERENT [CH_AMP]
+    jmp sdAmp
+    SKIP_NEXT_IF_DIFFERENT ['l']
+    jmp sdl
+    SKIP_NEXT_IF_DIFFERENT ['L']
+    jmp sdLL
+    SKIP_NEXT_IF_DIFFERENT ['u']
+    jmp sdu
+    SKIP_NEXT_IF_DIFFERENT ['U']
+    jmp sdUU
+    SKIP_NEXT_IF_DIFFERENT ['E']
+    jmp sdE
+    SKIP_NEXT_IF_DIFFERENT ['e']
+    jmp sdE
+// \1 to \9, as far as the expression has \( ... \)
+    sub ['1']
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sdTr
+    sub i [RE_LAST+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sdTr
+    lac sdT
+    sub ['1']
+    dac sdT
+    add [reBras:RE_BANK]
+    dac sdP
+    lac i sdP
+    dac sdA
+    lac sdT
+    add [reKets:RE_BANK]
+    dac sdP
+    lac i sdP
+    dac sdB
+    jsp sdPlace
+    jmp sdRL
+sdAmp, lac reLoc1
+    dac sdA
+    lac reLoc2
+    dac sdB
+    jsp sdPlace
+    jmp sdRL
+sdl, law 1
+    dac sdCase
+    dzm sdUc
+    jmp sdRL
+sdLL, law LB_SIZE
+    dac sdCase
+    dzm sdUc
+    jmp sdRL
+sdu, law 1
+    dac sdCase
+    dac sdUc
+    jmp sdRL
+sdUU, law LB_SIZE
+    dac sdCase
+    law 1
+    dac sdUc
+    jmp sdRL
+sdE, dzm sdCase
+    jmp sdRL
+sdTr, lac sdT
+    jmp sdPut
+sdPlain, lac sdC
+sdPut, and [RE_TRIM]
+    lia
+    jsp sdFix
+    dac i sdS
+    idx sdS
+    sub [GENBUF+LB_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sdOvf
+    jmp sdRL
+// the rest of the line after the match, then all of it back to LINEBUF
+sdTail, lac reLoc2
+    dac sdL
+    lac sdS
+    sub [GENBUF]
+    add [LINEBUF]
+    dac reLoc2
+sdTL, lac i sdL
+    dac i sdS
+    dac sdT
+    idx sdL
+    idx sdS
+    lac sdT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sdCp
+    lac sdS
+    sub [GENBUF+LB_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sdOvf
+    jmp sdTL
+sdCp, lac [GENBUF]
+    dac sdS
+    lac [LINEBUF]
+    dac sdL
+sdCL, lac i sdS
+    dac i sdL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sdEnd
+    idx sdS
+    idx sdL
+    jmp sdCL
+sdEnd, lac sdL
+    sub [LINEBUF]
+    dac LBLEN
+    jmp i sdX
+sdOvf, lac [mSubOvf:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+// sdPlace -- 3.7's place: the characters from sdA up to sdB to sdS, each
+// case-fixed. AC and IO are clobbered.
+sdPlace, dac spX
+spL, lac sdA
+    sub sdB
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i spX
+    lio i sdA
+    idx sdA
+    jsp sdFix
+    dac i sdS
+    idx sdS
+    sub [GENBUF+LB_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sdOvf
+    jmp spL
+
+// sdFix -- 3.7's fixcase: the character in IO in the case \u \l \U \L ask
+// for, while sdCase counts down. AC is the character; IO is clobbered.
+sdFix, dac sfX
+    dio sfC
+    lac sdCase
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sfRet
+    sub [1]
+    dac sdCase
+    lac sdUc
+    SKIP_NEXT_IF_AC_ZERO
+    jmp sfUp
+    lac sfC
+    sub [CH_A]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sfRet
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sfRet
+    lac sfC
+    ior [040]
+    jmp i sfX
+sfUp, lac sfC
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp sfRet
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp sfRet
+    lac sfC
+    xor [040]
+    jmp i sfX
+sfRet, lac sfC
+    jmp i sfX
+
+// sbPut -- 3.7's putmark and append(getsub): LINEBUF, line sbA as
+// substituted, in its place up to its first LF; each piece after an LF a new
+// line after it, dot the last. AC is how many lines were added; IO is
+// clobbered.
+sbPut, dac puX
+    lac [LINEBUF]
+    dac puS
+    lac [GENBUF]
+    dac puD
+puC, lac i puS
+    dac i puD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp puC2
+    idx puS
+    idx puD
+    jmp puC
+puC2, lac [GENBUF]
+    dac puS
+    dzm puN
+    jsp spCut
+    dac puM
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp puMem
+    dac i [lnR:0]
+    lio sbA
+    jsp i [lnPutMark:0]
+    lac sbA
+    dac LNA
+    lio [1]
+    jsp i [lnAppStart:0]
+puL, lac puM
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp puE
+    jsp spCut
+    dac puM
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp puMem
+    lia
+    jsp i [lnInsert:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp puFull
+    idx puN
+    jmp puL
+puE, lac puN
+    jmp i puX
+puMem, lac [mOutMem:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+puFull, lac [mTooMany:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// spCut -- the text at puS up to an LF or its end into LINEBUF, lbLen its
+// length; puS past the LF. AC is 1 when an LF ended it, else 0; IO is
+// clobbered.
+spCut, dac ctX
+    lac [LINEBUF]
+    dac ctD
+    dzm ctN
+ctL, lac i puS
+    dac ctC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ctZ
+    idx puS
+    lac ctC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp ctNl
+    dac i ctD
+    idx ctD
+    idx ctN
+    jmp ctL
+ctNl, law 1
+    jmp ctEnd
+ctZ, cla
+ctEnd, dac ctC
+    dzm i ctD
+    lac ctN
+    dac LBLEN
+    lac ctC
+    jmp i ctX
+
+// sbConf -- 3.7's confirmed: line IO typed as LINEBUF holds it, the match
+// marked with ^ under it at 3.7's columns, then a line read; yes when it
+// starts with y. AC is 1 or 0; IO is clobbered.
+sbConf, dac cfX
+    jsp i [pLine:EX_BANK]
+    lio reLoc1
+    jsp sbCol
+    dac cfA
+    lio reLoc2
+    jsp sbCol
+    sub cfA
+    dac cfB                 // the carets
+    lac i [listf:EX_BANK]   // 3.7's column() counts list's $ too
+    SKIP_NEXT_IF_AC_ZERO
+    law 1
+    add cfA
+    dac ugN                 // the blanks
+    lio [CH_SP]
+    jsp sbUgo
+    lac cfB
+    dac ugN
+    lio [CH_CARET]
+    jsp sbUgo
+    lac [GENBUF]
+    dac i [tlBuf:TERM_BANK]
+    law 0d80
+    dac i [tlMax:TERM_BANK]
+    jsp i [tmLine:TERM_BANK]
+    lac i [GENBUF]
+    SKIP_NEXT_IF_SAME ['y']
+    jmp cfNo
+    law 1
+    jmp i cfX
+cfNo, cla
+    jmp i cfX
+
+// sbUgo -- 3.7's ugo: the character in IO typed ugN times. AC and IO are
+// clobbered.
+sbUgo, dac ugX
+    dio ugC
+ugL, lac ugN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ug1
+    jmp i ugX
+ug1, lio ugC
+    jsp i [putc:TERM_BANK]
+    lac ugN
+    sub [1]
+    dac ugN
+    jmp ugL
+
+// sbCol -- the column pLine reaches typing LINEBUF up to the full address in
+// IO: the number's columns when numbered, a TAB to the next tabstop (^I in
+// list's form), a control character or DEL two. AC is the column; IO is
+// clobbered.
+sbCol, dac clX
+    dio clE
+    lac i [numbf:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    law NUM_COLS
+    dac clN
+    lac [LINEBUF]
+    dac clP
+clL, lac clP
+    sub clE
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp clRet
+    lac i clP
+    dac clC
+    idx clP
+    lac clC
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp clTab
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp cl2
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cl2
+    idx clN
+    jmp clL
+cl2, lac clN
+    add [2]
+    dac clN
+    jmp clL
+clTab, lac i [listf:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cl2
+    lio clN
+    jsp i [nextTab:EX_BANK]
+    dac clN
+    jmp clL
+clRet, lac clN
+    jmp i clX
+
+// sbSnote -- 3.7's snote: the substitutions and their lines, when more than
+// report and g is not running. AC and IO are clobbered.
+sbSnote, dac ssX
+    lac i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i ssX
+    lac sbTot
+    sub i [oReport:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ss1
+    jmp i ssX
+ss1, lac sbTot
+    dac i [msgN:MSG_BANK]
+    lio [mSubs:RE_BANK]
+    jsp i [msgPut:MSG_BANK]
+    lac sbLns
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp ss2
+    SKIP_NEXT_IF_DIFFERENT sbTot
+    jmp ss2
+    dac i [msgN:MSG_BANK]
+    lio [mSubsOn:RE_BANK]
+    jsp i [msgPut:MSG_BANK]
+ss2, jsp i [newline:TERM_BANK]
+    jmp i ssX
+
+// cGlobal, cVglob -- g[!] and v: 3.7's global(k). The lines that match (g)
+// or do not (g! and v) are marked, then for each in turn, dot on it, the
+// command list is run; at the end undo has the buffer as g found it.
+cGlobal, jsp i [exclam:EX_BANK]
+    xor [1]
+    dac glK
+    lac [nmGlobal:RE_BANK]
+    jmp glGo
+cVglob, dzm glK
+    lac [nmV:RE_BANK]
+glGo, dac glNm
+    lac i [inGlobal:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp glNest
+    jsp i [markDot:EX_BANK]
+    jsp i [setAll:EX_BANK]
+    jsp i [nonZero:EX_BANK]
+    jsp i [skipEnd:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp glNoRe
+    jsp i [getChar:EX_BANK]
+    lia
+    law 1
+    dac reOkNl
+    jsp reCompile
+    lio [RE_SCAN]
+    jsp reSave
+// the list, to the line's end: \ LF is an LF, \\ a \ and what follows
+    lac [glBuf:RE_BANK]
+    dac glP
+glRd, jsp i [getChar:EX_BANK]
+    dac glC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp glBrk
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp glBrk
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp glBs
+glSt, jsp glPut
+    jmp glRd
+glBs, jsp i [getChar:EX_BANK]
+    dac glC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp glSt
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp glBB
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp glBE
+    dac glT
+    law CH_BSL
+    dac glC
+    jsp glPut
+    lac glT
+    dac glC
+    jmp glSt
+glBE, law CH_BSL
+    dac glC
+glBB, jsp i [unGetChar:EX_BANK]
+    jmp glSt
+glBrk, jsp i [unGetChar:EX_BANK]
+    jsp i [newLine:EX_BANK]
+    law CH_LF
+    dac i glP
+    idx glP
+    law CH_EOF
+    dac i glP
+    idx glP
+    sub [glBuf:RE_BANK]
+    dac glLen
+// what follows the line in CMDBUF (a command list's CH_EOF, vi's) kept after
+// the list, put back at g's end, as 3.7's global restores globp
+    dzm glRst
+gsL, lac i [cbPos:EX_BANK]
+    sub i [cbEnd:EX_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gsE
+    lac i [cbPos:EX_BANK]
+    add [CMDBUF]
+    dac glQ
+    add [1]
+    sub [CMDBUF]
+    dac i [cbPos:EX_BANK]
+    lac i glQ
+    dac glC
+    jsp glPut
+    idx glRst
+    jmp gsL
+gsE,
+// the buffer kept for undo; g is running from here
+    lac DOL
+    dac glLines
+    lac DOT
+    dac glADot
+    law 1
+    dac LNA
+    lac DOL
+    dac LNB
+    jsp i [lnSave:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp glMem
+    lac i [undList:0]
+    dac i [gList:0]
+    law 1
+    dac i [inGlobal:0]
+// the marks: every line's cleared, then set on those in range that match
+    law 1
+    dac glI
+glMk, lac glI
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp glRun
+    jsp i [brkChk:TERM_BANK]
+    lac glI
+    add [LT_BASE]
+    dac glP
+    lac i glP
+    and [LT_PTR]
+    dac i glP
+    lac glI
+    sub i [addr1:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp glMN
+    lac i [addr2:EX_BANK]
+    sub glI
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp glMN
+    dzm reGf
+    lio glI
+    jsp reExec
+    xor glK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp glMN
+    lac glI
+    add [LT_BASE]
+    dac glP
+    lac i glP
+    ior [LT_GMARK]
+    dac i glP
+glMN, idx glI
+    jmp glMk
+// each marked line in turn: its mark cleared, dot on it, the list run
+glRun, law 1
+    dac glI
+glF, lac glI
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp glEnd
+    lac glI
+    add [LT_BASE]
+    dac glP
+    lac i glP
+    and [LT_GMARK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp glFN
+    lac i glP
+    and [LT_PTR]
+    dac i glP
+    lac glI
+    dac DOT
+    lac [glBuf:RE_BANK]
+    dac glP
+    lac [CMDBUF]
+    dac glQ
+    lac glLen
+    dac glN
+glCp, lac i glP
+    dac i glQ
+    idx glP
+    idx glQ
+    lac glN
+    sub [1]
+    dac glN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp glCp
+    lac glLen
+    dac i [cbEnd:EX_BANK]
+    dzm i [cbPos:EX_BANK]
+    lac [0377777]
+    dac i [ltLow:0]
+    lio [glNext:RE_BANK]
+    jsp rnPush
+    jmp i [exLoop:EX_BANK]
+glFN, idx glI
+    jmp glF
+glEnd, dzm i [inGlobal:0]
+    law 1
+    dac i [endline:EX_BANK]
+    jsp glFix
+    lac glNm
+    dac i [pkStr:EX_BANK]
+    jsp i [pkUnp:EX_BANK]
+    lac DOL
+    sub glLines
+    lia
+    jsp i [netChange:EX_BANK]
+// what followed the list's line, back in CMDBUF to be read on
+    lac [glBuf:RE_BANK]
+    add glLen
+    dac glP
+    lac [CMDBUF]
+    dac glQ
+    lac glRst
+    dac glN
+    dac i [cbEnd:EX_BANK]
+    dzm i [cbPos:EX_BANK]
+geL, lac glN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp geE
+    lac i glP
+    dac i glQ
+    idx glP
+    idx glQ
+    lac glN
+    sub [1]
+    dac glN
+    jmp geL
+geE, jmp i [exLoop:EX_BANK]
+glNest, lac [mGlobNest:RE_BANK]
+    jmp i [exErr:EX_BANK]
+glNoRe, lac [mGlobNoRe:RE_BANK]
+    jmp i [exErr:EX_BANK]
+glMem, lac [mOutUndo:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// glNext -- after the list has run on a line: the next marked line looked
+// for from that line, or from the lowest line moved since, if lower.
+// Reached by jmp, from rnEof.
+glNext, jsp i [brkChk:TERM_BANK]
+    lac i [ltLow:0]
+    sub glI
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp glNx
+    lac i [ltLow:0]
+    dac glI
+glNx, lac glI
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    idx glI
+    jmp glF
+
+// glPut -- glC at glP in g's list, glP past it; 3.7's limit.
+// AC is clobbered, IO preserved.
+glPut, dac gpX
+    lac glC
+    dac i glP
+    idx glP
+    sub [glBuf:RE_BANK]
+    sub [GB_SIZE-2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp glLong
+    jmp i gpX
+glLong, lac [mGlobLong:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+// glFix -- undo after g, or after an error while it runs: the buffer as g
+// found it, which it holds whole, in place of the buffer as it is (lines.ac's
+// UND_ALL). Called from excmd.ac's exErr while g runs. AC and IO are
+// clobbered.
+glFix, dac gfX
+    lac i [gList:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gfNone
+    dac i [undList:0]
+    law UND_ALL
+    dac i [undKind:0]
+    law 1
+    dac i [undAp1:0]
+    lac DOL
+    add [1]
+    dac i [undAp2:0]
+    dzm i [undDel:0]
+    lac glADot
+    dac i [undADot:0]
+    dzm i [gList:0]
+    jmp i gfX
+gfNone, dzm i [undKind:0]   // an edit within g left nothing to undo
+    jmp i gfX
+
+// rnPush -- the continuation whose full address is in IO pushed, for rnEof
+// to jump to when the list now in CMDBUF ends. AC and IO are clobbered.
+rnPush, dac rpX
+    dio rpC
+    lac rnDepth
+    sub [RN_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rnDeep
+    lac rnDepth
+    add [rnStk:RE_BANK]
+    dac rpT
+    lac rpC
+    dac i rpT
+    idx rnDepth
+    jmp i rpX
+rnDeep, lac [mReInt:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+// rnEof -- 3.7's EOF in commands(1,1), reached by jmp from ex's dispatch:
+// dot is the address given before it, if any; then the newest continuation,
+// popped. With none, ex goes on.
+rnEof, lac i [addr2:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [ADDR_NONE]
+    jmp rnE1
+    dac DOT
+rnE1, lac rnDepth
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [exNext:EX_BANK]
+    sub [1]
+    dac rnDepth
+    add [rnStk:RE_BANK]
+    dac rpT
+    lac i rpT
+    dac rpT
+    jmp i rpT
+
+// cTag -- ta[!] [tag]: 3.7's tagfind. The tag (or the last) looked for in
+// each file the tags option names, a line matching it when it is the line's
+// first word, or its first taglength characters; then that line's file
+// edited if it is not the one being edited (autowrite, or refused when the
+// buffer is changed, unless ta!), and its address run with nomagic, both as
+// command lists, ending with the line printed as autoprint would.
+cTag, jsp i [exclam:EX_BANK]
+    dac tgQ
+    lac i [oMagic:EX_BANK]
+    dac tgOMg
+    jsp i [skipEnd:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgOld
+    lac [lastTag:RE_BANK]
+    dac tgP
+    dzm tgN
+tgRd, jsp i [peekChar:EX_BANK]
+    dac tgC
+    lia
+    jsp i [isWhite:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgRE
+    lio tgC
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgRE
+    jsp i [getChar:EX_BANK]
+    lac tgN
+    sub [TAG_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp tgRd
+    lac tgC
+    dac i tgP
+    idx tgP
+    idx tgN
+    jmp tgRd
+tgRE, dzm i tgP
+    lio tgC
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgBad
+    jmp tgEnd
+tgOld, lac lastTag
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgNoPrv
+tgEnd, jsp i [getChar:EX_BANK]
+    dac tgC
+    lia
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgBad
+    lac tgC
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jsp i [unGetChar:EX_BANK]
+    lac i [endline:EX_BANK]
+    dac tgEl
+// each name of the tags option, blanks between
+    lac [TAGS_STR]
+    dac tgPth
+    dzm tgCnt
+tgNxF, lac i tgPth
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgNone
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp tgSkB
+    lio tgPth
+    jsp i [fiTgOpen:FILE_BANK]
+    dac tgOk
+tgAdv, lac i tgPth
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgAd2
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp tgAd2
+    idx tgPth
+    jmp tgAdv
+tgAd2, lac tgOk
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgNxF
+    idx tgCnt
+tgLn, jsp i [brkChk:TERM_BANK]
+    jsp i [fiTgLine:FILE_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgNxF
+    jsp tgCmp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgHit
+    jmp tgLn
+tgSkB, idx tgPth
+    jmp tgNxF
+tgNone, lac tgCnt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgNoF
+    lac [lastTag:RE_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mNoTag:RE_BANK]
+    jmp i [exErr:EX_BANK]
+// found: the rest of the tag, blanks, the file's name, its address
+tgHit, lac tcC
+    dac tgP
+tgH1, lio i tgP
+    SKIP_NEXT_IF_IO_NOT_ZERO
+    jmp tgH2
+    jsp i [isWhite:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgH2
+    idx tgP
+    jmp tgH1
+tgH2, lio i tgP
+    SKIP_NEXT_IF_IO_NOT_ZERO
+    jmp tgEnt
+    jsp i [isWhite:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgH3
+    idx tgP
+    jmp tgH2
+tgH3, lac [tgFile:RE_BANK]
+    dac tgW
+    dzm tgN
+tgH4, lac i tgP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgEnt
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp tgH5
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp tgH5
+    lac tgN
+    sub [TGF_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp tgH6
+    lac i tgP
+    dac i tgW
+    idx tgW
+    idx tgN
+tgH6, idx tgP
+    jmp tgH4
+// the address, and the rest of the line typed, kept in GENBUF meanwhile,
+// since autowrite uses LINEBUF
+tgH5, dzm i tgW
+    lac [GENBUF]
+    dac tgW
+tgSv, lac i tgP
+    dac i tgW
+    dac tgC
+    idx tgW
+    idx tgP
+    lac tgC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgSv
+tgSv2, lac tgW
+    dac tgS                 // where the rest starts in GENBUF
+    lac i [cbPos:EX_BANK]
+    add [CMDBUF]
+    dac tgP
+tgSv3, lac i [cbEnd:EX_BANK]
+    add [CMDBUF]
+    sub tgP
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp tgSv4
+    dzm i tgW
+    jmp tgT1
+tgSv4, lac i tgP
+    dac i tgW
+    idx tgP
+    idx tgW
+    jmp tgSv3
+// mark t on dot; another file is edited only after autowrite
+tgT1, lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgT2
+    lac DOT
+    dac LNA
+    lio [MARK_T]
+    jsp i [lnMarkSet:0]
+tgT2, lio [tgFile:RE_BANK]
+    jsp i [fiTgFile:FILE_BANK]
+    dac tgDif
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgBld
+    lac tgQ
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgT3
+    jsp i [fiCkaw:FILE_BANK]
+    lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgT3
+    lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgNoWr
+tgT3, lio [tgFile:RE_BANK]  // the name again, after autowrite's
+    jsp i [fiTgFile:FILE_BANK]
+// CMDBUF: e! and the name when another file, the address, the rest
+tgBld, dzm tgW
+    lac tgDif
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tgB4
+    lio ['e']
+    jsp tgPut
+    lio [CH_EXCL]
+    jsp tgPut
+    lio [CH_SP]
+    jsp tgPut
+    lac [FN_FILE]
+    dac tgP
+tgB3, lio i tgP
+    SKIP_NEXT_IF_IO_NOT_ZERO
+    jmp tgB5
+    jsp tgPut
+    idx tgP
+    jmp tgB3
+tgB5, lio [CH_LF]
+    jsp tgPut
+    lio [CH_EOF]
+    jsp tgPut
+tgB4, lac [GENBUF]
+    dac tgP
+tgB6, lio i tgP
+    SKIP_NEXT_IF_IO_NOT_ZERO
+    jmp tgB7
+    jsp tgPut
+    idx tgP
+    jmp tgB6
+tgB7, lio [CH_EOF]
+    jsp tgPut
+    lac tgS
+    dac tgP
+tgB8, lio i tgP
+    SKIP_NEXT_IF_IO_NOT_ZERO
+    jmp tgPush
+    jsp tgPut
+    idx tgP
+    jmp tgB8
+// run: the edit first when there is one, then the address with nomagic
+tgPush, lac tgW
+    dac i [cbEnd:EX_BANK]
+    add [CMDBUF]
+    dac tgP
+    dzm i tgP
+    dzm i [cbPos:EX_BANK]
+    lio [tgDone:RE_BANK]
+    jsp rnPush
+    lac tgDif
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tgB9
+    lio DOT
+    jsp i [lnMarkPrev:0]
+    jmp tgAft
+tgB9, lio [tgAft:RE_BANK]
+    jsp rnPush
+    jmp i [exLoop:EX_BANK]
+tgBad, lac [mBadTag:RE_BANK]
+    jmp i [exErr:EX_BANK]
+tgNoPrv, lac [mNoPrevTag:RE_BANK]
+    jmp i [exErr:EX_BANK]
+tgEnt, lac [lastTag:RE_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mTagEnt:RE_BANK]
+    jmp i [exErr:EX_BANK]
+tgNoWr, lac [mTagNoWr:RE_BANK]
+    jmp i [exErr:EX_BANK]
+tgNoF, lac [mNoTags:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+// tgAft -- after the edit: the address run with nomagic. Reached by jmp,
+// from rnEof, or from cTag for the file being edited.
+tgAft, dzm i [oMagic:EX_BANK]
+    jmp i [exLoop:EX_BANK]
+
+// tgDone -- after the address: magic as it was, and the line printed as
+// autoprint would print it (3.7's lchng = chng - 1). Reached by jmp, from
+// rnEof.
+tgDone, lac tgOMg
+    dac i [oMagic:EX_BANK]
+    lac tgEl
+    dac i [endline:EX_BANK]
+    lac CHNG
+    sub [1]
+    dac i [lchng:EX_BANK]
+    jmp i [exNext:EX_BANK]
+
+// tgPut -- the character in IO at CMDBUF's tgW, tgW past it; an error when
+// CMDBUF is full. AC is clobbered, IO preserved.
+tgPut, dac tpX
+    lac tgW
+    sub [CMD_SIZE-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp tgLong
+    lac tgW
+    add [CMDBUF]
+    dac tgC
+    dio i tgC
+    idx tgW
+    jmp i tpX
+tgLong, lac [mInLong:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// tgCmp -- 3.7's test of a tags line in LINEBUF: the tag is its first word,
+// or with taglength its first taglength characters are. tcC is where the
+// comparison stopped. AC is 1 or 0; IO is clobbered.
+tgCmp, dac tcX
+    lac [LINEBUF]
+    dac tcC
+    lac [lastTag:RE_BANK]
+    dac tcL
+tcLp, lac i tcC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tcE
+    SKIP_NEXT_IF_SAME i tcL
+    jmp tcE
+    idx tcC
+    idx tcL
+    jmp tcLp
+tcE, lac i tcL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tcNt1
+    lio i tcC
+    jsp i [isWhite:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tcYes
+tcNt1, lac i [oTagLen:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tcNo
+    lac tcL
+    sub [lastTag:RE_BANK]
+    sub i [oTagLen:EX_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp tcYes
+tcNo, cla
+    jmp i tcX
+tcYes, law 1
+    jmp i tcX
+
+sbCh, 0
+sbA, 0
+sbN, 0
+sbTot, 0
+sbLns, 0
+sbCnt, 0
+sbHop, 0
+sbUse, 0
+cpX, 0
+cpE, 0
+rhX, 0
+rhE, 0
+rhC, 0
+rhP, 0
+rhG, 0
+snX, 0
+snN, 0
+sdX, 0
+sdL, 0
+sdS, 0
+sdR, 0
+sdC, 0
+sdT, 0
+sdA, 0
+sdB, 0
+sdP, 0
+sdCase, 0                   // 3.7's casecnt
+sdUc, 0                     //   and destuc
+spX, 0
+sfX, 0
+sfC, 0
+puX, 0
+puS, 0
+puD, 0
+puN, 0
+puM, 0
+ctX, 0
+ctD, 0
+ctN, 0
+ctC, 0
+cfX, 0
+cfA, 0
+cfB, 0
+ugX, 0
+ugC, 0
+ugN, 0
+clX, 0
+clE, 0
+clN, 0
+clP, 0
+clC, 0
+ssX, 0
+glK, 0                      // mark lines where reExec gives this
+glNm, 0                     // the command's name, put back at the end
+glP, 0
+glQ, 0
+glC, 0
+glT, 0
+glI, 0                      // the line being looked at
+glN, 0
+glLen, 0                    // the list's length, LF and CH_EOF included
+glRst, 0                    // what followed the list's line: its length
+glLines, 0                  // dol before, for netChange
+glADot, 0                   // dot before, for undo
+gpX, 0
+gfX, 0
+rpX, 0
+rpC, 0
+rpT, 0
+tgQ, 0                      // ta!
+tgOMg, 0                    // magic before
+tgEl, 0                     // endline after the command
+tgP, 0
+tgN, 0
+tgC, 0
+tgW, 0
+tgS, 0
+tgDif, 0                    // the tag's file is not the one edited
+tgPth, 0                    // the next name in the tags option
+tgCnt, 0                    // tags files opened
+tgOk, 0
+tpX, 0
+tcX, 0
+tcL, 0
+tcC, 0
+endloc
+
+// State of s, g and :ta that a caller starts without (reInit clears it).
+sbGs, 0                     // compsub's static gsubf: the g flag
+sbCf, 0                     // 3.7's cflag: the c flag
+rnDepth, 0                  // command lists running
+rnStk,                      // their continuations
+    table RN_MAX, 0
+glBuf,                      // g's command list, 3.7's globuf
+    table GB_SIZE, 0
+lastTag,                    // the last tag, a character a word
+    table TAG_MAX+1, 0
+tgFile,                     // the tags line's file name
+    table TGF_MAX+1, 0
+
+nmSubst,   ascii "substitute"
+nmGlobal,  ascii "global"
+nmV,       ascii "v"
+nmTag,     ascii "tag"
+
+mSubNoRe,  ascii "Substitute needs re|Missing regular expression for substitute"
+mNoSubRep, ascii "No previous substitute re|No previous substitute to repeat"
+mRhsLong,  ascii "Replacement pattern too long@- limit 256 characters"
+mSubLoop,  ascii "substitution loop"
+mSubFail,  ascii "Fail|Substitute pattern match failed"
+mSubOvf,   ascii "Line overflow@in substitute"
+mSubs,     ascii "%d subs|%d substitutions"
+mSubsOn,   ascii " on %d lines"
+mGlobNest, ascii "Global within global@not allowed"
+mGlobNoRe, ascii "Global needs re|Missing regular expression for global"
+mGlobLong, ascii "Global command too long"
+mBadTag,   ascii "Bad tag|Give one tag per line"
+mNoPrevTag, ascii "No previous tag"
+mTagEnt,   ascii "%s: Bad tags file entry"
+mTagNoWr,  ascii "No write@since last change (:tag! overrides)"
+mNoTags,   ascii "No tags file"
+mNoTag,    ascii "%s: No such tag@in tags file"

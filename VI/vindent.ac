@@ -1,0 +1,476 @@
+// vindent.ac -- the text work of autoindent, wrapmargin and showmatch for
+// insert mode (vinsert.ac), kept in bank FILE_BANK for room: 3.7's
+// whitecnt, vpastwh, genindent, backtab and fixindent (ex_subr.c),
+// wrapmargin's break (ex_vops2.c's vgetline), the search of lsmatch
+// (ex_vops3.c's lmatchp and lskipbal, backward), and showmatch's second.
+//
+// Entered by jsp i with the extend window open, returning by jmp i; their
+// arguments and results other than AC and IO are named words. In bank
+// FILE_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, lines.ac (bank 0),
+// options.ac (bank EX_BANK), termio.ac and keys.ac (bank TERM_BANK) and
+// screen.ac's scCols (bank SCR_BANK).
+
+local ivWch, ivNtab, iwL, iwE, ihS, ihY, ihN, itL, itE, igT, igS, igB, igE, \
+    ibL, ibE, irL, irLo, irC, irE, imM1, imM2, imNx, imUp, imCh, imG, imF, \
+    imRec, imLo, imLo1, imC, imDn, imOp, imNo, imGu, isL, ifG, ifM, ifC, \
+    ifE, iwr1, iwr2, iwr3, iwr3a, iwr4, iwr4a, iwr5, iwr6, iwr7, iwrSp, iws1, \
+    iwX, iwP, ihX, ihC, iwC, itX, itC, itT, igX, igC, igP, ibX, ibI, ibT, \
+    irX, irP, irN, irH, irW, imX, imE, imO, imLv, imP, imQ, imW, isX, isT, \
+    ifX, ifI, ifN, ifS, ifD, ifK, iwrX, iwrP, iwrG, iwrC, iwsX
+
+// ivWc -- 3.7's whitecnt and vpastwh over the ivN characters, a character a
+// word, at the full address ivS: the columns their leading blanks and TABs
+// take, and in ivPw how many those are. AC is the columns; IO is clobbered.
+ivWc, dac iwX
+    dzm iwC
+    dzm ivPw
+iwL, lac ivPw
+    SKIP_NEXT_IF_DIFFERENT ivN
+    jmp iwE
+    add ivS
+    dac iwP
+    lio i iwP
+    jsp ivWch
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp iwE
+    idx ivPw
+    jmp iwL
+iwE, lac iwC
+    jmp i iwX
+
+// ivWcR -- 3.7's whitecnt(linebuf) for line IO, from its record (two
+// characters a word, the first high): the indent vops.ac's o and O and
+// vchange.ac's c of lines give insert mode. AC is the columns; IO is
+// clobbered.
+ivWcR, dac irX
+    jsp i [lnPtr:0]
+    dac irP
+    lac i irP
+    and [REC_LEN]
+    dac irN
+    lac irP
+    add [REC_HDR]
+    dac irP
+    dzm iwC
+    dzm irH
+irL, lac irN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp irE
+    sub [1]
+    dac irN
+    lac irH
+    SKIP_NEXT_IF_AC_ZERO
+    jmp irLo
+    law 1
+    dac irH
+    lac i irP
+    rar 9s
+    jmp irC
+irLo, dzm irH
+    lac i irP
+    dac irW
+    idx irP
+    lac irW
+irC, and [0777]
+    lia
+    jsp ivWch
+    SKIP_NEXT_IF_AC_ZERO
+    jmp irL
+irE, lac iwC
+    jmp i irX
+
+// ivWch -- whitecnt's step: the character in IO, when a blank or a TAB,
+// counted into iwC, the columns so far. AC is 1 when it was, else 0; IO is
+// clobbered.
+ivWch, dac ihX
+    dio ihC
+    lac ihC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp ihS
+    SKIP_NEXT_IF_SAME [CH_TAB]
+    jmp ihN
+    lio iwC
+    jsp ivNtab
+    dac iwC
+    jmp ihY
+ihS, idx iwC
+ihY, law 1
+    jmp i ihX
+ihN, cla
+    jmp i ihX
+
+// ivNtab -- the tabstop past column IO. AC is it; IO is preserved.
+ivNtab, dac itX
+    dio itC
+    dzm itT
+itL, lac itT
+    add i [oTabStop:EX_BANK]
+    dac itT
+    sub itC
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp itE
+    jmp itL
+itE, lac itT
+    jmp i itX
+
+// ivGi -- 3.7's genindent: IO columns of indent, TABs then blanks, at
+// GENBUF's start. AC is how many characters; IO is clobbered.
+ivGi, dac igX
+    dio igC
+    lac [GENBUF]
+    dac igP
+igT, lac igC
+    sub i [oTabStop:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp igS
+    dac igC
+    law CH_TAB
+    dac i igP
+    idx igP
+    jmp igT
+igS, lac igC
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp igB
+    jmp igE
+igB, law CH_SP
+    dac i igP
+    idx igP
+    lac igC
+    sub [1]
+    dac igC
+    jmp igS
+igE, lac igP
+    sub [GENBUF]
+    jmp i igX
+
+// ivBkt -- 3.7's backtab: the shiftwidth stop before column IO, not less
+// than 0 (0 when shiftwidth is). AC is it; IO is clobbered.
+ivBkt, dac ibX
+    dio ibI
+    dzm ibT
+    lac i [oShiftW:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ibE
+ibL, lac ibT
+    add i [oShiftW:EX_BANK]
+    sub ibI
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ibE
+    add ibI
+    dac ibT
+    jmp ibL
+ibE, lac ibT
+    jmp i ibX
+
+// ivMat -- showmatch's search (3.7's lmatchp and lskipbal, backward): the
+// match of the bracket ivBr, ) or }, typed at index ivCur+ivGc-1 of dot's
+// line as insert mode has it, its head in LINEBUF to ivCur and the typing
+// in GENBUF, searched back through it and the lines before, nesting
+// counted. A key typed while lines are searched ends the search.
+// AC is 1 with the match at index ivJ of line ivL, 0 when there is none,
+// -1 when the search was given up; IO is clobbered.
+ivMat, dac imX
+    lac ivBr
+    dac imE
+    SKIP_NEXT_IF_SAME [CH_RPAR]
+    jmp imM1
+    law CH_LPAR
+    jmp imM2
+imM1, law 0173
+imM2, dac imO
+    law 1
+    dac imLv
+    lac DOT
+    dac ivL
+    lac ivCur
+    add ivGc
+    sub [1]
+    dac ivJ
+imNx, lac ivJ
+    sub [1]
+    dac ivJ
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp imCh
+imUp, lac ivL               // the line before, as its record
+    sub [1]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp imNo
+    dac ivL
+    jsp i [brkChk:TERM_BANK]
+    lac i [taCnt:TERM_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp imGu
+    lio ivL
+    jsp i [lnPtr:0]
+    dac imP
+    lac i imP
+    and [REC_LEN]
+    dac ivJ
+    jmp imNx
+imCh, lac ivL               // dot's line: its head, then the typing
+    SKIP_NEXT_IF_SAME DOT
+    jmp imRec
+    lac ivJ
+    sub ivCur
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp imG
+    lac ivJ
+    add [LINEBUF]
+    jmp imF
+imG, add [GENBUF]
+imF, dac imQ
+    lac i imQ
+    jmp imC
+imRec, lac ivJ              // a record: two characters a word, the first high
+    rar 1s
+    and [0377777]
+    add imP
+    add [REC_HDR]
+    dac imQ
+    lac i imQ
+    dac imW
+    lac ivJ
+    and [1]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp imLo
+    lac imW
+    rar 9s
+    jmp imLo1
+imLo, lac imW
+imLo1, and [0777]
+imC, SKIP_NEXT_IF_DIFFERENT imE
+    jmp imDn
+    SKIP_NEXT_IF_DIFFERENT imO
+    jmp imOp
+    jmp imNx
+imDn, lac imLv
+    add [1]
+    dac imLv
+    jmp imNx
+imOp, lac imLv
+    sub [1]
+    dac imLv
+    SKIP_NEXT_IF_AC_ZERO
+    jmp imNx
+    law 1
+    jmp i imX
+imNo, cla
+    jmp i imX
+imGu, lac [0777776]
+    jmp i imX
+
+// ivFix -- 3.7's fixindent on the ivGc characters typed at GENBUF under
+// autoindent, ivInd the indent given: their leading white made again of
+// TABs and blanks, or all of them taken away when they are white alone, as
+// given, on an otherwise empty line (LBLEN 0). ivGc is the new count, ivCh
+// 1 when the text changed. AC is the leading white's columns; IO is
+// clobbered.
+ivFix, dac ifX
+    dzm ivCh
+    lac [GENBUF]
+    dac ivS
+    lac ivGc
+    dac ivN
+    jsp ivWc
+    dac ifI
+    lac ivPw
+    SKIP_NEXT_IF_SAME ivGc
+    jmp ifG
+    lac ifI
+    SKIP_NEXT_IF_SAME ivInd
+    jmp ifG
+    lac LBLEN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ifG
+    dzm ivGc
+    jmp ifC
+ifG, lio ifI                // the new indent, the rest moved down after it
+    jsp ivGi
+    dac ifN
+    SKIP_NEXT_IF_DIFFERENT ivPw
+    jmp ifE
+    add [GENBUF]
+    dac ifD
+    lac ivPw
+    add [GENBUF]
+    dac ifS
+    lac ivGc
+    sub ivPw
+    dac ifK
+    add ifN
+    dac ivGc
+ifM, lac ifK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ifC
+    lac i ifS
+    dac i ifD
+    idx ifS
+    idx ifD
+    lac ifK
+    sub [1]
+    dac ifK
+    jmp ifM
+ifC, law 1
+    dac ivCh
+ifE, lac ifI
+    jmp i ifX
+
+// ivWrap -- wrapmargin's break (3.7's vgetline): the key ivK typed at
+// column ivOc, past the margin, with ivGc characters typed at GENBUF, this
+// insert's own from ivOg. The key goes in; when the word it ends reaches
+// past the margin, the word and the key are put before the keys to come
+// (keys.ac's kyPush), LF first; else LF alone, the blanks the key follows
+// dropped. AC is where the typing goes back to, before the blanks ahead of
+// what moved; -1 when a word alone reaches the margin and stays.
+// IO is clobbered.
+ivWrap, dac iwrX
+    lac ivGc
+    add [GENBUF]
+    dac iwrP
+    lac ivK
+    dac i iwrP
+    idx iwrP
+    dzm i iwrP
+    lac ivGc
+    add [1]
+    dac iwrG
+    dac iwrC
+iwr1, jsp iwrSp             // back over the blanks before the key
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp iwr2
+    lac iwrC
+    sub [1]
+    dac iwrC
+    jmp iwr1
+iwr2, lac iwrC
+    sub iwrG
+    add ivOc
+    add i [oWrapMarg:EX_BANK]
+    sub i [scCols:SCR_BANK]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp iwr5
+iwr3, lac iwrC              // back to the word's start
+    sub ivOg
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp iwr3a
+    jmp iwr4
+iwr3a, jsp iwrSp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp iwr4
+    lac iwrC
+    sub [1]
+    dac iwrC
+    jmp iwr3
+iwr4, lac iwrC
+    sub ivOg
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp iwr4a
+    lac [0777776]
+    jmp i iwrX
+iwr4a, lac iwrC
+    add [GENBUF]
+    lia
+    jsp i [kyPush:TERM_BANK]
+    lac iwrC
+    sub [1]
+    dac iwrC
+iwr5, lio [ivNlS:FILE_BANK]
+    jsp i [kyPush:TERM_BANK]
+iwr6, jsp iwrSp             // and back over the blanks before that
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp iwr7
+    lac iwrC
+    sub [1]
+    dac iwrC
+    jmp iwr6
+iwr7, lac iwrC
+    jmp i iwrX
+
+// iwrSp -- whether the character before index iwrC in GENBUF is past ivOg
+// and white (C's isspace, keys.ac's kySp). AC is 1 or 0; IO is clobbered.
+iwrSp, dac iwsX
+    lac iwrC
+    sub ivOg
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp iws1
+    cla
+    jmp i iwsX
+iws1, lac iwrC
+    add [GENBUF-1]
+    dac iwrP
+    lio i iwrP
+    jsp i [kySp:TERM_BANK]
+    jmp i iwsX
+
+// ivSec -- showmatch's second by the clock (3.7's sleep(1)), keys typed
+// meanwhile taken into the ring. AC and IO are clobbered.
+ivSec, dac isX
+    rck
+    dio isT
+isL, jsp i [brkChk:TERM_BANK]
+    rck
+    lai
+    sub isT
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    add [CLK_WRAP]
+    sub [SHOW_MS]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp isL
+    jmp i isX
+
+iwX, 0
+iwP, 0
+iwC, 0
+ihX, 0
+ihC, 0
+itX, 0
+itC, 0
+itT, 0
+igX, 0
+igC, 0
+igP, 0
+ibX, 0
+ibI, 0
+ibT, 0
+irX, 0
+irP, 0
+irN, 0
+irH, 0
+irW, 0
+imX, 0
+imE, 0
+imO, 0
+imLv, 0
+imP, 0
+imQ, 0
+imW, 0
+isX, 0
+isT, 0
+ifX, 0
+ifI, 0
+ifN, 0
+ifS, 0
+ifD, 0
+ifK, 0
+iwrX, 0
+iwrP, 0
+iwrG, 0
+iwrC, 0
+iwsX, 0
+endloc
+
+ivS, 0                      // ivWc's characters: their full address
+ivN, 0                      //   and how many
+ivPw, 0                     // ivWc's count of the leading white
+ivBr, 0                     // ivMat's bracket,
+ivCur, 0                    //   dot's head's length,
+ivGc, 0                     //   and the typing's;
+ivL, 0                      //   the match's line
+ivJ, 0                      //   and index
+ivInd, 0                    // ivFix's indent given
+ivCh, 0                     //   and whether the text changed
+ivOg, 0                     // ivWrap's start of this insert's own typing,
+ivOc, 0                     //   the key's column
+ivK, 0                      //   and the key
+ivNlS, CH_LF                // ivWrap's LF, as a string for kyPush
+    0

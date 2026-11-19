@@ -1,0 +1,706 @@
+// termio.ac -- vi's console, from TECO's termio.ac, cut to DCS2 alone: one
+// caller on channel 0, port PORTNO, in ASCII with telnet on and DCS2's echo
+// off, vi echoing for itself. It provides the caller (tmReady), a character
+// out (putc, newline, ringBell) with the column it leaves (outCol), a key in
+// (pollc, getc) with the millisecond it was taken (kyTime), the break check
+// (brkChk), leaving (tmQuit), and the type-out helpers (putStr, putDec,
+// tabTo).
+//
+// In telnet mode Return reads as LF; LF goes out as CR LF and CR as CR NUL.
+// A key is stripped to 7 bits and a NUL is dropped. DEL and Ctrl-C, and the
+// break's switch turned on, are a break while brkOn is set: the ring is
+// emptied and it leaves by jmp i tmErr with ERR_BREAK. A lost caller is
+// dropped, the channel listens again, and it leaves by jmp i tmErr with
+// ERR_LOST. tmErr does not return.
+//
+// Every key is taken from DCS2 into the type-ahead ring (TA_BUF, its times in
+// TA_TIME, bank 9) whenever vi waits and at every character it sends, with
+// the BBN clock's millisecond, which the start enables; while the ring is
+// full DCS2 holds the rest.
+//
+// Every routine is entered by jsp, from any bank, with the extend window
+// open, and returns by jmp i with it open. The file goes in bank TERM_BANK;
+// its data words follow its code. Needs vi.ah, <AIDS/skipmacros.ah>,
+// <DCS/dcs2defs.ah>, <CLOCK/clockdefs.ah>, restart in bank 0 (vi.am1),
+// tmHello in bank MSG_BANK (greeting.ac), viOn in bank VI_BANK (vmain.ac),
+// and scOutC and scQuit in bank SCR_BANK (screen.ac).
+
+local tiX, trX, trWait, trConn, trLost, trNew, pcX, pcC, pcDcs, pcTab, \
+    pcBs, pcZero, nlX, blX, plX, plP, plNone, gcX, gcLoop, bkX, bkLoop, \
+    bkSwOn, bkC, bkP, bkKey, bkPut, bkBreak, bkBrKy, bkBrSw, bkLost, tcX, \
+    tqX, tqWait, tqT0, psX, psP, psW, pdX, pdV, pdW, pdN, pdP, pdLoop, \
+    pdPad, pdBlank, pdOut, ttX, ttCol, ttLoop, ttSp, tlX, tlC, tlP, tlI, \
+    tlCol, tlCol0, tlOver, tlKey, tlAdd, tlFull, tlQuote, tlDKey, tlDEnd, \
+    tlEnd, tlLong, tlErase, tlKill, tlWord, tlWdN, tlWdB, tlBack, tlBkC, \
+    tlBk2, tlBkT, tlBkN, tlBkE, tlBkO, tlTerm, ttmX, tlEcho, teX, teC, \
+    teSelf, teCtl, pcCol, rcX, rcC, rcSend
+
+// tmInit -- the console as at the start: DCS2 reset, no caller, nothing
+// typed ahead; the break's switch already on is no break.
+// AC and IO are clobbered.
+tmInit, dac tiX
+    cli
+    lio [scbrst]
+    scb
+    dzm tmDev
+    jsp taClr
+    dzm swBkOn
+    szs SW_BREAK*010        // skip if the break's switch is off
+    idx swBkOn
+    jmp i tiX
+
+// tmReady -- make sure a caller is there: at the start and at every prompt.
+// With none, listen and wait for one; a new caller gets the greeting
+// (tmHello). AC and IO are clobbered.
+tmReady, dac trX
+    lac tmDev
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trConn
+    // listen, if the channel is not open yet, then wait for a caller
+    cli
+    rcs
+    lai
+    and [dsfopn]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trWait
+    lio [scbset tmCtl]      // scb reads the block in the bank it runs in
+    scb
+trWait, cli
+    rcs
+    lai
+    and [dsfcon]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp trWait
+    cli
+    ssb
+    law 1
+    dac tmDev
+    jmp trNew
+
+// the caller still there?
+trConn, cli
+    rcs
+    lai
+    and [dsfser dsfcls]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp trLost
+    lai
+    and [dsfcon]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i trX
+trLost, lio [scbbnd]        // drop the caller, listen again
+    scb
+    dzm tmDev
+    jmp trWait
+
+// a new caller: nothing typed for the last one counts
+trNew, jsp taClr
+    dzm outCol
+    jsp i [tmHello:MSG_BANK]
+    jmp i trX
+
+// putc -- send the ASCII character in IO, keeping outCol, the column the
+// terminal's cursor is in. Checks for a break first, so output can always
+// be stopped; a full DCS2 buffer is waited out, still checking. With no
+// caller it goes nowhere. While exOut is set (visual mode running an ex
+// command), the screen's scOutC sees the character first: it places ex's
+// output on the status line and holds a new line back, and may drop the
+// character. AC and IO are clobbered.
+putc, dac pcX
+    dio pcC
+    jsp brkChk
+    lac tmDev
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i pcX
+    lac exOut
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pcCol
+    lio pcC
+    jsp i [scOutC:SCR_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i pcX               // held back or dropped
+    // the column: CR and LF to 0, BS back one, TAB to the next stop, a
+    // printing character on one; the others leave it
+pcCol, lac pcC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp pcZero
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp pcZero
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp pcTab
+    SKIP_NEXT_IF_DIFFERENT [CH_BS]
+    jmp pcBs
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_POSITIVE_OR_ZERO
+    jmp pcDcs               // a control character
+    sub [CH_DEL-CH_SP]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pcDcs               // DEL
+    idx outCol
+    jmp pcDcs
+pcZero, dzm outCol
+    jmp pcDcs
+pcTab, lac outCol
+    ior [TAB_STOP-1]
+    add [1]
+    dac outCol
+    jmp pcDcs
+pcBs, lac outCol
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac outCol
+pcDcs, lio pcC
+    tcb
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp i pcX               // sent
+    lai
+    and [dseflf]            // the buffer is full: wait, still checking
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkLost
+    jsp brkChk
+    jmp pcDcs
+
+// rawc -- send the character in IO as it is: no column kept, nothing seen
+// by scOutC; the screen's sequences go this way. A full DCS2 buffer is
+// waited out, checking for a break. With no caller it goes nowhere.
+// AC and IO are clobbered.
+rawc, dac rcX
+    dio rcC
+    jsp brkChk
+    lac tmDev
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i rcX
+rcSend, lio rcC
+    tcb
+    SKIP_NEXT_IF_IO_NEGATIVE
+    jmp i rcX               // sent
+    lai
+    and [dseflf]            // the buffer is full: wait, still checking
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkLost
+    jsp brkChk
+    jmp rcSend
+
+// newline -- end the line: LF, which DCS2 sends as CR LF.
+// AC and IO are clobbered.
+newline, dac nlX
+    lio [CH_LF]
+    jsp putc
+    jmp i nlX
+
+// ringBell -- the bell. AC and IO are clobbered.
+ringBell, dac blX
+    lio [CH_BELL]
+    jsp putc
+    jmp i blX
+
+// pollc -- the oldest key typed ahead, if any, after a break check.
+// AC is 1 with the key in IO and its millisecond in kyTime, or 0 when none
+// waits, IO clobbered.
+pollc, dac plX
+    jsp brkChk
+    lac taCnt
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp plNone
+    sub [1]
+    dac taCnt
+    lac taHd
+    add [TA_TIME]
+    dac plP
+    lac i plP
+    dac kyTime
+    lac taHd
+    add [TA_BUF]
+    dac plP
+    lio i plP
+    lac taHd
+    add [1]
+    SKIP_NEXT_IF_DIFFERENT [TA_SIZE]
+    cla
+    dac taHd
+    law 1
+    jmp i plX
+plNone, cla
+    jmp i plX
+
+// getc -- the next key typed, waiting for one.
+// IO is the key, kyTime its millisecond; AC is clobbered.
+getc, dac gcX
+gcLoop, jsp pollc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gcLoop
+    jmp i gcX
+
+// brkChk -- move every key waiting in DCS2 into the type-ahead ring, each
+// with the clock's millisecond. While the ring is full DCS2 is not read, so
+// the rest wait in the device. While brkOn is set, DEL, Ctrl-C, or the
+// break's switch just turned on, is a break: the ring is emptied and it
+// leaves by jmp i tmErr with ERR_BREAK. A lost caller leaves by jmp i tmErr
+// with ERR_LOST. Returns when nothing more waits. AC and IO are clobbered.
+brkChk, dac bkX
+    szs SW_BREAK*010        // skip if the break's switch is off
+    jmp bkSwOn
+    dzm swBkOn              // off: the next turn-on counts
+bkLoop, lac tmDev
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i bkX
+    cli
+    rcs
+    lai
+    and [dsfser dsfcls]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp bkLost
+    lai
+    and [dsfcon]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkLost
+    lai
+    and [dsfrdy]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i bkX
+    lac taCnt
+    SKIP_NEXT_IF_DIFFERENT [TA_SIZE]
+    jmp i bkX               // the ring full: the rest wait in DCS2
+    rch rchclr
+    SKIP_NEXT_IF_IO_POSITIVE_OR_ZERO
+    jmp i bkX               // nothing after all; a loss shows in rcs next time
+    lai
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp bkLoop              // NUL is dropped
+    dac bkC
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp bkKey
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLC]
+    jmp bkKey
+    jmp bkPut
+bkKey, lac brkOn            // a break key while no break is armed is a key
+    SKIP_NEXT_IF_AC_ZERO
+    jmp bkBrKy
+// into the ring, with its time
+bkPut, lac taTl
+    add [TA_TIME]
+    dac bkP
+    rck
+    dio i bkP
+    lac taTl
+    add [TA_BUF]
+    dac bkP
+    lac bkC
+    dac i bkP
+    idx taCnt
+    lac taTl
+    add [1]
+    SKIP_NEXT_IF_DIFFERENT [TA_SIZE]
+    cla
+    dac taTl
+    jmp bkLoop
+// the break's switch on: once, when it has just been turned on
+bkSwOn, lac swBkOn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp bkLoop
+    law 1
+    dac swBkOn
+    lac brkOn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp bkBrSw
+    jmp bkLoop
+bkBrKy, lac bkC             // which key broke, 0 for the switch
+    jmp bkBreak
+bkBrSw, cla
+bkBreak, dac brkKey
+    jsp taClr
+    law ERR_BREAK
+    jmp i tmErr
+bkLost, lio [scbbnd]        // drop the caller, listen again
+    scb
+    dzm tmDev
+    jsp taClr
+    law ERR_LOST
+    jmp i tmErr
+
+// taClr -- empty the type-ahead ring. AC is clobbered, IO preserved.
+taClr, dac tcX
+    dzm taCnt
+    dzm taHd
+    dzm taTl
+    jmp i tcX
+
+// tmQuit -- leave: BYE_MS for what was sent to leave, then the caller
+// dropped, the channel listening again, and vi started again at restart, so
+// the next caller finds it empty. It does not return.
+// AC and IO are clobbered.
+tmQuit, dac tqX
+    lac i [viOn:VI_BANK]    // visual mode: the terminal left as ex found it
+    SKIP_NEXT_IF_AC_ZERO
+    jsp i [scQuit:SCR_BANK]
+    rck
+    dio tqT0
+tqWait, rck
+    lai
+    sub tqT0
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    add [CLK_WRAP]
+    sub [BYE_MS]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp tqWait
+    lio [scbbnd]
+    scb
+    dzm tmDev
+    jsp taClr
+    jmp i [restart:0]
+
+// putStr -- type the string at the full address in IO, two characters a
+// word, the first in the high half, ending at a 0 character (am1's ascii).
+// AC and IO are clobbered.
+putStr, dac psX
+    dio psP
+psW, lac i psP
+    rar 9s
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i psX
+    lia
+    jsp putc
+    lac i psP
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i psX
+    lia
+    jsp putc
+    idx psP
+    jmp psW
+
+// putDec -- type the number in IO, 0 to 0377777, in decimal, right-justified
+// in at least the number of columns in pdWid, which it sets to 0 again, so
+// a caller that pads sets it first and the others need not.
+// AC and IO are clobbered.
+putDec, dac pdX
+    dio pdV
+    lac pdWid
+    dac pdW
+    dzm pdWid
+    dzm pdN
+    lac [pdBuf:TERM_BANK]
+    dac pdP
+// the digits, the lowest first
+pdLoop, lac pdV
+    lia
+    cla
+    scl 1s
+    div [0d10]
+    hlt                     // no overflow: the divisor is 10
+    dac pdV
+    lai
+    add [CH_0]
+    dac i pdP
+    idx pdP
+    idx pdN
+    lac pdV
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pdLoop
+// blanks before them to the width
+pdPad, lac pdW
+    sub pdN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp pdBlank
+    jmp pdOut
+pdBlank, lac pdW
+    sub [1]
+    dac pdW
+    lio [CH_SP]
+    jsp putc
+    jmp pdPad
+pdOut, lac pdP
+    sub [1]
+    dac pdP
+    lio i pdP
+    jsp putc
+    lac pdN
+    sub [1]
+    dac pdN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pdOut
+    jmp i pdX
+
+// tabTo -- move the cursor to the column in IO, as 3.7 does with hardware
+// tabs: TABs while the next stop is not past it, then blanks. A column left
+// of the cursor starts the line again with CR.
+// AC and IO are clobbered.
+tabTo, dac ttX
+    dio ttCol
+    lac ttCol
+    sub outCol
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ttLoop
+    lio [CH_CR]
+    jsp putc
+ttLoop, lac outCol
+    sub ttCol
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i ttX
+    lac outCol
+    ior [TAB_STOP-1]
+    add [1]
+    sub ttCol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ttSp
+    lio [CH_TAB]
+    jsp putc
+    jmp ttLoop
+ttSp, lio [CH_SP]
+    jsp putc
+    jmp ttLoop
+
+// tmLine -- a line from the keyboard into the buffer at the full address in
+// tlBuf, a character a word ending in a 0 word, at most tlMax characters,
+// echoed as a terminal's own editing would: BS erases a character, ^U the
+// line, ^W a word, ^V takes the next key as it is; a control character shows
+// as ^X. Return (LF or CR) ends the line, echoed as a new line. ^D, unechoed,
+// ends it when it is the first key, or when tlCtlD is not 0 and it follows a
+// lone ^ or 0 (autoindent's ^^D and 0^D); elsewhere it is dropped. A line
+// that would be longer than tlMax is read to its end and dropped.
+// AC is CH_LF, CH_CTLD, or 0 for a line too long; tlLen is its length; IO is
+// clobbered.
+tmLine, dac tlX
+    dzm tlLen
+    dzm tlOver
+    lac outCol
+    dac tlCol0
+tlKey, jsp getc
+    dio tlC
+    lac tlC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp tlEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp tlEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_BS]
+    jmp tlErase
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLU]
+    jmp tlKill
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLW]
+    jmp tlWord
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLD]
+    jmp tlDKey
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp tlQuote
+tlAdd, lac tlLen
+    SKIP_NEXT_IF_DIFFERENT tlMax
+    jmp tlFull
+    add tlBuf
+    dac tlP
+    lac tlC
+    dac i tlP
+    idx tlLen
+    lio tlC
+    jsp tlEcho
+    jmp tlKey
+tlFull, law 1
+    dac tlOver
+    jmp tlKey
+tlQuote, jsp getc
+    dio tlC
+    jmp tlAdd
+// ^D: first, or after a lone ^ or 0 when asked for
+tlDKey, lac tlLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tlDEnd
+    SKIP_NEXT_IF_SAME [1]
+    jmp tlKey
+    lac tlCtlD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tlKey
+    lac i tlBuf
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp tlDEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_0]
+    jmp tlDEnd
+    jmp tlKey
+tlDEnd, jsp tlTerm
+    law CH_CTLD
+    jmp i tlX
+tlEnd, jsp tlTerm
+    jsp newline
+    lac tlOver
+    SKIP_NEXT_IF_AC_ZERO
+    jmp tlLong
+    law CH_LF
+    jmp i tlX
+tlLong, dzm tlLen
+    jsp tlTerm
+    cla
+    jmp i tlX
+// erasing: the line shortened, then the cursor taken back to its end
+tlErase, lac tlLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tlKey
+    sub [1]
+    dac tlLen
+    jmp tlBack
+tlKill, dzm tlLen
+    jmp tlBack
+tlWord, lac tlLen           // blanks, then what is not blank
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tlBack
+    add tlBuf
+    sub [1]
+    dac tlP
+    lac i tlP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp tlWdB
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp tlWdB
+tlWdN, lac tlLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tlBack
+    add tlBuf
+    sub [1]
+    dac tlP
+    lac i tlP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp tlBack
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp tlBack
+    lac tlLen
+    sub [1]
+    dac tlLen
+    jmp tlWdN
+tlWdB, lac tlLen
+    sub [1]
+    dac tlLen
+    jmp tlWord
+// the column the line's end is in, from tlCol0; each column past it erased
+tlBack, lac tlCol0
+    dac tlCol
+    dzm tlI
+tlBkC, lac tlI
+    SKIP_NEXT_IF_DIFFERENT tlLen
+    jmp tlBkE
+    add tlBuf
+    dac tlP
+    lac i tlP
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp tlBkT
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp tlBk2
+    sub [CH_DEL-CH_SP]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp tlBk2
+    idx tlCol
+    jmp tlBkN
+tlBk2, lac tlCol
+    add [2]
+    dac tlCol
+    jmp tlBkN
+tlBkT, lac tlCol
+    ior [TAB_STOP-1]
+    add [1]
+    dac tlCol
+tlBkN, idx tlI
+    jmp tlBkC
+tlBkE, lac outCol
+    sub tlCol
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp tlBkO
+    jmp tlKey
+tlBkO, lio [CH_BS]
+    jsp putc
+    lio [CH_SP]
+    jsp putc
+    lio [CH_BS]
+    jsp putc
+    jmp tlBkE
+
+// tlTerm -- the 0 word after tlLen characters. AC is clobbered, IO preserved.
+tlTerm, dac ttmX
+    lac tlBuf
+    add tlLen
+    dac tlP
+    dzm i tlP
+    jmp i ttmX
+
+// tlEcho -- echo the key in IO: a TAB or a printing character as itself,
+// another as ^ and its letter, DEL as ^?. AC and IO are clobbered.
+tlEcho, dac teX
+    dio teC
+    lac teC
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp teSelf
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp teCtl
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp teCtl
+teSelf, lio teC
+    jsp putc
+    jmp i teX
+teCtl, lio [CH_CARET]
+    jsp putc
+    lac teC
+    xor [0100]
+    lia
+    jsp putc
+    jmp i teX
+
+tiX, 0                      // the return addresses
+trX, 0
+pcX, 0
+nlX, 0
+blX, 0
+plX, 0
+gcX, 0
+bkX, 0
+tcX, 0
+tqX, 0
+psX, 0
+pdX, 0
+ttX, 0
+pcC, 0
+plP, 0
+bkC, 0
+bkP, 0
+tqT0, 0
+psP, 0
+pdV, 0
+pdW, 0
+pdN, 0
+pdP, 0
+ttCol, 0
+tlX, 0
+tlC, 0
+tlP, 0
+tlI, 0
+tlCol, 0
+tlCol0, 0
+tlOver, 0
+ttmX, 0
+teX, 0
+teC, 0
+rcX, 0
+rcC, 0
+pdBuf,                      // putDec's digits, the lowest first
+    table 6, 0
+endloc
+
+tlBuf, 0                    // tmLine's buffer: a full address
+tlMax, 0                    //   its room in characters
+tlLen, 0                    //   the line's length
+tlCtlD, 0                   //   not 0: ^^D and 0^D end the line
+brkKey, 0                   // the key that broke, 0 for the switch
+
+// DCS2 channel 0: ASCII, telnet, server, no echo, on PORTNO.
+tmCtl, dcftel dcfsrv
+    PORTNO
+
+tmErr, 0                    // where a break and a lost caller go: a full address
+tmDev, 0                    // 1 while a caller is connected, else 0
+brkOn, 0                    // not 0 while a break key breaks
+swBkOn, 0                   // 1 while the break's switch is on and its turn-on is taken
+taCnt, 0                    // keys in the type-ahead ring
+taHd, 0                     // the oldest one's place in TA_BUF
+taTl, 0                     // the next one's place
+kyTime, 0                   // the millisecond pollc's key was taken, 0 to CLK_WRAP-1
+outCol, 0                   // the column the terminal's cursor is in, 0 the first
+pdWid, 0                    // putDec's least width, 0 after each call
+exOut, 0                    // not 0 while scOutC places ex's output (screen.ac)

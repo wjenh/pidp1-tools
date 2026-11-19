@@ -1,0 +1,327 @@
+// exaddr.ac -- ex's addresses, as 3.7's ex_addr.c: . n $ +n -n ^n 'x ''
+// /re/ ?re? \/ \? and blanks, and the routines that set a command's lines
+// from them (setdot, setcount, setall, ...). A line is its number; an
+// address not given is ADDR_NONE. In bank EX_BANK. Needs vi.ah,
+// <AIDS/skipmacros.ah>, excmd.ac, lines.ac (bank 0), messages.ac, and
+// regex.ac's search (bank RE_BANK).
+
+local adX, adV, adH, adO, adS, adC, adL, adDig, adNoD, adBig, adChk, adBad, \
+    adSw, adPl, adMi, adSign, adDol, adDot, adMk, adMkP, adDef, adDf1, \
+    adDf2, adNeg, adMany, s1X, sdX, scX, scN, saX, snX, nzX, neX, cnX, naX, \
+    mdX, adMinus, adSet, adGot, adMkF, adMkBad, adSome, s1Chk, scCnt, scOk, \
+    scDol, scNz, saD1, adSrch
+
+// address -- 3.7's address(0): one address from the command line.
+// AC is the line; IO is 1 when there was an address, else 0.
+address, dac adX
+    dzm bigMove
+    dzm adS                 // the last sign: 1, -1 or 0
+    dzm adO                 // the offset
+    dzm adH                 // whether there is an address yet
+    dzm adV
+adL, jsp peekCd
+    lia
+    jsp isDigit
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp adNoD
+// a number: added to the address, or subtracted after a sign
+    lac adH
+    SKIP_NEXT_IF_AC_ZERO
+    jmp adDig
+    dzm adV
+    law 1
+    dac adH
+    dac bigMove
+adDig, lac adV
+    add adO
+    dac adV
+    jsp getNum
+    dac adO
+    lac adS
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp adMi
+    lac adV
+    add adO
+    jmp adSign
+adMi, lac adV
+    sub adO
+adSign, dac adV
+    dzm adS
+    dzm adO
+adNoD, jsp getCd
+    dac adC
+// / $ ' \ . : an address already, or an offset, is badly formed (not ?,
+// as 3.7)
+    SKIP_NEXT_IF_DIFFERENT [CH_SLASH]
+    jmp adBig
+    SKIP_NEXT_IF_DIFFERENT [CH_DOLLAR]
+    jmp adBig
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp adBig
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp adBig
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp adChk
+    jmp adSw
+adBig, idx bigMove
+adChk, lac adH
+    ior adO
+    SKIP_NEXT_IF_AC_ZERO
+    jmp adBad
+adSw, lac adO
+    add adS
+    dac adO
+    dzm adS
+    lac adC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp adL
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp adL
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp adPl
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp adMinus
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp adMinus
+    SKIP_NEXT_IF_DIFFERENT [CH_DOLLAR]
+    jmp adDol
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp adDot
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp adMk
+    SKIP_NEXT_IF_DIFFERENT [CH_SLASH]
+    jmp adSrch
+    SKIP_NEXT_IF_DIFFERENT [CH_QMARK]
+    jmp adSrch
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp adSrch
+    jmp adDef
+adPl, law 1
+    jmp adSet
+adMinus, lac [-1]
+adSet, dac adS
+    lac adH
+    SKIP_NEXT_IF_AC_ZERO
+    jmp adL
+    lac DOT
+    dac adV
+    law 1
+    dac adH
+    jmp adL
+adDol, lac DOL
+    jmp adGot
+// a search: the line found
+adSrch, lio adC
+    jsp i [reSearch:RE_BANK]
+    jmp adGot
+adDot, lac DOT
+adGot, dac adV
+    law 1
+    dac adH
+    jmp adL
+// 'x: the line mark x is on; '' and '` the previous context mark
+adMk, jsp getChar
+    SKIP_NEXT_IF_DIFFERENT [CH_APOS]
+    jmp adMkP
+    SKIP_NEXT_IF_DIFFERENT [CH_GRAVE]
+    jmp adMkP
+    lia
+    jsp isLower
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp adMkBad
+    lai
+    sub ['a']
+    jmp adMkF
+adMkP, law MARK_PREV
+adMkF, lia
+    jsp i [lnMarkFind:0]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp adGot
+    lac [mUndefMk:MSG_BANK]
+    jmp exErr
+adMkBad, lac [mMarks:MSG_BANK]
+    jmp exErr
+// anything else ends the address, read again by the command
+adDef, jsp unGetChar
+    lac adO
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp adDf1
+    lac adH
+    SKIP_NEXT_IF_AC_ZERO
+    jmp adDf2
+    lac DOT
+    dac adV
+    law 1
+    dac adH
+adDf2, lac adV
+    add adO
+    dac adV
+adDf1, lac adH
+    SKIP_NEXT_IF_AC_ZERO
+    jmp adSome
+    dzm bigMove
+    cla
+    cli
+    jmp i adX
+adSome, lac adV
+    SKIP_NEXT_IF_AC_ZERO
+    jsp notEmpty
+    lac adV
+    add adS
+    dac adV
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp adNeg
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp adMany
+    lac adV
+    lio [1]
+    jmp i adX
+adNeg, lac [mNegAddr:MSG_BANK]
+    jmp exErr
+adMany, lac [mNotMany:MSG_BANK]
+    jmp exErr
+adBad, lac [mBadAddr:MSG_BANK]
+    jmp exErr
+
+// setDot1 -- 3.7's setdot1: no address is dot; the first may not follow the
+// second. AC and IO are clobbered.
+setDot1, dac s1X
+    lac addr2
+    SKIP_NEXT_IF_SAME [ADDR_NONE]
+    jmp s1Chk
+    lac DOT
+    dac addr1
+    dac addr2
+s1Chk, lac addr2
+    sub addr1
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp i s1X
+    jsp notEmpty
+    lac [mFirst:MSG_BANK]
+    jmp exErr
+
+// setDot -- 3.7's setdot: setDot1, and the previous context mark at dot
+// when the address moved far. AC and IO are clobbered.
+setDot, dac sdX
+    jsp setDot1
+    lac bigMove
+    SKIP_NEXT_IF_AC_ZERO
+    jsp markDot
+    jmp i sdX
+
+// markDot -- 3.7's markDOT: '' on dot. AC and IO are clobbered.
+markDot, dac mdX
+    lio DOT
+    jsp i [lnMarkPrev:0]
+    jmp i mdX
+
+// setCount -- 3.7's setcount: a count after the command makes its lines
+// start at the last address. AC and IO are clobbered.
+setCount, dac scX
+    jsp pastWh
+    jsp peekChar
+    lia
+    jsp isDigit
+    SKIP_NEXT_IF_AC_ZERO
+    jmp scCnt
+    jsp setDot
+    jmp i scX
+scCnt, lac addr2
+    dac addr1
+    jsp setDot
+    jsp getNum
+    dac scN
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp scOk
+    lac [mBadCount:MSG_BANK]
+    jmp exErr
+scOk, lac addr2
+    add scN
+    sub [1]
+    dac addr2
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp scDol
+    jmp scNz
+scDol, lac DOL
+    dac addr2
+scNz, jsp nonZero
+    jmp i scX
+
+// setAll -- 3.7's setall: no address is the whole buffer.
+// AC and IO are clobbered.
+setAll, dac saX
+    lac addr2
+    SKIP_NEXT_IF_SAME [ADDR_NONE]
+    jmp saD1
+    law 1
+    dac addr1
+    lac DOL
+    dac addr2
+    SKIP_NEXT_IF_AC_ZERO
+    jmp saD1
+    dzm DOT
+    jmp i saX
+saD1, jsp setDot1
+    jmp i saX
+
+// setNoAddr -- 3.7's setnoaddr: the command takes no address.
+// AC and IO are clobbered.
+setNoAddr, dac snX
+    lac addr2
+    SKIP_NEXT_IF_DIFFERENT [ADDR_NONE]
+    jmp i snX
+    lac [mNoAddr:MSG_BANK]
+    jmp exErr
+
+// nonZero -- 3.7's nonzero: the first line may not be 0.
+// AC and IO are clobbered.
+nonZero, dac nzX
+    lac addr1
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i nzX
+    jsp notEmpty
+    lac [mNonzero:MSG_BANK]
+    jmp exErr
+
+// notEmpty -- 3.7's notempty: the buffer must have lines.
+// AC and IO are clobbered.
+notEmpty, dac neX
+    lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i neX
+    lac [mNoLines:MSG_BANK]
+    jmp exErr
+
+// setCNL, setNAEOL -- 3.7's: setcount then newline; setnoaddr then eol.
+// AC and IO are clobbered.
+setCNL, dac cnX
+    jsp setCount
+    jsp newLine
+    jmp i cnX
+setNAEOL, dac naX
+    jsp setNoAddr
+    jsp eol
+    jmp i naX
+
+adX, 0
+adV, 0
+adH, 0
+adO, 0
+adS, 0
+adC, 0
+s1X, 0
+sdX, 0
+mdX, 0
+scX, 0
+scN, 0
+saX, 0
+snX, 0
+nzX, 0
+neX, 0
+cnX, 0
+naX, 0
+endloc
+
+bigMove, 0                  // the address moved dot far: '' is set

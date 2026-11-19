@@ -1,0 +1,3005 @@
+// files.ac -- ex's files: the names, the
+// volumes, reading and writing, w>>, the file commands e ex edit r f n args
+// rew so rec w wq x format, autowrite, DR:EXRC at the greeting, the save of a
+// lost caller's buffer and :recover, paper tape and the printer; for
+// :ta (subst.ac), the tags files read and the tag's file compared.
+// 3.7's ex_io.c and ex_cmds2.c are the model: filename, getargs, getone, rop,
+// wop, edfile, getfile, putfile, iostats, source, next, nomore, erewind,
+// makargs, pargs, ckaw.
+//
+// A name is dev:name.ext, the devices DT1: to DT8:, DR:, PC: and LP:, letters
+// taken as upper case. name.ext is the library's name "NAME EXT", the two
+// subnames with a blank between, as TECO's second set stores them, within
+// LIB_MAX characters. No device is the current file's device, DR: when that
+// is none or PC: or LP:. Every name kept (FN_CUR, FN_ALT, FN_FILE, FN_CUT,
+// the argument list) is in the full form, so % and # expand to it.
+//
+// The drum's volume is mounted once for each caller; a tape's again for
+// every command, so a tape changed on its drive is seen, except while a
+// source file on that drive is being read. A file is read STG_BLKS blocks at
+// a time through STG_BUF and split into lines at CR, an LF just after a CR
+// dropped and a lone LF also ending a line; NUL and the eighth bit are
+// dropped. It is written through the scratch file VI  OUT, renamed over the
+// old one, or with no room for both in the old one's room.
+//
+// Handlers are reached by jmp from ex's dispatch (cmdTab, excmd.ac) or from
+// exops.ac (fiWrite, fiWq, fiXit) and end by jmp i [exNext:EX_BANK]; an
+// error is jmp i [exErr:EX_BANK] with its message's full address in AC.
+// Routines are entered by jsp with the extend window open and return by jmp
+// i. In bank FILE_BANK; its data words follow its code. Needs vi.ah,
+// <AIDS/skipmacros.ah>, <FILESYSTEM/fs.ah>, <MICROTAPE/microtape.ah>,
+// <DRUM/drum.ah>; fslib.ac (bank FS_BANK); messages.ac (bank MSG_BANK);
+// ptape.ac and lpt.ac (this bank); lines.ac (bank 0); termio.ac (bank
+// TERM_BANK); and in bank
+// EX_BANK excmd.ac's input and helpers, exaddr.ac's setters and the
+// options.
+
+#define ADDR1        i [addr1:EX_BANK]
+#define ADDR2        i [addr2:EX_BANK]
+// getargs' limit: 3.7's genbuf, LBSIZE-2, less its "echo ".
+#define GA_MAX       0d1018
+
+local edF, edDo, fiQuick, rdF, fiBadNm, nxA, rwE, agL, ag1, ag2, ag3, agE, \
+    agCur, acY, soPerm, soFail, soMsg, soNest, rcE, rc1, rc2, rc3, wq1, wq2, \
+    wqQuit, nm1, fiFilename, fnNoF, fnCur, fnW, fnAD, fnArg, fnHas, fnAlt, \
+    fnF, fnE, fnSet, fnPr, fnPr1, fnF1, fnF2, fnNone, fnF3, fiGetArgs, gaPl, \
+    gaPw, gaArgs, gaL, gaPut, gaBsl, gaBq, gaHash, gaHs, gaPct, gaPc, gaFx, \
+    gaFl, gaEnd, gaNone, gaPLong, gaOne, gaOvf, fiIsSp, isY, fiOne, g1Miss, \
+    g1Go, g1Many, fiWord, wdS, wdE, wdR, wdNx, fnParse, npScan, npDev, npUnk, \
+    npD2c, npD2P, npD2L, npD3c, npDvOk, npNoDev, npName, npNl, npE2, npSt, \
+    npNDot, npLong, npBad, npNe, npNoNm, npPack, npPl, npFull, npFDr, npFPc, \
+    npFLp, npF2, npFC, npFl, npFz, npGet, ngR, npPut, fiMkArgs, maL, maC, maE, \
+    maOvf, fiErew, fiNext, nx1, nx2, nx3, fiRop, roNoEnt, roPerm, ftoX, \
+    ftoNo, ftlX, ftfX, ftfOth, \
+    roPc, roOpen, roMode, roNd, roRoS, roAd, roSd, roRd, roSt, roE, roClip, \
+    roA, roOth, roIn, roPat, roUnd, fiTooBig, fiRdInit, fiAppend, apL, apFull, \
+    fiGetLn, glL, glNoCR, glCR, glEnd1, glEnd, glEof, glNone, glLong, fiRdCh, \
+    rcVol, rcHi, rcW, fiStats, stV, stC, stNl, fiInject, ijR, ijR2, ijP, \
+    ijRest, ijB, ijCut, ijEnd, ijPut, fiWop, wp1, wpGt, wp2, wp3, \
+    wpCur, wpC1, wpChk, wpEx, wpDev, wpCase, wpEd, wpEdf, wpNotEd, wpRoF, \
+    wpCut, wpApp, wpRo, wpPerm, wpGo, wpNew, wpSt, wpRest, fiEdfile, efNot, \
+    efPart, fiPutFile, pfNew, pfRet, pfPc, pfLp, fiLines, flL, flC, flE, \
+    fiSize, szL, sz1, szE, fiNewVol, nv1, nvR27, nvWr, nvOk, nvSt0, nvSt, \
+    nvFull, fiAppVol, avRoom, avFull, avSt, avSeek, wrInit, wcLo, wrEnd, wn1, \
+    wrFlush, fiMount, mnOk, mnTape, mnT1, fiOpenN, fiCreate, fiErr, fiStMsg, \
+    smNr, smLk, smBd, smEx, smNf, smDf, smFull, smTf, smRo, smDr, smNm, \
+    soOpen, slL, slNc, slFull, slCR, slEnd, slLong, slEof, soCh, shL, shHi, \
+    soLong, soCopy, scpL, scpX, soRn, soQ, soQ2, soK, \
+    shW, shErr, fiInitBuf, fiNoChng, fiQName, strCpy, scL, strEq, seL, seYes, \
+    seNo, inX, fnX, gaX, goX, isX, g1X, wdX, npX, ngX, npuX, maX, erX, nxX, \
+    ckX, acX, nmX, roX, tbX, riX, apX, glX, rcX, stX, ijX, ipX, wpX, efX, pfX, \
+    peX, pleX, flX, szX, nvX, avX, asX, wiX, wcX, weX, wnX, wfX, mnX, oiX, \
+    cvX, smX, sxX, sooX, slX, shX, ibX, ncX, qnX, scX, seX, edC, fnComm, fnC, \
+    fnI, gaP, gaN, gaC, gaF, isC, g1W, wdP, wdB, npP, npQ, npC, npD1, npD2, \
+    npK, npDot, npN1, npN2, npB, npL, npI, ngC, maN, maD, maS, maT, nxC, agP, \
+    agI, agT, roC, roRo, roAddr, glP, glN, glC, ijS, ijE, ijD, wqQ, woF, woC, \
+    woE, woNe, woRo, woS1, woS2, pfBk, pfS, flPut, flEol, flN, flP, szN, szP, \
+    nvCh, nvW, nvB, nvDir, nvS, crName, avOdd, avPos, avP1, avEnd, avS, wName, \
+    wFail, wP, wHalf, wW, wcC, scS, scD, opName, opFd, smS, soM, slN, slP, \
+    slC, slOver, soHnd, soLeft, soP, soW, soHalf, soCR, fiHnd, drMnt, mtUnit, \
+    pDev, pUnit, rdDev, rbP, rbN, rbHalf, rbW, rlCR, cntln, cntch, fiFull, \
+    fiEdited, fiCut, fiWasAlt, fiIsAlt, fiAltDot, fiOldADot, fiArgc0, fiArgc, \
+    fiArgs, fiMorArgc, fiOvro, fiDenied, fiHush, fiFpat, fiOneV, g1In, g1V, \
+    npVol, npV, npVd, fmMnt, fmL, fmGo, fmTape, fmOk, fmFail, fmFull, fmF, fmI
+
+// fiInit -- no file names, no argument list, nothing sourced, no volume
+// mounted: as vi starts and restarts (vi.am1's restart).
+// AC is clobbered, IO preserved.
+fiInit, dac inX
+    dzm fiEdited
+    dzm fiCut
+    dzm fiWasAlt
+    dzm fiIsAlt
+    dzm fiAltDot
+    dzm fiOldADot
+    dzm fiArgc0
+    dzm fiArgc
+    dzm fiMorArgc
+    dzm fiOvro
+    dzm fiDenied
+    dzm fiHush
+    dzm fiFpat
+    dzm soOn
+    dzm drMnt
+    dzm mtUnit
+    dzm i [FN_CUR]
+    dzm i [FN_ALT]
+    dzm i [FN_FILE]
+    dzm i [FN_CUT]
+    jsp ptInit
+    jmp i inX
+
+// --- the commands
+
+// cEdit -- e, ex, edit [!] [+cmd] [file]: 3.7's edit. With the buffer
+// changed and no !, the name is still taken, as the alternate, before the
+// error (3.7's 'E'); here only when there are lines, as quickly's test.
+cEdit, law 'e'
+    dac edC
+    jsp i [exclam:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp edF
+    lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp edF
+    lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp edF
+    law 'E'
+    dac edC
+edF, lio edC
+    jsp fiFilename
+    lac edC
+    SKIP_NEXT_IF_DIFFERENT ['E']
+    jmp fiQuick
+    jsp i [setNoAddr:EX_BANK]
+// edDo -- 3.7's doecmd: the buffer emptied, the file read as an edit
+edDo, jsp fiInitBuf
+    dzm ADDR1
+    dzm ADDR2
+    lio ['e']
+    jsp fiRop
+    dzm CHNG
+    jsp fiNoChng
+    jmp i [exNext:EX_BANK]
+
+// fiQuick -- 3.7's quickly's error: the buffer changed and not written.
+fiQuick, lac [cmdName:EX_BANK]
+    dac i [msgS:MSG_BANK]
+    lac [mNoWrite:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// cRead -- r [file]: the file read after the line addressed. With no
+// current file and an empty buffer, it is read as an edit. r !cmd is not
+// here: "!" is no file's name.
+cRead, law 'r'
+    dac edC
+    lac i [FN_CUR]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rdF
+    lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rdF
+    law 'e'
+    dac edC
+rdF, jsp i [pastWh:EX_BANK]
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_EXCL]
+    jmp fiBadNm
+    lio edC
+    jsp fiFilename
+    lio edC
+    jsp fiRop
+    jsp fiNoChng
+    jmp i [exNext:EX_BANK]
+
+fiBadNm, lac [mBadName:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// cFile -- f [file]: the file's state typed, or the current name changed.
+cFile, jsp i [setNoAddr:EX_BANK]
+    lio ['f']
+    jsp fiFilename
+    jsp i [newline:TERM_BANK]
+    jmp i [exNext:EX_BANK]
+
+// cFormat -- format[!] dev:, an empty directory written on
+// the volume of DT1: to DT8:, or of DR: on TECO's tracks, by the library's
+// format, which leaves vi's handle for it mounted there. Without !, a volume
+// whose directory lists a file is refused, and so is another program's data
+// (the library's refusal). The buffer and its names are not touched. Every
+// outcome follows the device's quoted name, as a file's messages do.
+cFormat, jsp i [setNoAddr:EX_BANK]
+    jsp i [exclam:EX_BANK]
+    dac fmF
+    jsp fiOneV
+    jsp i [eol:EX_BANK]
+    lac pDev
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp soPerm              // no volume: as so takes them, named there
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp soPerm
+    lio [FN_FILE]
+    jsp fiQName
+    jsp fiMount
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fmMnt
+    SKIP_NEXT_IF_SAME [FS_ENOFS]
+    jmp fiErr               // not ready and the like
+    jmp fmGo                // a blank volume, or another program's
+// mounted, so this file system's: without !, any slot in use refuses it
+fmMnt, lac fmF
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fmGo
+    dzm fmI
+fmL, lac fiHnd
+    dac fiPb+FS_PHANDLE
+    lac fmI
+    dac fiPb+FS_PINDEX
+    lac [STG_BUF]
+    dac fiPb+FS_PDEST
+    lac [fiPb:.]
+    farjda(fsEntry:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiErr
+    lac i [STG_BUF]         // a free slot's first word is 0
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fmFull
+    idx fmI
+    SKIP_NEXT_IF_SAME [FS_NENT]
+    jmp fmL
+// the library unmounts the handle first, so until it succeeds vi counts the
+// volume as not mounted, and a failed format is mounted again next time
+fmGo, lac fiHnd
+    dac fiPb+FS_PHANDLE
+    lac pDev
+    SKIP_NEXT_IF_SAME [FK_DRUM]
+    jmp fmTape
+    dzm drMnt
+    law DR_TRK0
+    dac fiPb+DR_PFIRST
+    law DR_NTRK
+    dac fiPb+DR_PTRACKS
+    lac fmF
+    dac fiPb+DR_PFORCE
+    lac [fiPb:.]
+    farjda(drFormat:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fmFail
+    law 1
+    dac drMnt
+    jmp fmOk
+fmTape, dzm mtUnit
+    lac pUnit
+    dac fiPb+MT_PDRIVE
+    lac fmF
+    dac fiPb+MT_PFORCE
+    lac [fiPb:.]
+    farjda(mtFormat:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fmFail
+    lac pUnit
+    dac mtUnit
+fmOk, lio [mFormatted:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jsp i [newline:TERM_BANK]
+    jmp i [exNext:EX_BANK]
+fmFail, SKIP_NEXT_IF_SAME [FS_EFOREIGN]
+    jmp fiErr
+    lac [mFmForeign:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+fmFull, lac [mFmFull:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// cNext -- n [!] [+cmd] [file ...]: the next file of the argument list, or
+// a new list.
+cNext, jsp i [setNoAddr:EX_BANK]
+    jsp fiCkaw
+    jsp i [exclam:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nxA
+    lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nxA
+    lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiQuick
+nxA, jsp fiGetArgs
+    SKIP_NEXT_IF_AC_ZERO
+    jsp fiMkArgs
+    jsp fiNext
+    lio ['e']
+    jsp fiFilename
+    jmp edDo
+
+// cRewind -- rew [!]: the argument list from its first file.
+cRewind, jsp i [setNoAddr:EX_BANK]
+    jsp i [exclam:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rwE
+    jsp fiCkaw
+    lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rwE
+    lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rwE
+    lac [mRewChg:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+rwE, jsp i [eol:EX_BANK]
+    jsp fiErew
+    jsp fiNext
+    jsp i [unGetChar:EX_BANK]
+    lio ['e']
+    jsp fiFilename
+    jmp edDo
+
+// cArgs -- ar: the argument list, the current file in brackets.
+cArgs, jsp i [setNoAddr:EX_BANK]
+    jsp i [eol:EX_BANK]
+    lac [ARG_BUF]
+    dac agP
+    dzm agI
+agL, lac agI
+    SKIP_NEXT_IF_DIFFERENT fiArgc0
+    jmp agE
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ag1
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+ag1, jsp agCur
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ag2
+    lio ['[']
+    jsp i [putc:TERM_BANK]
+ag2, lac agP
+    dac i [msgS:MSG_BANK]
+    lio [mStr:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jsp agCur
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ag3
+    lio [']']
+    jsp i [putc:TERM_BANK]
+ag3, lac i agP              // past this name's 0
+    dac agT
+    idx agP
+    lac agT
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ag3
+    idx agI
+    jmp agL
+agE, jsp i [newline:TERM_BANK]
+    jmp i [exNext:EX_BANK]
+
+// agCur -- whether name agI is the current one: agI + argc = argc0 - 1.
+// AC is 1 or 0; IO is preserved.
+agCur, dac acX
+    lac agI
+    add fiArgc
+    add [1]
+    SKIP_NEXT_IF_DIFFERENT fiArgc0
+    jmp acY
+    cla
+    jmp i acX
+acY, law 1
+    jmp i acX
+
+// cSource -- so file: the file's lines read as commands, then what followed
+// so's line in CMDBUF (vi's CH_EOF, the rest of a command list), kept at
+// SO_RST meanwhile. One at a time: a source within a source is refused.
+cSource, jsp i [setNoAddr:EX_BANK]
+    jsp fiOne
+    jsp i [eol:EX_BANK]
+    lac soOn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp soNest
+    lac i [cbEnd:EX_BANK]
+    sub i [cbPos:EX_BANK]
+    dac soRn
+    sub [SO_RSTN+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp soLong
+    lac pDev
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp soPerm
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp soPerm
+    jsp fiMount
+    SKIP_NEXT_IF_AC_ZERO
+    jmp soFail
+    lac [fiLib:.]
+    dac opName
+    jsp soOpen
+    SKIP_NEXT_IF_AC_ZERO
+    jmp soFail
+    lac i [cbPos:EX_BANK]
+    add [CMDBUF]
+    dac soQ
+    lac [SO_RST]
+    dac soQ2
+    lac soRn
+    dac soK
+    jsp soCopy
+    lac i [cbEnd:EX_BANK]
+    dac i [cbPos:EX_BANK]
+    jmp i [exNext:EX_BANK]
+soLong, lac [mInLong:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+soPerm, lac [mPerm:MSG_BANK]
+    jmp soMsg
+soFail, lia
+    jsp fiStMsg
+soMsg, dac soM
+    lio [FN_FILE]
+    jsp fiQName
+    lac soM
+    jmp i [exErr:EX_BANK]
+soNest, lac [mNested:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// cRecover -- rec [!]: the buffer a lost caller left, read from the
+// drum's VI  SAVE in place of the buffer. The current name is kept; the
+// buffer counts as changed.
+cRecover, jsp i [setNoAddr:EX_BANK]
+    jsp i [exclam:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rcE
+    lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcE
+    lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiQuick
+rcE, jsp i [eol:EX_BANK]
+    law FK_DRUM
+    dac pDev
+    dac rdDev
+    jsp fiMount
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiErr
+    lac [nmSave:.]
+    dac opName
+    lac [FD_IO]
+    dac opFd
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rc1
+    SKIP_NEXT_IF_SAME [FS_ENOTFOUND]
+    jmp fiErr
+    lac [mNoEntR:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+rc1, jsp fiInitBuf
+    dzm ADDR1
+    dzm ADDR2
+    jsp fiRdInit
+    jsp fiAppend
+    lio [mRecov:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    lac fiFull
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rc2
+    jsp fiStats
+    jmp rc3
+rc2, jsp fiTooBig
+rc3, dzm i [undKind:0]
+    jsp fiNoChng
+    jmp i [exNext:EX_BANK]
+
+// fiWrite, fiWq, fiXit -- w, wq and x, from exops.ac: 3.7's wq. x with the
+// buffer unchanged leaves at once. w !cmd is not here: "!" is no file's
+// name.
+fiXit, lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wqQuit
+fiWq, law 1
+    jmp wq1
+fiWrite, cla
+wq1, dac wqQ
+    jsp i [skipWh:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wq2
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_EXCL]
+    jmp fiBadNm
+wq2, jsp i [setAll:EX_BANK]
+    law 1
+    dac woF
+    jsp fiWop
+    jsp fiNoChng
+    lac wqQ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [exNext:EX_BANK]
+wqQuit, jsp fiNoMore
+    jsp i [tmQuit:TERM_BANK]
+
+// fiNoMore -- 3.7's nomore, before q (without !), wq and x leave: files of
+// the argument list not yet edited stop the first try.
+// AC and IO are clobbered.
+fiNoMore, dac nmX
+    lac fiArgc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i nmX
+    SKIP_NEXT_IF_DIFFERENT fiMorArgc
+    jmp i nmX
+    dac fiMorArgc
+    dac i [msgN:MSG_BANK]
+    lac [fiNul:.]
+    dac i [msgS:MSG_BANK]
+    lac fiArgc
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp nm1
+    lac [fiPlS:.]
+    dac i [msgS:MSG_BANK]
+nm1, lac [mMoreF:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// fiLost -- a lost caller (exBrk): a changed buffer with lines is written to
+// the drum's VI  SAVE, quietly, in place of the last; then vi starts
+// again for the next caller.
+fiLost, lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [restart:0]
+    lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [restart:0]
+    law 1
+    dac fiHush
+    dzm soOn
+    dzm i [brkOn:TERM_BANK]
+    law FK_DRUM
+    dac pDev
+    jsp fiMount
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [restart:0]
+    lac [nmSave:.]
+    dac wName
+    dac opName
+    lac [FD_IO]
+    dac opFd
+    jsp fiOpenN
+    dzm woNe
+    SKIP_NEXT_IF_AC_ZERO
+    idx woNe
+    law 1
+    dac ADDR1
+    lac DOL
+    dac ADDR2
+    jsp fiNewVol
+    jmp i [restart:0]
+
+// --- the names
+
+// fiFilename -- 3.7's filename(comm), comm in IO: the name typed after the
+// command, or with none the current file's, into FN_FILE (and pDev, fiLib),
+// the current and alternate names kept as 3.7 keeps them; then the name
+// typed, and for f the file's state.
+// AC and IO are clobbered.
+fiFilename, dac fnX
+    dio fnComm
+    dio fnC
+    jsp i [getChar:EX_BANK]
+    lia
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnArg
+// no name: the current file's
+    lac i [FN_CUR]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnCur
+    dzm i [FN_FILE]
+    lac fnComm
+    SKIP_NEXT_IF_SAME ['f']
+    jmp fnNoF
+    jmp fnW
+fnNoF, lac [mNoFileT:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+fnCur, lio [FN_CUR]
+    jsp fnParse
+fnW, lac fiIsAlt            // wasalt = isalt > 0 ? isalt-1 : 0
+    SKIP_NEXT_IF_AC_ZERO
+    sub [1]
+    dac fiWasAlt
+    dzm fiIsAlt
+    lac fiAltDot
+    dac fiOldADot
+    lac fnC
+    SKIP_NEXT_IF_DIFFERENT ['e']
+    jmp fnAD
+    SKIP_NEXT_IF_DIFFERENT ['E']
+    jmp fnAD
+    jmp fnPr
+fnAD, lac DOT
+    dac fiAltDot
+    jmp fnPr
+// a name
+fnArg, jsp i [unGetChar:EX_BANK]
+    jsp fiOne
+    jsp i [eol:EX_BANK]
+    lac i [FN_CUR]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnHas
+    lac fnC
+    SKIP_NEXT_IF_DIFFERENT ['E']
+    jmp fnHas
+    SKIP_NEXT_IF_DIFFERENT ['e']
+    jmp fnHas
+    law 'e'                 // the first name named is the current file's
+    dac fnC
+    dzm fiEdited
+fnHas, lac [FN_FILE]
+    dac scS
+    lac [FN_ALT]
+    dac scD
+    jsp strEq
+    dac fiWasAlt
+    lac fiAltDot
+    dac fiOldADot
+    lac fnC
+    SKIP_NEXT_IF_DIFFERENT ['f']
+    jmp fnF
+    SKIP_NEXT_IF_DIFFERENT ['e']
+    jmp fnE
+// another command's name becomes the alternate
+    SKIP_NEXT_IF_DIFFERENT ['E']
+    jmp fnAlt
+    lac DOT
+    dac fiAltDot
+fnAlt, lac [FN_FILE]
+    dac scS
+    lac [FN_ALT]
+    dac scD
+    jsp strCpy
+    jmp fnPr
+fnF, dzm fiEdited
+fnE, lac i [FN_CUR]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnSet
+    lac DOT
+    dac fiAltDot
+    lac [FN_CUR]
+    dac scS
+    lac [FN_ALT]
+    dac scD
+    jsp strCpy
+fnSet, lac [FN_FILE]
+    dac scS
+    lac [FN_CUR]
+    dac scD
+    jsp strCpy
+// typed, unless quiet or doomed
+fnPr, lac fnComm
+    SKIP_NEXT_IF_DIFFERENT ['E']
+    jmp i fnX
+    SKIP_NEXT_IF_DIFFERENT ['f']
+    jmp fnPr1
+    lac fiHush
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i fnX
+fnPr1, lac i [FN_FILE]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnNone
+    lio [FN_FILE]
+    jsp fiQName
+    lac fnComm
+    SKIP_NEXT_IF_SAME ['f']
+    jmp i fnX
+    lac i [oReadOnly:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnF1
+    lio [mRoTag:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+fnF1, lac fiEdited
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fnF2
+    lio [mNotEd:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+fnF2, lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp fnF3
+    lio [mModif:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jmp fnF3
+fnNone, lio [mNoFileF:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    lac fnComm
+    SKIP_NEXT_IF_SAME ['f']
+    jmp i fnX
+// f: the line, the lines, and how far through
+fnF3, lac DOT
+    dac i [msgN:MSG_BANK]
+    lio [mLineOf:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    lac DOL
+    dac i [msgN:MSG_BANK]
+    lio [mPctA:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law 1
+    dac fnI
+    lac DOT
+    mul [0d100]
+    div fnI
+    cla                     // no skip: not reached, the quotient is at most 100
+    dac i [msgN:MSG_BANK]
+    lio [mPctB:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jmp i fnX
+
+// fiGetArgs -- 3.7's getargs: a +cmd into FPAT (fiFpat set), then the words
+// to the command's end into GENBUF, a character a word, % and # expanded, \
+// before # % | taken as the character itself. AC is 0 when there are no
+// words, else 1; IO is clobbered.
+fiGetArgs, dac gaX
+    jsp i [pastWh:EX_BANK]
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_SAME [CH_PLUS]
+    jmp gaArgs
+    lac [FPAT]
+    dac gaP
+    dzm gaN
+gaPl, jsp i [getChar:EX_BANK]
+    dac gaC
+    dac i gaP
+    idx gaP
+    idx gaN
+    sub [FPAT_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gaPLong
+    lac gaC
+    SKIP_NEXT_IF_SAME [CH_BSL]
+    jmp gaPw
+    jsp i [peekChar:EX_BANK]
+    lia
+    jsp fiIsSp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gaPw
+    jsp i [getChar:EX_BANK]
+    dac gaC
+gaPw, lio gaC
+    jsp fiIsSp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gaPl
+    jsp i [unGetChar:EX_BANK]
+    lac gaP
+    sub [1]
+    dac gaP
+    dzm i gaP
+    law 1
+    dac fiFpat
+gaArgs, jsp i [skipEnd:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gaNone
+    lac [GENBUF]
+    dac gaP
+    dzm gaN
+gaL, jsp i [getChar:EX_BANK]
+    dac gaC
+    lia
+    jsp i [endCmd:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gaEnd
+    lac gaC
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp gaBsl
+    SKIP_NEXT_IF_DIFFERENT [CH_HASH]
+    jmp gaHash
+    SKIP_NEXT_IF_DIFFERENT [CH_PCT]
+    jmp gaPct
+gaPut, jsp gaOne
+    jmp gaL
+gaBsl, jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_HASH]
+    jmp gaBq
+    SKIP_NEXT_IF_DIFFERENT [CH_PCT]
+    jmp gaBq
+    SKIP_NEXT_IF_DIFFERENT [CH_VBAR]
+    jmp gaBq
+    jmp gaPut
+gaBq, jsp i [getChar:EX_BANK]
+    dac gaC
+    jmp gaPut
+gaHash, lac i [FN_ALT]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gaHs
+    lac [mNoAlt:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+gaHs, lac [FN_ALT]
+    jmp gaFx
+gaPct, lac i [FN_CUR]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp gaPc
+    lac [mNoCurS:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+gaPc, lac [FN_CUR]
+gaFx, dac gaF
+gaFl, lac i gaF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp gaL
+    dac gaC
+    jsp gaOne
+    idx gaF
+    jmp gaFl
+gaEnd, jsp i [unGetChar:EX_BANK]
+    dzm i gaP
+    law 1
+    jmp i gaX
+gaNone, cla
+    jmp i gaX
+gaPLong, lac [mPatLong:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// gaOne -- gaC into GENBUF, if it has room. AC and IO are clobbered.
+gaOne, dac goX
+    lac gaN
+    sub [GA_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp gaOvf
+    lac gaC
+    dac i gaP
+    idx gaP
+    idx gaN
+    jmp i goX
+gaOvf, lac [mArgOvf:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// fiIsSp -- 3.7's isspace for the character in IO: a blank, TAB or LF.
+// AC is 1 or 0; IO is preserved.
+fiIsSp, dac isX
+    dio isC
+    lac isC
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp isY
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp isY
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp isY
+    cla
+    jmp i isX
+isY, law 1
+    jmp i isX
+
+// fiOne -- 3.7's getone: one name, parsed into FN_FILE, pDev and fiLib.
+// fiOneV -- the same for a device alone (format): DT1:, say, and nothing
+// after its colon, its full form into FN_FILE.
+// AC and IO are clobbered.
+fiOneV, dac g1X
+    law 1
+    jmp g1In
+fiOne, dac g1X
+    cla
+g1In, dac g1V
+    jsp fiGetArgs
+    SKIP_NEXT_IF_AC_ZERO
+    jmp g1Go
+g1Miss, lac [mMissFn:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+g1Go, lac [GENBUF]
+    dac wdP
+    jsp fiWord
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp g1Miss
+    dac g1W
+    jsp fiWord
+    SKIP_NEXT_IF_AC_ZERO
+    jmp g1Many
+    lac g1V                 // set just before fnParse, which clears it
+    dac npVol
+    lio g1W
+    jsp fnParse
+    jmp i g1X
+g1Many, lac [mTooManyF:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// fiWord -- the next word at or after wdP, blanks and TABs between words.
+// AC is its full address, 0 when there is none; wdP is past it. IO is
+// preserved.
+fiWord, dac wdX
+wdS, lac i wdP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i wdX
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp wdNx
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp wdNx
+    lac wdP
+    dac wdB
+wdE, idx wdP
+    lac i wdP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wdR
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp wdR
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp wdR
+    jmp wdE
+wdR, lac wdB
+    jmp i wdX
+wdNx, idx wdP
+    jmp wdS
+
+// fnParse -- the name at the full address in IO, a character a word ending
+// at a 0, a blank or a TAB: its device into pDev (and a tape's unit into
+// pUnit), the library's name into fiLib, the full form into FN_FILE. With
+// npVol set (fiOneV), only a device is taken, and npVol is cleared.
+// AC and IO are clobbered.
+fnParse, dac npX
+    dio npP
+    dio npQ
+    lac npVol
+    dac npV
+    dzm npVol
+// a device before a colon?
+npScan, lac i npQ
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp npNoDev
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp npNoDev
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp npNoDev
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    jmp npDev
+    idx npQ
+    jmp npScan
+npDev, lac npQ
+    sub npP
+    SKIP_NEXT_IF_DIFFERENT [2]
+    jmp npD2c
+    SKIP_NEXT_IF_DIFFERENT [3]
+    jmp npD3c
+npUnk, lac [mUnkDev:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+npD2c, jsp npGet
+    dac npD1
+    jsp npGet
+    dac npD2
+    lac npD1
+    SKIP_NEXT_IF_SAME ['D']
+    jmp npD2P
+    lac npD2
+    SKIP_NEXT_IF_SAME ['R']
+    jmp npUnk
+    law FK_DRUM
+    jmp npDvOk
+npD2P, SKIP_NEXT_IF_SAME ['P']
+    jmp npD2L
+    lac npD2
+    SKIP_NEXT_IF_SAME ['C']
+    jmp npUnk
+    law FK_PC
+    jmp npDvOk
+npD2L, SKIP_NEXT_IF_SAME ['L']
+    jmp npUnk
+    lac npD2
+    SKIP_NEXT_IF_SAME ['P']
+    jmp npUnk
+    law FK_LP
+    jmp npDvOk
+npD3c, jsp npGet
+    SKIP_NEXT_IF_SAME ['D']
+    jmp npUnk
+    jsp npGet
+    SKIP_NEXT_IF_SAME ['T']
+    jmp npUnk
+    jsp npGet
+    sub ['1']
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp npUnk
+    dac npD1
+    sub [010]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp npUnk
+    lac npD1
+    add [1]
+    dac pUnit
+    law FK_TAPE
+npDvOk, dac pDev
+    lac npQ                 // the name follows the colon
+    add [1]
+    dac npP
+    lac npV
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp npName
+// a device alone: nothing may follow its colon
+    lac i npP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp npVd
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp npVd
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp npVd
+    jmp npBad
+npVd, dzm npK
+    jmp npFull
+// no device: the current file's, DR: for none or PC: or LP:; none for a
+// device alone
+npNoDev, lac npV
+    SKIP_NEXT_IF_AC_ZERO
+    jmp npUnk
+    law FK_DRUM
+    dac pDev
+    lac i [FN_CUR]
+    SKIP_NEXT_IF_SAME ['D']
+    jmp npName
+    lac i [FN_CUR+1]
+    SKIP_NEXT_IF_SAME ['T']
+    jmp npName
+    lac i [FN_CUR+2]
+    sub ['0']
+    dac pUnit
+    law FK_TAPE
+    dac pDev
+// the name: name.ext into fiNmBuf, the dot as the library's blank
+npName, dzm npK
+    dzm npDot
+    dzm npN1
+    dzm npN2
+    lac [fiNmBuf:.]
+    dac npB
+npNl, lac i npP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp npNe
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp npNe
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp npNe
+    jsp npGet
+    dac npC
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp npNDot
+    sub [041]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp npBad               // a control character
+    lac npC
+    sub [0140]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp npBad               // past sixbit
+    lac npC
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    jmp npBad
+    lac npDot
+    SKIP_NEXT_IF_AC_ZERO
+    jmp npE2
+    idx npN1
+    jmp npSt
+npE2, idx npN2
+npSt, lac npK
+    sub [LIB_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp npLong
+    lac npC
+    dac i npB
+    idx npB
+    idx npK
+    jmp npNl
+npNDot, lac npDot
+    SKIP_NEXT_IF_AC_ZERO
+    jmp npBad
+    law 1
+    dac npDot
+    law CH_SP
+    dac npC
+    jmp npSt
+npLong, lac [mFnLong:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+npBad, lac [mBadName:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+// its end: PC: and LP: take no name; a file must have one
+npNe, lac pDev
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp npNoNm
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp npNoNm
+    lac npN1
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp npBad
+    lac npDot
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp npPack
+    lac npN2
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp npBad
+    jmp npPack
+npNoNm, lac npK
+    SKIP_NEXT_IF_AC_ZERO
+    jmp npBad
+    jmp npFull
+// the library's name, two characters a word
+npPack, dzm fiLib
+    dzm fiLib+1
+    dzm fiLib+2
+    dzm fiLib+3
+    dzm fiLib+4
+    lac [fiNmBuf:.]
+    dac npB
+    lac [fiLib:.]
+    dac npL
+    dzm npI
+npPl, lac npI
+    SKIP_NEXT_IF_DIFFERENT npK
+    jmp npFull
+    lac i npB
+    ral 9s
+    dac i npL
+    idx npB
+    idx npI
+    SKIP_NEXT_IF_DIFFERENT npK
+    jmp npFull
+    lac i npB
+    ior i npL
+    dac i npL
+    idx npB
+    idx npL
+    idx npI
+    jmp npPl
+// the full form
+npFull, lac [FN_FILE]
+    dac npL
+    lac pDev
+    SKIP_NEXT_IF_DIFFERENT [FK_DRUM]
+    jmp npFDr
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp npFPc
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp npFLp
+    lio ['D']
+    jsp npPut
+    lio ['T']
+    jsp npPut
+    lac pUnit
+    add ['0']
+    lia
+    jsp npPut
+    jmp npFC
+npFDr, lio ['D']
+    jsp npPut
+    lio ['R']
+    jmp npF2
+npFPc, lio ['P']
+    jsp npPut
+    lio ['C']
+    jmp npF2
+npFLp, lio ['L']
+    jsp npPut
+    lio ['P']
+npF2, jsp npPut
+npFC, lio [CH_COLON]
+    jsp npPut
+    lac [fiNmBuf:.]
+    dac npB
+    dzm npI
+npFl, lac npI
+    SKIP_NEXT_IF_DIFFERENT npK
+    jmp npFz
+    lac i npB
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    law CH_DOT
+    lia
+    jsp npPut
+    idx npB
+    idx npI
+    jmp npFl
+npFz, cli
+    jsp npPut
+    jmp i npX
+
+// npGet -- the character at npP, a small letter as its capital; npP past
+// it. AC is the character; IO is preserved.
+npGet, dac ngX
+    lac i npP
+    dac ngC
+    idx npP
+    lac ngC
+    sub ['a']
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ngR
+    sub ['z'-'a'+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ngR
+    lac ngC
+    sub [040]
+    dac ngC
+ngR, lac ngC
+    jmp i ngX
+
+// npPut -- the character in IO at npL, npL past it. AC is clobbered, IO
+// preserved.
+npPut, dac npuX
+    dio i npL
+    idx npL
+    jmp i npuX
+
+// --- the argument list
+
+// fiMkArgs -- 3.7's makargs: GENBUF's words, each parsed, the new argument
+// list in ARG_BUF in the full form; then erewind.
+// AC and IO are clobbered.
+fiMkArgs, dac maX
+    dzm fiArgc0
+    dzm fiArgc
+    dzm maN
+    lac [GENBUF]
+    dac wdP
+    lac [ARG_BUF]
+    dac maD
+maL, jsp fiWord
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp maE
+    lia
+    jsp fnParse
+    lac [FN_FILE]
+    dac maS
+maC, lac maD
+    sub [ARG_BUF+ARG_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp maOvf
+    lac i maS
+    dac i maD
+    dac maT
+    idx maS
+    idx maD
+    lac maT
+    SKIP_NEXT_IF_AC_ZERO
+    jmp maC
+    idx maN
+    jmp maL
+maE, lac maN
+    dac fiArgc0
+    jsp fiErew
+    jmp i maX
+maOvf, lac [mArgLong:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// fiErew -- 3.7's erewind: the list from its first name, and with more than
+// one, how many there are typed. AC and IO are clobbered.
+fiErew, dac erX
+    lac fiArgc0
+    dac fiArgc
+    lac [ARG_BUF]
+    dac fiArgs
+    lac fiArgc
+    sub [2]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp i erX
+    lac fiHush
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i erX
+    lac fiArgc
+    dac i [msgN:MSG_BANK]
+    lio [mFilesTo:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jsp i [newline:TERM_BANK]
+    jmp i erX
+
+// fiNext -- 3.7's next: the list's next name becomes the current one, the
+// current one the alternate. AC and IO are clobbered.
+fiNext, dac nxX
+    lac fiArgc
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nx1
+    lac [mNoMore:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+nx1, dac fiMorArgc
+    lac fiArgs
+    dac scS
+    lac [FN_ALT]
+    dac scD
+    jsp strEq
+    add [1]
+    dac fiIsAlt
+    lac i [FN_CUR]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nx2
+    lac [FN_CUR]
+    dac scS
+    lac [FN_ALT]
+    dac scD
+    jsp strCpy
+nx2, lac fiArgs
+    dac scS
+    lac [FN_CUR]
+    dac scD
+    jsp strCpy
+    lac fiArgc
+    sub [1]
+    dac fiArgc
+nx3, lac i fiArgs           // past this name's 0
+    dac nxC
+    idx fiArgs
+    lac nxC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nx3
+    jmp i nxX
+
+// fiCkaw -- 3.7's ckaw: with autowrite set, a changed buffer is written to
+// the current file first. AC and IO are clobbered.
+fiCkaw, dac ckX
+    lac CHNG
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ckX
+    lac i [oAutoWr:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ckX
+    dzm woF
+    jsp fiWop
+    jmp i ckX
+
+// --- reading
+
+// fiRop -- 3.7's rop(c), c in IO, 'e' for an edit or 'r' for a read: the
+// file FN_FILE names read after addr2 (setall for an edit, setdot for a
+// read), readonly set for a read-only file's edit as 3.7 sets it for a file
+// it may not write, the count typed; for an edit, edited set, '' marked,
+// and a +cmd run after. A file larger than the heap is read cut short.
+// AC and IO are clobbered.
+fiRop, dac roX
+    dio roC
+    lac pDev
+    dac rdDev
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp roPerm
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp roPc
+    jsp fiMount
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiErr
+    lac [fiLib:.]
+    dac opName
+    lac [FD_IO]
+    dac opFd
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roOpen
+    SKIP_NEXT_IF_SAME [FS_ENOTFOUND]
+    jmp fiErr
+    lac roC
+    SKIP_NEXT_IF_SAME ['e']
+    jmp roNoEnt
+    law 1
+    dac fiEdited
+roNoEnt, lac [mNoEnt:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+roPerm, lac [mPerm:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+roPc, dzm roRo
+    jsp ptStart
+    jmp roMode
+roOpen, lac i [FD_IO+FS_FINFO]
+    and [FS_IRO]
+    dac roRo
+// readonly: an edit of a read-only file sets it, the next edit puts it back
+roMode, lac roC
+    SKIP_NEXT_IF_DIFFERENT ['r']
+    jmp roRoS
+    lac i [oReadOnly:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roNd
+    lac fiDenied
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roNd
+    lac fiOvro
+    dac i [oReadOnly:EX_BANK]
+    dzm fiDenied
+roNd, lac roRo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roRoS
+    lac i [oReadOnly:EX_BANK]
+    dac fiOvro
+    law 1
+    dac fiDenied
+    dac i [oReadOnly:EX_BANK]
+roRoS, lac i [oReadOnly:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roAd
+    lio [mRoTag:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+roAd, lac roC
+    SKIP_NEXT_IF_DIFFERENT ['r']
+    jmp roSd
+    jsp i [setAll:EX_BANK]
+    jmp roRd
+roSd, jsp i [setDot:EX_BANK]
+roRd, jsp fiRdInit
+    jsp fiAppend
+    lac fiFull
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roSt
+    jsp fiTooBig
+    lac roC
+    SKIP_NEXT_IF_SAME ['e']
+    jmp i roX
+    law 1                   // the buffer is that file cut short
+    dac fiCut
+    lac [FN_FILE]
+    dac scS
+    lac [FN_CUT]
+    dac scD
+    jsp strCpy
+    jmp roE
+roSt, jsp fiStats
+    lac roC
+    SKIP_NEXT_IF_SAME ['e']
+    jmp i roX
+// 3.7's rop3 for an edit
+roE, law 1
+    dac fiEdited
+    lac fiWasAlt
+    ior fiFpat
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roOth
+    lac fiOldADot
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp roClip
+    lac fiOldADot
+    jmp roA
+roClip, lac DOL
+roA, dac roAddr
+    lac fiFpat
+    SKIP_NEXT_IF_AC_ZERO
+    jmp roPat
+    lac roAddr
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roOth
+    lio roAddr
+    jsp i [lnMarkPrev:0]
+    jmp roIn
+roOth, lac DOL
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roUnd
+    law 1
+    dac roAddr
+    lio [1]
+    jsp i [lnMarkPrev:0]
+// in visual mode dot goes there too (3.7's inopen); ex leaves it at the end
+roIn, lac i [viOn:VI_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp roUnd
+    lac roAddr
+    dac DOT
+    jmp roUnd
+roPat, jsp fiInject
+    dzm fiFpat
+roUnd, dzm i [undKind:0]
+    jmp i roX
+
+// fiTooBig -- a read cut short's message: "name" File too large, n lines read.
+// AC and IO are clobbered.
+fiTooBig, dac tbX
+    lac cntln
+    dac i [msgN:MSG_BANK]
+    lio [mTooLarge:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jsp i [newline:TERM_BANK]
+    jmp i tbX
+
+// fiRdInit -- the reader at a file's start. AC is clobbered, IO preserved.
+fiRdInit, dac riX
+    dzm rbN
+    dzm rbHalf
+    dzm rlCR
+    jmp i riX
+
+// fiAppend -- 3.7's rop2: the file's lines put in after addr2, counted in
+// cntln and cntch; fiFull set when the heap or the line table filled first
+// (a read cut short), the lines before kept. AC and IO are clobbered.
+fiAppend, dac apX
+    lac ADDR2
+    dac LNA
+    jsp i [lnDelNone:0]
+    lac ADDR2
+    dac LNA
+    cli
+    jsp i [lnAppStart:0]
+    dzm cntln
+    dzm cntch
+    dzm fiFull
+apL, jsp fiGetLn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i apX
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp apFull
+    lia
+    jsp i [lnInsert:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp apL
+apFull, lac cntln
+    sub [1]
+    dac cntln
+    law 1
+    dac fiFull
+    jmp i apX
+
+// fiGetLn -- 3.7's getfile: the next line into LINEBUF, lbLen its length.
+// CR ends a line, an LF just after it dropped; a lone LF ends one too; each
+// end counts one character. A last line with no end is kept, with 3.7's
+// note; more than LB_SIZE-1 characters is 3.7's error.
+// AC is 0 for a line, 1 at the end; IO is clobbered.
+fiGetLn, dac glX
+    lac [LINEBUF]
+    dac glP
+    dzm glN
+glL, jsp fiRdCh
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp glEof
+    dac glC
+    lac rlCR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp glNoCR
+    dzm rlCR
+    lac glC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp glL                 // LF just after CR
+glNoCR, lac glC
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp glCR
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp glEnd1
+    lac glN
+    sub [LB_SIZE-1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp glLong
+    lac glC
+    dac i glP
+    idx glP
+    idx glN
+    jmp glL
+glCR, law 1
+    dac rlCR
+glEnd1, idx cntch
+glEnd, lac glN
+    dac LBLEN
+    add cntch
+    dac cntch
+    dzm i glP
+    idx cntln
+    cla
+    jmp i glX
+glEof, lac glN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp glNone
+    lio [mIncompl:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jmp glEnd
+glNone, law 1
+    jmp i glX
+glLong, lac [mLineLong:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// fiRdCh -- the next character of the file being read: from paper tape, or
+// from FD_IO through STG_BUF, two to a word, the high half first. NUL and
+// the eighth bit are dropped. AC is the character, 0 at the end; IO is
+// clobbered. A library failure is an error.
+fiRdCh, dac rcX
+    lac rdDev
+    SKIP_NEXT_IF_SAME [FK_PC]
+    jmp rcVol
+    jsp ptGet
+    jmp i rcX
+rcVol, lac rbHalf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcHi
+    dzm rbHalf
+    lac rbW
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcVol
+    jmp i rcX
+rcHi, lac rbN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rcW
+    lac [FD_IO]
+    dac fiPb+FS_PFDESC
+    lac [STG_BUF]
+    dac fiPb+FS_PBUF
+    lac [STG_BLKS*FS_BLKW]
+    dac fiPb+FS_PCOUNT
+    lac [fiPb:.]
+    farjda(fsRead:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiErr
+    dio rbN
+    lac rbN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i rcX               // the end
+    lac [STG_BUF]
+    dac rbP
+rcW, lac i rbP
+    dac rbW
+    idx rbP
+    lac rbN
+    sub [1]
+    dac rbN
+    law 1
+    dac rbHalf
+    lac rbW
+    rar 9s
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcVol
+    jmp i rcX
+
+// fiStats -- 3.7's iostats: " n lines, m characters", or terse " n/m", and
+// a new line; nothing while quiet. AC and IO are clobbered.
+fiStats, dac stX
+    lac fiHush
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i stX
+    lio [CH_SP]
+    jsp i [putc:TERM_BANK]
+    lio cntln
+    jsp i [putDec:TERM_BANK]
+    lac i [oTerse:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp stV
+    lio [CH_SLASH]
+    jsp i [putc:TERM_BANK]
+    lio cntch
+    jsp i [putDec:TERM_BANK]
+    jmp stNl
+stV, lio [mLineW:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    lac cntln
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp stC
+    lio ['s']
+    jsp i [putc:TERM_BANK]
+stC, lac cntch
+    dac i [msgN:MSG_BANK]
+    lio [mCharW:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    lac cntch
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp stNl
+    lio ['s']
+    jsp i [putc:TERM_BANK]
+stNl, jsp i [newline:TERM_BANK]
+    jmp i stX
+
+// fiInject -- the +cmd run after an edit, as 3.7 runs it before the rest of
+// the line: CMDBUF becomes the command (FPAT after its +, or $ when it is
+// empty), LF, then the rest of the line if there is any. pcEof makes that
+// LF 3.7's EOF in commands(1,1): an address alone sets dot and prints
+// nothing (excmd.ac's elPEof); pcRest says whether the rest follows.
+// AC and IO are clobbered.
+fiInject, dac ijX
+    lac i [cbPos:EX_BANK]
+    add [CMDBUF]
+    dac ijS
+    lac i [cbEnd:EX_BANK]
+    add [CMDBUF]
+    dac ijE
+    lac [GENBUF]
+    dac ijD
+ijR, lac ijS
+    SKIP_NEXT_IF_DIFFERENT ijE
+    jmp ijR2
+    lac i ijS
+    dac i ijD
+    idx ijS
+    idx ijD
+    jmp ijR
+ijR2, dzm i ijD
+    lac [CMDBUF]
+    dac ijD
+    lac [FPAT+1]
+    dac ijS
+    lac i ijS
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ijP
+    lio [CH_DOLLAR]
+    jsp ijPut
+    jmp ijRest
+ijP, lac i ijS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ijRest
+    lia
+    jsp ijPut
+    idx ijS
+    jmp ijP
+ijRest, lio [CH_LF]
+    jsp ijPut
+    law 1
+    dac i [pcEof:EX_BANK]
+    lac i [GENBUF]
+    dac i [pcRest:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ijEnd
+    lac [GENBUF]
+    dac ijS
+ijB, lac i ijS
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ijEnd
+    lia
+    jsp ijPut
+    idx ijS
+    lac ijD
+    sub [CMDBUF+CMD_SIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ijCut
+    jmp ijB
+ijCut, lio [CH_LF]          // no room for the rest: the line ends here
+    jsp ijPut
+ijEnd, dzm i ijD
+    lac ijD
+    sub [CMDBUF]
+    dac i [cbEnd:EX_BANK]
+    dzm i [cbPos:EX_BANK]
+    dzm i [endline:EX_BANK]
+    jmp i ijX
+
+// ijPut -- the character in IO at ijD, ijD past it. AC is clobbered, IO
+// preserved.
+ijPut, dac ipX
+    dio i ijD
+    idx ijD
+    jmp i ipX
+
+// --- writing
+
+// fiWop -- 3.7's wop(dofname): with woF set, w's ! and >>, then the name
+// (filename); else the current file, whole, for autowrite. The checks
+// edfile, readonly, writeany and ! make, and a read cut short's; a
+// read-only file on the volume is never written. Then the write, the count, and for a whole
+// buffer written (not appended) the buffer is the file: edited, unchanged.
+// AC and IO are clobbered.
+fiWop, dac wpX
+    dzm woC
+    dzm woE
+    lac woF
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpCur
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_SAME [CH_EXCL]
+    jmp wp1
+    law 1
+    dac woE
+    jsp i [ignChar:EX_BANK]
+wp1, jsp i [skipWh:EX_BANK]
+wpGt, jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_SAME [CH_GT]
+    jmp wp2
+    jsp i [ignChar:EX_BANK]
+    idx woC
+    jsp i [skipWh:EX_BANK]
+    jmp wpGt
+wp2, lac woC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wp3
+    SKIP_NEXT_IF_DIFFERENT [2]
+    jmp wp3
+    lac [mWForms:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+wp3, lio ['w']
+    jsp fiFilename
+    jmp wpChk
+wpCur, lac i [FN_CUR]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpC1
+    lac [mNoFileT:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+wpC1, lac ADDR1
+    dac woS1
+    lac ADDR2
+    dac woS2
+    law 1
+    dac ADDR1
+    lac DOL
+    dac ADDR2
+    lio [FN_CUR]
+    jsp fnParse
+    lio [FN_FILE]
+    jsp fiQName
+// does it exist, is it read-only?
+wpChk, dzm woNe
+    dzm woRo
+    lac [fiLib:.]
+    dac wName
+    lac pDev
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp wpDev
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp wpDev
+    jsp fiMount
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiErr
+    lac [fiLib:.]
+    dac opName
+    lac [FD_IO]
+    dac opFd
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpEx
+    SKIP_NEXT_IF_SAME [FS_ENOTFOUND]
+    jmp fiErr
+    law 1
+    dac woNe
+    jmp wpCase
+wpEx, lac i [FD_IO+FS_FINFO]
+    and [FS_IRO]
+    dac woRo
+    lac [FD_IO]
+    farjda(fsClose:*)
+    jmp wpCase
+wpDev, lac woC              // w>> to paper tape or the printer
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpPerm
+wpCase, lac woC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpApp
+// w: the checks ! passes, and those writeany passes unless readonly is set
+    lac woE
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpRo
+    lac i [oWriteAny:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpEd
+    lac i [oReadOnly:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpCut
+wpEd, jsp fiEdfile
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpEdf
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp wpNotEd
+    lac i [oReadOnly:EX_BANK]   // part of the edited file
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpRoF
+    lac [mPartBuf:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+wpEdf, lac i [oReadOnly:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpRoF
+    jmp wpCut
+wpNotEd, lac woNe
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpCut
+    lac pDev
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp wpCut
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp wpCut
+    lac [FN_FILE]
+    dac i [msgS:MSG_BANK]
+    lac [mFileEx:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+wpRoF, lac [mRoFile:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+// the file a read cut short is not written over without !
+wpCut, lac fiCut
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpRo
+    lac [FN_FILE]
+    dac scS
+    lac [FN_CUT]
+    dac scD
+    jsp strEq
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpRo
+    lac [mPartBuf:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+// w>>: an existing file, or with ! or writeany a new one
+wpApp, lac woNe
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpRo
+    lac woE
+    ior i [oWriteAny:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpRo
+    lac [mNoEnt:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+wpRo, lac woRo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpGo
+wpPerm, lac [mPerm:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+wpGo, jsp fiPutFile
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [exErr:EX_BANK]
+    lac fiHush
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpSt
+    lac woNe
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpNew
+    lac woC                 // appended: nothing more to say
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpSt
+    lac i [oWriteAny:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpSt
+    jsp fiEdfile
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wpSt
+    lio [mExistF:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jmp wpSt
+wpNew, lio [mNewFile:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+wpSt, jsp fiStats
+    lac woC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wpRest
+    lac ADDR1
+    SKIP_NEXT_IF_SAME [1]
+    jmp wpRest
+    lac ADDR2
+    SKIP_NEXT_IF_SAME DOL
+    jmp wpRest
+    lac [FN_FILE]
+    dac scS
+    lac [FN_CUR]
+    dac scD
+    jsp strEq
+    SKIP_NEXT_IF_AC_ZERO
+    dac fiEdited
+    lac [FN_FILE]
+    dac scS
+    lac [FN_CUT]
+    dac scD
+    jsp strEq
+    SKIP_NEXT_IF_AC_ZERO
+    dzm fiCut
+    dzm CHNG
+wpRest, lac woF
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i wpX
+    lac woS1
+    dac ADDR1
+    lac woS2
+    dac ADDR2
+    jmp i wpX
+
+// fiEdfile -- 3.7's edfile: 0 (EDF) for the whole of the edited file, 1
+// (NOTEDF) for another file or a file not edited, 2 (PARTBUF) for part of
+// the edited file. AC is that; IO is clobbered.
+fiEdfile, dac efX
+    lac fiEdited
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp efNot
+    lac [FN_FILE]
+    dac scS
+    lac [FN_CUR]
+    dac scD
+    jsp strEq
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp efNot
+    lac ADDR1
+    SKIP_NEXT_IF_SAME [1]
+    jmp efPart
+    lac ADDR2
+    SKIP_NEXT_IF_SAME DOL
+    jmp efPart
+    cla
+    jmp i efX
+efNot, law 1
+    jmp i efX
+efPart, law 2
+    jmp i efX
+
+// fiPutFile -- 3.7's putfile: lines addr1 to addr2 to pDev, counted in
+// cntln and cntch: punched, printed, or on a volume appended (woC 2 to an
+// existing file) or written new (fiNewVol). A volume's write is not broken
+// by DEL. AC is 0, or the full address of the failure's message; IO is
+// clobbered.
+fiPutFile, dac pfX
+    dzm cntln
+    dzm cntch
+    lac pDev
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp pfPc
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp pfLp
+    lac i [brkOn:TERM_BANK]
+    dac pfBk
+    dzm i [brkOn:TERM_BANK]
+    lac woC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp pfNew
+    lac woNe
+    SKIP_NEXT_IF_AC_ZERO
+    jmp pfNew
+    jsp fiAppVol
+    jmp pfRet
+pfNew, jsp fiNewVol
+pfRet, dac pfS
+    lac pfBk
+    dac i [brkOn:TERM_BANK]
+    lac pfS
+    jmp i pfX
+pfPc, lac [ptPut:.]
+    dac flPut
+    lac [fiPcEol:.]
+    dac flEol
+    jsp fiLines
+    cla
+    jmp i pfX
+pfLp, jsp lpInit
+    lac [lpPut:.]
+    dac flPut
+    lac [fiLpEol:.]
+    dac flEol
+    jsp fiLines
+    jsp lpEnd
+    cla
+    jmp i pfX
+
+// fiPcEol, fiLpEol -- a line's end punched as CR LF, a break looked for;
+// printed as LF. AC and IO are clobbered.
+fiPcEol, dac peX
+    lio [CH_CR]
+    jsp ptPut
+    lio [CH_LF]
+    jsp ptPut
+    jsp i [brkChk:TERM_BANK]
+    jmp i peX
+fiLpEol, dac pleX
+    lio [CH_LF]
+    jsp lpPut
+    jmp i pleX
+
+// fiLines -- lines addr1 to addr2 each given a character at a time to the
+// routine at flPut (the character in IO), then its end to the one at flEol;
+// counted in cntln and cntch, an end one character. AC and IO are clobbered.
+fiLines, dac flX
+    lac ADDR1
+    dac flN
+flL, lac flN
+    sub ADDR2
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp i flX
+    lio flN
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    lac LBLEN
+    add cntch
+    add [1]
+    dac cntch
+    idx cntln
+    lac [LINEBUF]
+    dac flP
+flC, lac i flP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp flE
+    lia
+    jsp i flPut
+    idx flP
+    jmp flC
+flE, jsp i flEol
+    idx flN
+    jmp flL
+
+// fiSize -- lines addr1 to addr2 as the volume holds them: nvCh characters,
+// a CR ending each; nvW words; nvB blocks, at least one.
+// AC and IO are clobbered.
+fiSize, dac szX
+    dzm nvCh
+    lac ADDR1
+    dac szN
+szL, lac szN
+    sub ADDR2
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp szE
+    lio szN
+    jsp i [lnPtr:0]
+    dac szP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp sz1
+    lac i szP
+    and [REC_LEN]
+sz1, add nvCh
+    add [1]
+    dac nvCh
+    idx szN
+    jmp szL
+szE, lac nvCh
+    add [1]
+    sar 1s
+    dac nvW
+    add [FS_BLKW-1]
+    sar 8s
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law 1
+    dac nvB
+    jmp i szX
+
+// fiNewVol -- the lines written to the name at wName on fiHnd's volume:
+// into the scratch file VI  OUT, made with the blocks they need, then
+// renamed over the old file. With no gap or no slot for it and an old file
+// there (woNe clear), the old file is deleted and the new written in its
+// room. A failed write deletes what it made.
+// AC is 0, or the failure's message's full address; IO is clobbered.
+fiNewVol, dac nvX
+    jsp fiSize
+    lac nvB
+    sub [FS_MAXBLKS+1]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp nvFull
+    lac [nmOut:.]           // an old scratch file goes first
+    dac opName
+    lac [FD_IO]
+    dac opFd
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nv1
+    lac [FD_IO]
+    farjda(fsDelete:*)
+nv1, dzm nvDir
+    lac [nmOut:.]
+    dac crName
+    jsp fiCreate
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp nvWr
+    SKIP_NEXT_IF_DIFFERENT [FS_ENOSPACE]
+    jmp nvR27
+    SKIP_NEXT_IF_DIFFERENT [FS_EDIRFULL]
+    jmp nvR27
+    jmp nvSt
+// no room for both, so the old file goes and the new takes its room
+nvR27, dac nvS
+    lac woNe
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nvSt0
+    lac wName
+    dac opName
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nvSt
+    lac [FD_IO]
+    farjda(fsDelete:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nvSt
+    law 1
+    dac nvDir
+    lac wName
+    dac crName
+    jsp fiCreate
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nvSt
+nvWr, lac [fiNvBad:.]
+    dac wFail
+    jsp wrInit
+    lac [fiWrCh:.]
+    dac flPut
+    lac [fiWrEol:.]
+    dac flEol
+    jsp fiLines
+    jsp wrEnd
+    lac [FD_IO]
+    farjda(fsClose:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiNvBad
+    lac nvDir
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nvOk
+    lac fiHnd               // the scratch file takes the name
+    dac fiPb+FS_PHANDLE
+    lac [nmOut:.]
+    dac fiPb+FS_PNAME
+    lac wName
+    dac fiPb+FS_PNEWNAME
+    law 1
+    dac fiPb+FS_PREPLACE
+    lac [fiPb:.]
+    farjda(fsRename:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp nvSt
+nvOk, cla
+    jmp i nvX
+fiNvBad, dac nvS              // the write failed: what it made goes
+    lac [FD_IO]
+    farjda(fsDelete:*)
+nvSt0, lac nvS
+nvSt, lia
+    jsp fiStMsg
+    jmp i nvX
+nvFull, law FS_ENOSPACE
+    jmp nvSt
+
+// fiAppVol -- w>>: the lines added to the end of the file at wName on
+// fiHnd's volume. A last word holding one character (its low half empty) is
+// filled first. The file's allocation must hold them all, or nothing is
+// written. AC is 0, or the failure's message's full address; IO is
+// clobbered.
+fiAppVol, dac avX
+    lac [fiAvBad:.]
+    dac wFail
+    lac wName
+    dac opName
+    lac [FD_IO]
+    dac opFd
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp avSt
+    jsp fiSize
+    jsp wrInit
+    dzm avOdd
+    lac i [FD_IO+FS_FLEN]
+    dac avPos
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp avRoom
+    sub [1]
+    dac avP1
+    lio avP1
+    jsp avSeek
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiAvBad
+    lac [FD_IO]
+    dac fiPb+FS_PFDESC
+    lac [STG_BUF]
+    dac fiPb+FS_PBUF
+    law 1
+    dac fiPb+FS_PCOUNT
+    lac [fiPb:.]
+    farjda(fsRead:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiAvBad
+    lac i [STG_BUF]
+    and [0777]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp avRoom
+    lac i [STG_BUF]
+    and [0777000]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp avRoom
+    dac wW                  // the word's character: the next goes after it
+    law 1
+    dac wHalf
+    dac avOdd
+    lac avP1
+    dac avPos
+avRoom, lac avOdd
+    add nvCh
+    add [1]
+    sar 1s
+    add avPos
+    dac avEnd
+    lac i [FD_IO+FS_FALLOC]
+    sal 8s
+    sub avEnd
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp avFull
+    lio avPos
+    jsp avSeek
+    SKIP_NEXT_IF_AC_ZERO
+    jmp fiAvBad
+    lac [fiWrCh:.]
+    dac flPut
+    lac [fiWrEol:.]
+    dac flEol
+    jsp fiLines
+    jsp wrEnd
+    lac [FD_IO]
+    farjda(fsClose:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp avSt
+    cla
+    jmp i avX
+avFull, lac [FD_IO]
+    farjda(fsClose:*)
+    law FS_ENOSPACE
+    jmp avSt
+fiAvBad, dac avS              // the file is the user's: closed, not deleted
+    lac [FD_IO]
+    farjda(fsClose:*)
+    lac avS
+avSt, lia
+    jsp fiStMsg
+    jmp i avX
+
+// avSeek -- FD_IO to the word whose place is in IO. AC is the library's
+// status; IO is clobbered.
+avSeek, dac asX
+    dio fiPb+FS_PPOS
+    lac [FD_IO]
+    dac fiPb+FS_PFDESC
+    lac [fiPb:.]
+    farjda(fsSeek:*)
+    jmp i asX
+
+// wrInit -- the staging buffer empty, at a word's start. AC is clobbered, IO
+// preserved.
+wrInit, dac wiX
+    lac [STG_BUF]
+    dac wP
+    dzm wHalf
+    jmp i wiX
+
+// fiWrCh -- the character in IO into the staging buffer, two to a word, the
+// high half first; a full buffer written to FD_IO. A failed write leaves by
+// jmp i wFail with the status in AC. AC and IO are clobbered.
+fiWrCh, dac wcX
+    dio wcC
+    lac wHalf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp wcLo
+    lac wcC
+    ral 9s
+    dac wW
+    law 1
+    dac wHalf
+    jmp i wcX
+wcLo, lac wcC
+    ior wW
+    dac i wP
+    dzm wHalf
+    idx wP
+    sub [STG_BUF+STG_BLKS*FS_BLKW]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i wcX
+    jsp wrFlush
+    jmp i wcX
+
+// fiWrEol -- a line's end on a volume: CR. AC and IO are clobbered.
+fiWrEol, dac weX
+    lio [CH_CR]
+    jsp fiWrCh
+    jmp i weX
+
+// wrEnd -- the last half word kept, and what the staging buffer holds
+// written. AC and IO are clobbered.
+wrEnd, dac wnX
+    lac wHalf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp wn1
+    lac wW
+    dac i wP
+    idx wP
+    dzm wHalf
+wn1, jsp wrFlush
+    jmp i wnX
+
+// wrFlush -- the staging buffer's words written to FD_IO; a failure leaves
+// by jmp i wFail with the status in AC. AC and IO are clobbered.
+wrFlush, dac wfX
+    lac wP
+    sub [STG_BUF]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i wfX
+    dac fiPb+FS_PCOUNT
+    lac [FD_IO]
+    dac fiPb+FS_PFDESC
+    lac [STG_BUF]
+    dac fiPb+FS_PBUF
+    lac [fiPb:.]
+    farjda(fsWrite:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i wFail
+    lac [STG_BUF]
+    dac wP
+    jmp i wfX
+
+// --- the volumes
+
+// fiMount -- pDev's volume on its handle, fiHnd: the drum's once for each
+// caller; a tape's for every command, unless a source file on that drive is
+// open. AC is the library's status; IO is clobbered.
+fiMount, dac mnX
+    lac pDev
+    SKIP_NEXT_IF_SAME [FK_DRUM]
+    jmp mnTape
+    lac [DR_HND]
+    dac fiHnd
+    lac drMnt
+    SKIP_NEXT_IF_AC_ZERO
+    jmp mnOk
+    lac [DR_HND]
+    dac fiMpb+FS_PHANDLE
+    law DR_TRK0
+    dac fiMpb+DR_PFIRST
+    law DR_NTRK
+    dac fiMpb+DR_PTRACKS
+    lac [fiMpb:.]
+    farjda(drMount:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i mnX
+    law 1
+    dac drMnt
+mnOk, cla
+    jmp i mnX
+mnTape, lac [MT_HND]
+    dac fiHnd
+    lac soOn
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp mnT1
+    lac soHnd
+    SKIP_NEXT_IF_SAME [MT_HND]
+    jmp mnT1
+    lac mtUnit
+    SKIP_NEXT_IF_DIFFERENT pUnit
+    jmp mnOk
+mnT1, dzm mtUnit
+    lac [MT_HND]
+    dac fiMpb+FS_PHANDLE
+    lac pUnit
+    dac fiMpb+MT_PDRIVE
+    lac [fiMpb:.]
+    farjda(mtMount:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i mnX
+    lac pUnit
+    dac mtUnit
+    jmp mnOk
+
+// fiOpenN -- the file named at opName (an ascii string's full address) on
+// fiHnd's volume, opened on the descriptor at opFd. AC is the library's
+// status; IO is clobbered.
+fiOpenN, dac oiX
+    lac fiHnd
+    dac fiPb+FS_PHANDLE
+    lac opName
+    dac fiPb+FS_PNAME
+    lac opFd
+    dac fiPb+FS_PFD
+    lac [fiPb:.]
+    farjda(fsOpenName:*)
+    jmp i oiX
+
+// fiCreate -- the file named at crName made on fiHnd's volume, nvB blocks,
+// open on FD_IO. AC is the library's status; IO is clobbered.
+fiCreate, dac cvX
+    lac fiHnd
+    dac fiPb+FS_PHANDLE
+    lac crName
+    dac fiPb+FS_PNAME
+    lac nvB
+    dac fiPb+FS_PBLOCKS
+    dzm fiPb+FS_PINFO
+    lac [FD_IO]
+    dac fiPb+FS_PCFD
+    lac [fiPb:.]
+    farjda(fsCreate:*)
+    jmp i cvX
+
+// fiErr -- a library failure, its status in AC, as an error. Reached by jmp.
+fiErr, lia
+    jsp fiStMsg
+    jmp i [exErr:EX_BANK]
+
+// fiStMsg -- the message for the library's status in IO (section 9).
+// AC is its full address; IO is clobbered.
+fiStMsg, dac smX
+    dio smS
+    lac smS
+    SKIP_NEXT_IF_DIFFERENT [FS_ENOUNIT]
+    jmp smNr
+    SKIP_NEXT_IF_DIFFERENT [FS_ENOMEDIUM]
+    jmp smNr
+    SKIP_NEXT_IF_DIFFERENT [FS_ETIMEOUT]
+    jmp smNr
+    SKIP_NEXT_IF_DIFFERENT [FS_ELOCKED]
+    jmp smLk
+    SKIP_NEXT_IF_DIFFERENT [FS_ENOFS]
+    jmp smBd
+    SKIP_NEXT_IF_DIFFERENT [FS_EEXISTS]
+    jmp smEx
+    SKIP_NEXT_IF_DIFFERENT [FS_ENOTFOUND]
+    jmp smNf
+    SKIP_NEXT_IF_DIFFERENT [FS_EDIRFULL]
+    jmp smDf
+    SKIP_NEXT_IF_DIFFERENT [FS_ENOSPACE]
+    jmp smFull
+    SKIP_NEXT_IF_DIFFERENT [FS_ERANGE]
+    jmp smFull
+    SKIP_NEXT_IF_DIFFERENT [FS_EREADONLY]
+    jmp smRo
+    SKIP_NEXT_IF_DIFFERENT [FS_EXFER]
+    jmp smDr
+    SKIP_NEXT_IF_DIFFERENT [FS_ENAME]
+    jmp smNm
+    lac [mIoErr:MSG_BANK]
+    jmp i smX
+smNr, lac [mUnitNR:MSG_BANK]
+    jmp i smX
+smLk, lac [mLocked:MSG_BANK]
+    jmp i smX
+smBd, lac [mBadDir:MSG_BANK]
+    jmp i smX
+smEx, lac [mExists:MSG_BANK]
+    jmp i smX
+smNf, lac [mNoEnt:MSG_BANK]
+    jmp i smX
+smDf, lac [mDirFull:MSG_BANK]
+    jmp i smX
+smFull, lac pDev
+    SKIP_NEXT_IF_SAME [FK_DRUM]
+    jmp smTf
+    lac [mDrumFull:MSG_BANK]
+    jmp i smX
+smTf, lac [mTapeFull:MSG_BANK]
+    jmp i smX
+smRo, lac [mPerm:MSG_BANK]
+    jmp i smX
+smDr, lac [mDrumFail:MSG_BANK]
+    jmp i smX
+smNm, lac [mBadName:MSG_BANK]
+    jmp i smX
+
+// --- sourcing: so and DR:EXRC
+
+// soExrc -- the drum's EXRC, if there is one, sourced at a caller's greeting
+// without a word when it is not there. AC and IO are clobbered.
+soExrc, dac sxX
+    law FK_DRUM
+    dac pDev
+    jsp fiMount
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i sxX
+    lac [nmExrc:.]
+    dac opName
+    dzm soRn                // nothing to put back after it
+    jsp soOpen
+    jmp i sxX
+
+// soOpen -- the file at opName on fiHnd's volume opened on FD_SO, and its
+// lines read as commands from the next line on. AC is the library's status;
+// IO is clobbered.
+soOpen, dac sooX
+    lac [FD_SO]
+    dac opFd
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i sooX
+    lac fiHnd
+    dac soHnd
+    dzm soLeft
+    dzm soHalf
+    dzm soCR
+    law 1
+    dac soOn
+    cla
+    jmp i sooX
+
+// soLine -- a line of the source file into the buffer at tlBuf, as tmLine
+// gives one: at most tlMax characters, a character a word and a 0 word,
+// tlLen its length. At the file's end, sourcing ends and ex goes on (jmp to
+// exNext) with what followed so's line, put back in CMDBUF, or else the
+// next line typed. AC is CH_LF, or 0 for a line too long; IO is clobbered.
+soLine, dac slX
+    dzm slN
+    dzm slOver
+    lac i [tlBuf:TERM_BANK]
+    dac slP
+slL, jsp soCh
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp slEof
+    dac slC
+    lac soCR
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp slNc
+    dzm soCR
+    lac slC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp slL
+slNc, lac slC
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp slCR
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp slEnd
+    lac slN
+    sub i [tlMax:TERM_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp slFull
+    lac slC
+    dac i slP
+    idx slP
+    idx slN
+    jmp slL
+slFull, law 1
+    dac slOver
+    jmp slL
+slCR, law 1
+    dac soCR
+slEnd, lac slN
+    dac i [tlLen:TERM_BANK]
+    dzm i slP
+    lac slOver
+    SKIP_NEXT_IF_AC_ZERO
+    jmp slLong
+    law CH_LF
+    jmp i slX
+slLong, cla
+    jmp i slX
+slEof, lac slN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp slEnd
+    dzm soOn
+    law 1
+    dac i [endline:EX_BANK]
+    lac [SO_RST]
+    dac soQ
+    lac [CMDBUF]
+    dac soQ2
+    lac soRn
+    dac soK
+    dac i [cbEnd:EX_BANK]
+    dzm i [cbPos:EX_BANK]
+    dzm soRn
+    jsp soCopy
+    jmp i [exNext:EX_BANK]
+
+// soCopy -- soK words from soQ to soQ2, full addresses. AC is clobbered,
+// IO preserved.
+soCopy, dac scpX
+scpL, lac soK
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i scpX
+    lac i soQ
+    dac i soQ2
+    idx soQ
+    idx soQ2
+    lac soK
+    sub [1]
+    dac soK
+    jmp scpL
+
+// soCh -- the source file's next character, as fiRdCh reads a file, a block
+// at a time through SO_BUF. AC is the character, 0 at the end; IO is
+// clobbered. A library failure ends sourcing with its message.
+soCh, dac shX
+shL, lac soHalf
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shHi
+    dzm soHalf
+    lac soW
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shL
+    jmp i shX
+shHi, lac soLeft
+    SKIP_NEXT_IF_AC_ZERO
+    jmp shW
+    lac [FD_SO]
+    dac fiSoPb+FS_PFDESC
+    lac [SO_BUF]
+    dac fiSoPb+FS_PBUF
+    lac [FS_BLKW]
+    dac fiSoPb+FS_PCOUNT
+    lac [fiSoPb:.]
+    farjda(fsRead:*)
+    SKIP_NEXT_IF_AC_ZERO
+    jmp shErr
+    dio soLeft
+    lac soLeft
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i shX
+    lac [SO_BUF]
+    dac soP
+shW, lac i soP
+    dac soW
+    idx soP
+    lac soLeft
+    sub [1]
+    dac soLeft
+    law 1
+    dac soHalf
+    lac soW
+    rar 9s
+    and [0177]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp shL
+    jmp i shX
+shErr, dzm soOn
+    lia
+    jsp fiStMsg
+    jmp i [exErr:EX_BANK]
+
+// --- helpers
+
+// fiTgOpen -- :ta's tags file (subst.ac), the name at the full address in
+// IO as fnParse takes it, opened for fiTgLine. A file that cannot be read,
+// or is on paper tape or the printer, is passed over, as 3.7 passes over one
+// it cannot open. AC is 0 when it is open, else 1; IO is clobbered.
+fiTgOpen, dac ftoX
+    jsp fnParse
+    lac pDev
+    dac rdDev
+    SKIP_NEXT_IF_DIFFERENT [FK_PC]
+    jmp ftoNo
+    SKIP_NEXT_IF_DIFFERENT [FK_LP]
+    jmp ftoNo
+    jsp fiMount
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ftoNo
+    lac [fiLib:.]
+    dac opName
+    lac [FD_IO]
+    dac opFd
+    jsp fiOpenN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp ftoNo
+    jsp fiRdInit
+    cla
+    jmp i ftoX
+ftoNo, law 1
+    jmp i ftoX
+ftoX, 0
+
+// fiTgLine -- the tags file's next line into LINEBUF (fiGetLn).
+// AC is 0 for a line, 1 at the end; IO is clobbered.
+fiTgLine, dac ftlX
+    jsp fiGetLn
+    jmp i ftlX
+ftlX, 0
+
+// fiTgFile -- whether the name at the full address in IO, parsed into
+// FN_FILE, is another file than the one being edited (3.7's strcmp with
+// savedfile, or not edited). AC is 1 for another, 0 for the same; IO is
+// clobbered.
+fiTgFile, dac ftfX
+    jsp fnParse
+    lac fiEdited
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ftfOth
+    lac [FN_FILE]
+    dac scS
+    lac [FN_CUR]
+    dac scD
+    jsp strEq
+    xor [1]
+    jmp i ftfX
+ftfOth, law 1
+    jmp i ftfX
+ftfX, 0
+
+// fiInitBuf -- 3.7's init: the buffer empty, not edited, not cut short.
+// AC and IO are clobbered.
+fiInitBuf, dac ibX
+    jsp i [lnReset:0]
+    dzm fiEdited
+    dzm fiCut
+    jmp i ibX
+
+// fiNoChng -- 3.7's nochng: no change since the command began, for
+// autoprint. AC is clobbered, IO preserved.
+fiNoChng, dac ncX
+    lac CHNG
+    dac i [lchng:EX_BANK]
+    jmp i ncX
+
+// fiQName -- "name" typed, for the string at the full address in IO.
+// AC and IO are clobbered.
+fiQName, dac qnX
+    dio i [msgS:MSG_BANK]
+    lio [mQName:MSG_BANK]
+    jsp i [msgPut:MSG_BANK]
+    jmp i qnX
+
+// strCpy -- the string at scS, a character a word ending in a 0 word, copied
+// to scD. AC is clobbered, IO preserved; scS and scD are moved.
+strCpy, dac scX
+scL, lac i scS
+    dac i scD
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i scX
+    idx scS
+    idx scD
+    jmp scL
+
+// strEq -- whether the strings at scS and scD are the same. AC is 1 or 0;
+// IO is preserved; scS and scD are moved.
+strEq, dac seX
+seL, lac i scS
+    SKIP_NEXT_IF_SAME i scD
+    jmp seNo
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp seYes
+    idx scS
+    idx scD
+    jmp seL
+seYes, law 1
+    jmp i seX
+seNo, cla
+    jmp i seX
+
+inX, 0                      // the return addresses
+fnX, 0
+gaX, 0
+goX, 0
+isX, 0
+g1X, 0
+wdX, 0
+npX, 0
+ngX, 0
+npuX, 0
+maX, 0
+erX, 0
+nxX, 0
+ckX, 0
+acX, 0
+nmX, 0
+roX, 0
+tbX, 0
+riX, 0
+apX, 0
+glX, 0
+rcX, 0
+stX, 0
+ijX, 0
+ipX, 0
+wpX, 0
+efX, 0
+pfX, 0
+peX, 0
+pleX, 0
+flX, 0
+szX, 0
+nvX, 0
+avX, 0
+asX, 0
+wiX, 0
+wcX, 0
+weX, 0
+wnX, 0
+wfX, 0
+mnX, 0
+oiX, 0
+cvX, 0
+smX, 0
+sxX, 0
+sooX, 0
+slX, 0
+shX, 0
+ibX, 0
+ncX, 0
+qnX, 0
+scX, 0
+seX, 0
+edC, 0                      // e's and r's command: 'e', 'E' or 'r'
+fnComm, 0                   // filename's comm, and its c
+fnC, 0
+fnI, 0
+gaP, 0                      // getargs: where the next character goes
+gaN, 0                      //   how many so far
+gaC, 0                      //   the character
+gaF, 0                      //   % or #'s name
+isC, 0
+g1W, 0
+wdP, 0                      // fiWord: the place
+wdB, 0                      //   a word's start
+npP, 0                      // fnParse: the place in the name
+npQ, 0                      //   the colon's
+npC, 0
+npD1, 0
+npD2, 0
+npK, 0                      //   characters in fiNmBuf
+npDot, 0                    //   a dot seen
+npN1, 0                     //   the first subname's characters
+npN2, 0                     //   the second's
+npB, 0
+npL, 0
+npI, 0
+ngC, 0
+maN, 0                      // makargs: the names
+maD, 0
+maS, 0
+maT, 0
+nxC, 0
+agP, 0                      // args: the name
+agI, 0                      //   its index
+agT, 0
+roC, 0                      // rop's c
+roRo, 0                     //   the file is read-only
+roAddr, 0
+glP, 0
+glN, 0
+glC, 0
+ijS, 0
+ijE, 0
+ijD, 0
+wqQ, 0                      // wq or x: leave after
+woF, 0                      // wop: dofname
+woC, 0                      //   the >s
+woE, 0                      //   !
+woNe, 0                     //   the file does not exist
+woRo, 0                     //   it is read-only
+woS1, 0
+woS2, 0
+pfBk, 0                     // putfile: brkOn as it was
+pfS, 0
+flPut, 0                    // fiLines: the character's routine
+flEol, 0                    //   the line end's
+flN, 0
+flP, 0
+szN, 0
+szP, 0
+nvCh, 0                     // the lines' characters, CRs included
+nvW, 0                      //   their words
+nvB, 0                      //   their blocks
+nvDir, 0                    // written in the old file's room
+nvS, 0
+crName, 0
+avOdd, 0                    // w>>: the last word held one character
+avPos, 0                    //   where the writing starts
+avP1, 0
+avEnd, 0
+avS, 0
+wName, 0                    // the written file's library name
+wFail, 0                    // where a failed write goes
+wP, 0                       // the staging buffer's next word
+wHalf, 0                    //   a high half is in wW
+wW, 0
+wcC, 0
+scS, 0                      // strCpy's and strEq's strings
+scD, 0
+opName, 0                   // fiOpenN's name and descriptor
+opFd, 0
+smS, 0
+soM, 0
+slN, 0
+slP, 0
+slC, 0
+slOver, 0
+soHnd, 0                    // the source file's handle
+soLeft, 0                   //   words left in SO_BUF
+soP, 0
+soW, 0
+soHalf, 0
+soCR, 0                     //   a CR ended the last line
+soRn, 0                     // what followed so's line: its length
+soQ, 0                      // soCopy's from, to and count
+soQ2, 0
+soK, 0
+scpX, 0
+fiHnd, 0                    // the volume's handle, a full address
+drMnt, 0                    // the drum is mounted
+mtUnit, 0                   // the tape mounted on MT_HND, 0 for none
+pDev, 0                     // the name parsed: its device, FK_
+pUnit, 0                    //   a tape's unit
+rdDev, 0                    // the device being read
+rbP, 0                      // the reader: the next word
+rbN, 0                      //   words left
+rbHalf, 0                   //   the low half of rbW is next
+rbW, 0
+rlCR, 0                     //   a CR ended the last line
+cntln, 0                    // 3.7's counts of the read or write
+cntch, 0
+fiFull, 0                   // the heap or the table filled
+fiEdited, 0                 // 3.7's edited
+fiCut, 0                    // the buffer is FN_CUT's file cut short
+fiWasAlt, 0                 // 3.7's wasalt, isalt, altdot, oldadot
+fiIsAlt, 0
+fiAltDot, 0
+fiOldADot, 0
+fiArgc0, 0                  // the argument list's names
+fiArgc, 0                   //   those not yet edited
+fiArgs, 0                   //   the next, a full address
+fiMorArgc, 0                // 3.7's morargc
+fiOvro, 0                   // readonly before a read-only file set it
+fiDenied, 0                 // readonly was set for a read-only file
+fiHush, 0                   // nothing typed: the lost caller's save
+fiFpat, 0                   // FPAT holds a +cmd
+g1V, 0                      // fiOne's npVol: a device alone
+npVol, 0                    // fnParse: take a device alone, then cleared
+npV, 0                      // npVol, as fnParse took it
+fmF, 0                      // format's !
+fmI, 0                      // format's slot being looked at
+endloc
+
+// The library's formats, for format, in this bank, which has the room.
+// What they include from the library, the directory and the block layers,
+// belongs with the rest in fslib.ac's bank, assembled after this one: their
+// guards are set around these includes, so those files come in there.
+#define FSDIR_AC
+#define MTBLOCK_AC
+#define DRBLOCK_AC
+#include <MICROTAPE/mtformat.ac>
+#include <DRUM/drformat.ac>
+#undef FSDIR_AC
+#undef MTBLOCK_AC
+#undef DRBLOCK_AC
+
+fiLib,                      // the library's name
+    table LIB_W, 0
+fiNmBuf,                    // the name's characters
+    table LIB_MAX+1, 0
+fiPb,                       // the library's parameter blocks
+    table 6, 0
+fiMpb,
+    table 3, 0
+fiSoPb,
+    table 3, 0
+fiPlS, 's'                  // "s" for plural, and the empty string
+fiNul, 0
+
+soOn, 0                     // a source file's lines are being read
+
+// The command table's names (cmdTab, excmd.ac).
+nmEx,       ascii "ex"
+nmEdit,     ascii "edit"
+nmFile,     ascii "file"
+nmFormat,   ascii "format"
+nmNext,     ascii "next"
+nmArgs,     ascii "args"
+nmRecover,  ascii "recover"
+nmRewind,   ascii "rewind"
+nmRead,     ascii "read"
+nmSource,   ascii "source"
+
+// The library's names vi makes: the scratch file, the save, the init file.
+nmOut,      ascii "VI  OUT"
+nmSave,     ascii "VI  SAVE"
+nmExrc,     ascii "EXRC"

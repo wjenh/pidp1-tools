@@ -1,0 +1,1061 @@
+// vmain.ac -- vi's visual mode, after 3.7's ex_vmain.c:
+// entering it (:vi, sense switch 2), the command loop with its counts and
+// registers, the keys (with those . replays), the commands that are not
+// motions or changes (the scrolling commands, z, ^L, ^R, ^G, :, Q, ZZ), an
+// ex command's run and its output, and errors. The motions are
+// vmotion.ac's, the changes vops.ac's; screen.ac keeps the screen.
+//
+// While a key is awaited the break keys do not break (brkOn 0): DEL and ^C
+// are keys, which vi refuses with the bell. An ex command (:, ^G, ZZ) runs
+// as a command list (subst.ac's rnPush): its line in CMDBUF ending in
+// CH_EOF, vXDone its continuation; its output goes to the status line
+// (screen.ac's scOutC), more than a line of it followed by [Hit return to
+// continue]. An error in it, or in a search, ends at exErr, which comes to
+// viErr while vi is on; a break while it runs is ex's Interrupt.
+//
+// The cursor is vCurs, the index of its character in dot's line; LINEBUF
+// is scratch. Routines are entered by jsp with the extend window open and
+// return by jmp i; commands are reached by jmp and end by jmp viLoop. In
+// bank VI_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, termio.ac and keys.ac
+// (bank TERM_BANK), lines.ac (bank 0), excmd.ac, exaddr.ac and options.ac
+// (bank EX_BANK), subst.ac (bank RE_BANK), files.ac (bank FILE_BANK),
+// screen.ac (bank SCR_BANK) and vmotion.ac.
+
+local vnL, cvD, cvNum, cvDumb, veNz, vlCnt, vlDig, vlGo, vlTab, vlHit, \
+    vkPk, vxL, vrL, vrQ, vrRd, vrPut, vrQt, vrBs, vrKill, vrW, vrWl, vrEnd, \
+    vrCan, vEcho, veP, vRub, vbOne, vBsp, xdTail, xdNoMr, xdDot, erRst, vrUn, \
+    vcFz, vcFb, vcBb, vcBz, vScEnd, vScKeep, vzC, vzSw, vzPl, vzUp, vzHad, \
+    vzCa, vzP2, vzCr, vzGo, vSetScr, vScrDn, vScrUp, vTimesW, twL, vT, vU, \
+    vtP, vtJ, vnX, vnP, vnN, cvC, vlD0, vkX, fzX, fzC, vxX, vxP, vxN, vrX, \
+    vrP, vrQp, veX, vbX, vpX, lyvX, ssX, sdnX, supX, twvX, vZa, vZc, vZp, vZn, \
+    vlQ, vlR, vlR1, vlD1, vlDo, vlT, vgG, vgE, vgK, vgX, xdK, xdCh, xdPl, \
+    vlRe, vjW, vjW1, vjCp, vjC1, vjC2, vjE, vjRun, vjN, vrAb, vrAw, vrAl, vrA
+
+// viInit -- vi off for a new caller (vi.am1's restart): no visual mode
+// pending, no marks' columns, no f or t to repeat, no @ to repeat,
+// searches forward. AC and IO are clobbered.
+viInit, dac vnX
+    dzm i [vmLast:FILE_BANK]
+    dzm viOn
+    dzm viPend
+    dzm vScroll
+    dzm vLastFK
+    dzm vLastFC
+    dzm vMoving
+    law CH_SLASH
+    dac vScan
+    lac [0777776]
+    dac vPeek
+    dzm i [exOut:TERM_BANK]
+    lac [ncols:VI_BANK]
+    dac vnP
+    law NMARK
+    dac vnN
+vnL, dzm i vnP
+    idx vnP
+    lac vnN
+    sub [1]
+    dac vnN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vnL
+    jmp i vnX
+
+// cVisual -- vi[sual] [+-^.] [window]: 3.7's vop. In visual mode it is :e.
+// On a dumb terminal, refused. Reached by jmp from ex's dispatch.
+cVisual, lac viOn
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i [cEdit:FILE_BANK]
+    lac i [oTerm:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [TERM_DUMB]
+    jmp cvDumb
+    jsp i [setDot1:EX_BANK]
+    lac i [addr2:EX_BANK]
+    dac DOT
+    dzm vCtx
+    jsp i [getChar:EX_BANK]  // a context character
+    dac cvC
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp cvD
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp cvD
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp cvD
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp cvD
+    jsp i [unGetChar:EX_BANK]
+    jmp cvNum
+cvD, lac cvC
+    dac vCtx
+cvNum, jsp i [getChar:EX_BANK]  // a window size, passed over
+    lia
+    jsp i [isDigit:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp cvNum
+    jsp i [unGetChar:EX_BANK]
+    jsp i [eol:EX_BANK]
+    jmp viEnter
+cvDumb, lac [mNoVis:MSG_BANK]
+    jmp i [exErr:EX_BANK]
+
+// viStart -- where ex's prompt comes when switch 2 set viPend at the
+// greeting: visual mode, dot where ex left it. Reached by jmp.
+viStart, dzm viPend
+    dzm vCtx
+// viEnter -- visual mode: 3.7's fixzero, the screen cleared, dot placed as
+// vCtx says (scContext), the cursor on its first character that is not
+// white. Reached by jmp.
+viEnter, jsp vFixZero
+    law 1
+    dac viOn
+    dzm i [brkOn:TERM_BANK]
+    lac vScroll
+    SKIP_NEXT_IF_AC_ZERO
+    jmp veNz
+    lac i [oWindow:EX_BANK]  // half the window, as 3.7
+    add [1]
+    rar 1s
+    and [0377777]
+    dac vScroll
+veNz, jsp i [scEnter:SCR_BANK]
+    lac vCtx
+    dac i [scCtx:SCR_BANK]
+    lio DOT
+    jsp i [scContext:SCR_BANK]
+    dzm vMoving
+    jsp vFirst
+    dac vCurs
+    jmp viLoop
+
+// viLoop -- each command: the screen brought up to date unless keys wait,
+// then a count and a register ("x), if any, and the command's key. U's
+// line before a change (vops.ac's vSyncLn) is forgotten once dot leaves it.
+viLoop, dzm i [brkOn:TERM_BANK]
+    dzm vSrch
+    dzm vGlob
+    dzm vReg
+    dzm vRst
+    dzm vOp
+    dzm vSub
+    jsp vClamp
+    lac vSyncLn
+    SKIP_NEXT_IF_SAME DOT
+    dzm vSyncLn
+    jsp i [scRefresh:SCR_BANK]
+    lac DOT
+    dac vSvDot
+    lac vCurs
+    dac vSvCur
+    lac CHNG
+    dac vSvChg
+    dzm vHad
+    dzm vCnt
+vlCnt, jsp vKey
+    dio vC
+    lac vC
+    SKIP_NEXT_IF_DIFFERENT [CH_QUOTE]
+    jmp vlQ
+    sub [CH_0]              // a digit: 1 to 9, or 0 after one
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vlGo
+    dac vlD0
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vlGo
+    lac vlD0
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vlDig
+    lac vRst                // 0 after a register is a motion
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vlGo
+    lac vHad
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vlGo                // 0 alone is a motion
+vlDig, lac vRst             // a count after a register replaces one before
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vlD1
+    dzm vRst
+    dzm vCnt
+vlD1, lac vCnt
+    sub [COUNT_CAP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vlCnt               // no further than COUNT_CAP
+    lac vCnt
+    ral 2s                  // times 10
+    add vCnt
+    ral 1s
+    add vlD0
+    dac vCnt
+    law 1
+    dac vHad
+    jmp vlCnt
+// "x: a register, a to z, A to Z or 1 to 9 (3.7's vreg)
+vlQ, jsp vKey
+    dio vC
+    lac vC
+    sub [CH_0+1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vFail
+    sub [0d9]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vlR
+    jmp vlR1
+vlR, lac vC
+    ior [040]
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vFail
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vFail
+vlR1, lac vC
+    dac vReg
+    law 1
+    dac vRst
+    jmp vlCnt
+// the command's key, mapped (keys.ac's kyCmd); a count or " that a map
+// gave is read as one; then the table, then the motions
+vlGo, lio vC
+    jsp i [kyCmd:TERM_BANK]
+    dio vC
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vlRe
+    lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vlDo
+    law 1                   // no count is 1
+    dac vCnt
+    jmp vlDo
+vlRe, dio vPeek
+    jmp vlCnt
+// vlKey -- the command's key read again, the count as it stands: for .,
+// and p's insert of DEL (3.7's reread). Reached by jmp.
+vlKey, jsp vKey
+    dio vC
+// the count as the command takes it, the key kept for . unless replayed
+vlDo, lac vCnt
+    dac vXcnt
+    lac vC
+    dac vOpKey
+    lac [vWcmd:VI_BANK]
+    dac vWcP
+    lac vGlob
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vlT
+    lac vC
+    dac vWcmd
+    idx vWcP
+vlT, lac [vCmdTab:SCR_BANK]
+    dac vtP
+vlTab, lac i vtP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i [vMotion:VI_BANK]
+    SKIP_NEXT_IF_DIFFERENT vC
+    jmp vlHit
+    idx vtP
+    idx vtP
+    jmp vlTab
+vlHit, idx vtP
+    lac i vtP
+    dac vtJ
+    jmp i vtJ
+
+// vFail -- 3.7's beep and return: the bell, a map's keys dropped, then the
+// next command.
+vFail, jsp i [ringBell:TERM_BANK]
+    dzm i [kyMacP:TERM_BANK]
+    jmp viLoop
+
+// vKey -- vGetKey's key, an arrow as k, j, l or h. IO is the key; AC is
+// clobbered.
+vKey, dac vkX
+    jsp vGetKey
+    dio vU
+    lac vU
+    sub [KY_UP]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vkPk
+    sub [4]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vkPk
+    lac vU
+    sub [KY_UP]
+    add [vkMap:VI_BANK]
+    dac vU
+    lio i vU
+    jmp i vkX
+vkPk, lio vU
+    jmp i vkX
+vkMap, 0153                 // KY_UP: k
+    0152                    // KY_DOWN: j
+    0154                    // KY_RIGHT: l
+    0150                    // KY_LEFT: h
+
+// vGetKey -- 3.7's getkey: one put back (vPeek), else the next of the keys
+// replayed (vGlob, vops.ac's), ESC once they end, the last kept in vLastVg
+// (0 for that ESC), else a map's next key or the next typed (keys.ac's
+// kyNext). IO is the key; AC is clobbered.
+vGetKey, dac vgX
+    lac vPeek
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vgG
+    lia
+    lac [0777776]
+    dac vPeek
+    dzm vLastVg
+    jmp i vgX
+vgG, lac vGlob
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vgK
+    lac i vGlob
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vgE
+    dac vLastVg
+    idx vGlob
+    lio vLastVg
+    jmp i vgX
+vgE, dzm vLastVg
+    lio [CH_ESC]
+    jmp i vgX
+vgK, dzm vLastVg
+    jsp i [kyNext:TERM_BANK]
+    jmp i vgX
+
+// vFixZero -- 3.7's fixzero: an empty buffer given one empty line, the
+// buffer's changed count kept, dot on it. AC and IO are clobbered.
+vFixZero, dac fzX
+    lac DOL
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i fzX
+    lac CHNG
+    dac fzC
+    dzm LBLEN
+    jsp i [putLine:0]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i fzX               // no room: left empty
+    lia
+    dzm DOT
+    jsp i [lnInsert:0]
+    lac fzC
+    dac CHNG
+    law 1
+    dac DOT
+    jmp i fzX
+
+// vClamp -- dot a line, the cursor within it (the last character at most).
+// AC and IO are clobbered.
+vClamp, dac vxX
+    lac DOT
+    SKIP_NEXT_IF_AC_ZERO
+    jmp .+3
+    law 1
+    dac DOT
+    lio DOT
+    jsp i [lnPtr:0]
+    dac vxP
+    lac i vxP
+    and [REC_LEN]
+    dac vxN
+    lac vCurs
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    dzm vCurs
+    lac vxN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vxL
+    sub vCurs
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp i vxX
+    lac vxN
+    sub [1]
+vxL, dac vCurs
+    jmp i vxX
+
+// vFirst -- 3.7's vskipwh on dot's line: the index of its first character
+// that is not a blank or TAB, the end if none. AC is it; IO is clobbered.
+vFirst, dac vrX
+    lio DOT
+    jsp i [lnPtr:0]
+    lia
+    jsp i [getLine:0]
+    lac [LINEBUF]
+    dac vrP
+vrL, lac i vrP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp vrQ
+    SKIP_NEXT_IF_DIFFERENT [CH_TAB]
+    jmp vrQ
+    lac vrP
+    sub [LINEBUF]
+    jmp i vrX
+vrQ, idx vrP
+    jmp vrL
+
+// --- ex commands
+
+// vRead -- 3.7's readecho: a line read on the status line after vrC's
+// prompt, into CMDBUF a character a word, its length in vLen. As 3.7's
+// vgetcmd reads it with vgetline, each key is mapped by :map! unless
+// replayed (keys.ac's kyIns), and a word ended is abbreviated (kyAbbC),
+// the word taken off the screen. BS, ^H and ^W edit; the kill key (^U)
+// empties it; ^V quotes; LF, CR and ESC end it. BS with nothing typed, DEL
+// or ^C cancel it. AC is 1 when it was read, 0 when cancelled; IO is
+// clobbered.
+vRead, dac vrX
+    jsp i [scStat:SCR_BANK]
+    lio vrC
+    jsp i [putc:TERM_BANK]
+    dzm vLen
+vrRd, jsp vKey
+    dio vU
+    lac vGlob
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vrAb
+    lio vU
+    jsp i [kyIns:TERM_BANK]
+    dio vU
+vrAb, lac vLen
+    dac i [kaGc:TERM_BANK]
+    dzm i [kaOg:TERM_BANK]
+    lio vU
+    jsp i [kyAbbC:TERM_BANK]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vrAw
+    lac vU
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vrEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp vrEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp vrEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_DEL]
+    jmp vrCan
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLC]
+    jmp vrCan
+    SKIP_NEXT_IF_DIFFERENT [CH_BS]
+    jmp vrBs
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLU]
+    jmp vrKill
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLW]
+    jmp vrW
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLV]
+    jmp vrQt
+    SKIP_NEXT_IF_DIFFERENT [CH_CTLQ]
+    jmp vrQt
+vrPut, lac vLen
+    sub [CMD_SIZE-3]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vrRd                // full: the key dropped
+    lac vLen
+    add [CMDBUF]
+    dac vrP
+    lac vU
+    dac i vrP
+    idx vLen
+    lio vU
+    jsp vEcho
+    jmp vrRd
+vrQt, jsp vKey
+    dio vU
+    jmp vrPut
+vrBs, lac vLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vrCan
+    jsp vRub
+    jmp vrRd
+vrKill, lac vLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vrRd
+    jsp vRub
+    jmp vrKill
+// ^W: back over blanks, then over the word
+vrW, lac vLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vrRd
+    add [CMDBUF-1]
+    dac vrP
+    lac i vrP
+    SKIP_NEXT_IF_SAME [CH_SP]
+    jmp vrWl
+    jsp vRub
+    jmp vrW
+vrWl, lac vLen
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vrRd
+    add [CMDBUF-1]
+    dac vrP
+    lac i vrP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp vrRd
+    jsp vRub
+    jmp vrWl
+// an abbreviation: back to the word's start, its text to come
+vrAw, dac vrA
+vrAl, lac vLen
+    SKIP_NEXT_IF_DIFFERENT vrA
+    jmp vrRd
+    jsp vRub
+    jmp vrAl
+vrEnd, law 1
+    jmp i vrX
+vrCan, cla
+    jmp i vrX
+
+// vEcho -- the character in IO echoed as 3.7 shows it: a control character
+// as ^ and its letter. AC and IO are clobbered.
+vEcho, dac veX
+    dio vT
+    lac vT
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp veP
+    lio [CH_CARET]
+    jsp i [putc:TERM_BANK]
+    lac vT
+    xor [0100]
+    dac vT
+veP, lio vT
+    jsp i [putc:TERM_BANK]
+    jmp i veX
+
+// vRub -- the last character read taken back, the cursor backed over it
+// and the character left showing until typed over, as 3.7's vgetline
+// backs up (its vbackup). AC and IO are clobbered.
+vRub, dac vbX
+    lac vLen
+    sub [1]
+    dac vLen
+    add [CMDBUF]
+    dac vrP
+    lac i vrP
+    sub [CH_SP]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vbOne
+    jsp vBsp
+vbOne, jsp vBsp
+    jmp i vbX
+vBsp, dac vpX
+    lio [CH_BS]
+    jsp i [rawc:TERM_BANK]
+    jmp i vpX
+
+// vExec -- the ex command in CMDBUF, vLen characters, run: LF and CH_EOF
+// after it, its output to the status line, a break breaking it, vXDone
+// its continuation. Reached by jmp.
+vExec, lac vLen
+    add [CMDBUF]
+    dac vrP
+    law CH_LF
+    dac i vrP
+    idx vrP
+    law CH_EOF
+    dac i vrP
+    lac vLen
+    add [2]
+    dac i [cbEnd:EX_BANK]
+    dzm i [cbPos:EX_BANK]
+    law 1
+    dac i [endline:EX_BANK]
+    dac i [brkOn:TERM_BANK]
+    jsp i [scExArm:SCR_BANK]
+    lio [vXDone:VI_BANK]
+    jsp i [rnPush:RE_BANK]
+    jmp i [exLoop:EX_BANK]
+
+// vXDone -- an ex command's end: [Hit return to continue] after more than
+// the status line, a : typed then starting the next; 3.7's fixzero; after
+// J, < or > (vXKind), vops.ac's vXFix; else, if dot moved or the buffer
+// changed, the cursor placed as 3.7's vnline(0) (vPlace); the window placed
+// again if dot left it. Reached by jmp, from rnEof.
+vXDone, dzm i [brkOn:TERM_BANK]
+    jsp i [scExDone:SCR_BANK]
+xdTail, SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp xdNoMr
+    jsp i [scHitRet:SCR_BANK]
+    dio vU
+    lac vU
+    SKIP_NEXT_IF_DIFFERENT [CH_COLON]
+    dac vPeek
+xdNoMr, jsp vFixZero
+    lac DOT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    law 1
+    dac DOT
+    lac vXKind
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp xdK
+    jsp vXFix
+    jmp xdDot
+xdK, lac DOT
+    SKIP_NEXT_IF_DIFFERENT vSvDot
+    jmp xdCh
+    dzm vMoving             // dot moved: 3.7's vmoving = 0, cursor = 0
+    jmp xdPl
+xdCh, lac CHNG              // the buffer changed, and not by a write, which
+    SKIP_NEXT_IF_AC_NOT_ZERO  // clears chng (3.7's tchng != i): cursor = 0
+    jmp xdDot
+    SKIP_NEXT_IF_DIFFERENT vSvChg
+    jmp xdDot
+xdPl, jsp vPlace            // vnline(0)
+xdDot, lio DOT
+    jsp i [scHold:SCR_BANK]
+    jmp viLoop
+
+// viErr -- where exErr comes while vi is on, its message on the status
+// line: as vXDone; a search's dot and cursor as they were. Reached by jmp.
+viErr, dzm i [brkOn:TERM_BANK]
+    dzm vXKind
+    lac vSrch
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp erRst
+    lac vSvDot
+    dac DOT
+    lac vSvCur
+    dac vCurs
+erRst, jsp i [scExDone:SCR_BANK]
+    jmp xdTail
+
+// vRun -- the ex command at the full address in IO (am1's ascii) run, as
+// vExec. Reached by jmp.
+vRun, dio vrP
+    dzm vLen
+    lac [CMDBUF]
+    dac vrQp
+vrUn, lac i vrP
+    rar 9s
+    and [PK_LO]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vExec
+    dac i vrQp
+    idx vrQp
+    idx vLen
+    lac i vrP
+    and [PK_LO]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vExec
+    dac i vrQp
+    idx vrQp
+    idx vLen
+    idx vrP
+    jmp vrUn
+
+// --- the commands
+
+// : -- an ex command read on the status line, then run.
+vcColon, law CH_COLON
+    dac vrC
+    jsp vRead
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp viLoop
+    jmp vExec
+
+// Q -- ex: the terminal as ex expects it, then ex's prompt.
+vcQ, jsp i [scQuit:SCR_BANK]
+    dzm viOn
+    law 1
+    dac i [brkOn:TERM_BANK]
+    dac i [endline:EX_BANK]
+    jmp i [exLoop:EX_BANK]
+
+// ZZ -- :x.
+vcZZ, jsp vKey
+    dio vU
+    lac vU
+    SKIP_NEXT_IF_SAME [0132]
+    jmp vFail
+    lio [vsX:VI_BANK]
+    jmp vRun
+
+// ^G -- :f.
+vcCtlG, lio [vsF:VI_BANK]
+    jmp vRun
+
+// ^] -- :tag of the word at the cursor (3.7's grabtag): from the first
+// character past blanks there, then while letters, digits and _, kept as
+// the last tag; at the line's end the last tag stays.
+vcCtlRb, jsp vGetDot
+    lac vCurs
+    dac vT
+vjW, lac vT
+    SKIP_NEXT_IF_DIFFERENT LBLEN
+    jmp vjRun
+    add [LINEBUF]
+    dac vtP
+    lac i vtP
+    SKIP_NEXT_IF_DIFFERENT [CH_SP]
+    jmp vjW1
+    SKIP_NEXT_IF_SAME [CH_TAB]
+    jmp vjCp
+vjW1, idx vT
+    jmp vjW
+vjCp, lac [lastTag:RE_BANK]
+    dac vtJ
+    dzm vjN
+vjC1, lac vjN
+    sub [TAG_MAX]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vjC2
+    lac i vtP
+    dac i vtJ
+    idx vtJ
+    idx vjN
+vjC2, idx vT
+    SKIP_NEXT_IF_DIFFERENT LBLEN
+    jmp vjE
+    add [LINEBUF]
+    dac vtP
+    lio i vtP
+    jsp i [isAlnum:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vjC1
+    lac i vtP
+    SKIP_NEXT_IF_DIFFERENT [CH_USCORE]
+    jmp vjC1
+vjE, dzm i vtJ
+vjRun, lio [vsTag:VI_BANK]
+    jmp vRun
+
+// ^^ -- :e #, or e! # under autowrite after the buffer is written (3.7's
+// ckaw); refused after a count.
+vcCtlUp, lac vHad
+    SKIP_NEXT_IF_AC_ZERO
+    jmp vFail
+    jsp i [fiCkaw:FILE_BANK]
+    lio [vsEx:VI_BANK]
+    lac i [oAutoWr:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    lio [vsEb:VI_BANK]
+    jmp vRun
+
+// ^L -- the screen cleared and painted again. ^R -- painted again.
+vcCtlL, jsp i [scClr:SCR_BANK]
+    jmp viLoop
+vcCtlR, jsp i [scUnk:SCR_BANK]
+    jmp viLoop
+
+// ESC -- the bell, as 3.7.
+vcEsc, jmp vFail
+
+// ^F -- a window on, two lines kept: 3.7's vzop(0, 0, '+') from the line
+// before the last shown.
+vcCtlF, jsp vLay
+    lac i [scCnt:SCR_BANK]
+    sub [3]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vcFz
+    lac vCnt                // top + vcnt - 2 + (cnt-1) * window
+    sub [1]
+    dac vT
+    jsp vTimesW
+    add i [scTop:SCR_BANK]
+    add i [scCnt:SCR_BANK]
+    sub [2]
+    dac vZa
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vFail
+    jmp vcFb
+vcFz, lac i [scTop:SCR_BANK] // z+: the line after the last shown
+    add i [scCnt:SCR_BANK]
+    dac vZa
+vcFb, lac vZa
+    sub DOL
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vFail
+    dzm vZc
+    jmp vzGo
+
+// ^B -- a window back, two lines kept: 3.7's vzop(0, 0, '^').
+vcCtlB, jsp vLay
+    lac i [scTop:SCR_BANK]
+    SKIP_NEXT_IF_DIFFERENT [1]
+    jmp vcBz
+    lac i [scCnt:SCR_BANK]
+    sub [3]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vcBz
+    lac vCnt                // top + 2 - (cnt-1) * window
+    sub [1]
+    dac vT
+    jsp vTimesW
+    cma
+    add i [scTop:SCR_BANK]
+    add [2]
+    dac vZa
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vcBb
+    jmp vFail
+vcBb, lac vZa               // z^ from there: the line before it
+    sub [1]
+    jmp .+3
+vcBz, lac i [scTop:SCR_BANK]
+    sub [1]
+    dac vZa
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vFail
+    law CH_MINUS
+    dac vZc
+    jmp vzGo
+
+// ^D, ^U -- scroll the window: a count sets how far, as 3.7's vSCROLL.
+vcCtlD, jsp vSetScr
+    jsp vLay
+    lac i [scTop:SCR_BANK]  // ind: the lines shown below dot
+    add i [scCnt:SCR_BANK]
+    sub DOT
+    sub [1]
+    dac i [scInd:SCR_BANK]
+    add vScroll
+    dac i [scN:SCR_BANK]
+    jsp vScrDn
+    jmp vScEnd
+vcCtlU, jsp vSetScr
+    jsp vLay
+    lac DOT                 // ind: vcline
+    sub i [scTop:SCR_BANK]
+    dac i [scInd:SCR_BANK]
+    add vScroll
+    dac i [scN:SCR_BANK]
+    jsp vScrUp
+vScEnd, dzm vMoving
+    jsp vFirst
+    dac vCurs
+    jsp vURec               // vnline's vmove: U's line taken
+    jmp viLoop
+
+// ^E, ^Y -- the window a line on, or back; the cursor's line kept if it
+// stays shown.
+vcCtlE, jsp vLay
+    lac DOL                 // the last line already shown: refused
+    sub DOT
+    dac vT
+    lac i [scTop:SCR_BANK]
+    add i [scCnt:SCR_BANK]
+    sub DOT
+    sub [1]
+    dac vU                  // vcnt-1-vcline
+    sub vT
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vFail
+    lac vU
+    add vCnt
+    dac i [scInd:SCR_BANK]
+    dac i [scN:SCR_BANK]
+    jsp vScrDn
+    jmp vScKeep
+vcCtlY, jsp vLay
+    lac DOT                 // line 1 already shown: refused
+    sub i [scTop:SCR_BANK]
+    dac vU                  // vcline
+    lac DOT
+    sub [1]
+    sub vU
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vFail
+    lac vU
+    add vCnt
+    dac i [scInd:SCR_BANK]
+    dac i [scN:SCR_BANK]
+    jsp vScrUp
+vScKeep, jsp vURec          // vnline(cursor): the same index, in dot's line,
+    jmp viLoop              //   U's line taken
+
+// z -- 3.7's vzop: a count is the line; a window size after z passed
+// over; then CR or LF puts the line at the top, . in the middle, - at the
+// bottom, + the line after the window at the top, ^ the window before.
+vcZ, jsp vKey
+    dio vU
+    lac vU
+    sub [CH_0]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp vzC
+    sub [0d10]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vzC
+    jmp vcZ
+vzC, lac vU
+    SKIP_NEXT_IF_DIFFERENT [CH_ESC]
+    jmp viLoop
+    dac vZc
+    jsp vLay
+    lac vHad
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp vzSw
+// a count: that line, no further than 1 and dol, marked as '' 's
+    lac vCnt
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    law 1
+    dac vZa
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp .+3
+    lac DOL
+    dac vZa
+    lio vZa
+    jsp i [vMarkIt:VI_BANK]
+    jmp vzHad
+vzSw, lac vZc
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp vzPl
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp vzUp
+    lac DOT
+    dac vZa
+    jmp vzHad
+vzPl, lac i [scTop:SCR_BANK]
+    add i [scCnt:SCR_BANK]
+    dac vZa
+    jmp vzHad
+vzUp, lac i [scTop:SCR_BANK]
+    sub [1]
+    dac vZa
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+2
+    jmp vFail
+    law CH_MINUS
+    dac vZc
+// the character
+vzHad, lac vZc
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp vzGo
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp vzGo
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp vzCa
+    SKIP_NEXT_IF_DIFFERENT [CH_PLUS]
+    jmp vzP2
+    SKIP_NEXT_IF_DIFFERENT [CH_CR]
+    jmp vzCr
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp vzCr
+    jmp vFail
+vzCa, lac vZa
+    sub [1]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp vzGo
+    jmp vFail
+vzP2, lac vZa
+    sub DOL
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp vFail
+vzCr, dzm vZc
+// vjumpto(addr, NOSTR, c)
+vzGo, lac vZc
+    dac i [scCtx:SCR_BANK]
+    lio vZa
+    jsp i [scContext:SCR_BANK]
+    jmp vScEnd              // vnline(NOSTR), as ^D's
+
+// vLay -- the layout as it is now (screen.ac's scTop, scCnt).
+// AC and IO are clobbered.
+vLay, dac lyvX
+    jsp i [scOpts:SCR_BANK]
+    jsp i [scLayout:SCR_BANK]
+    jmp i lyvX
+
+// vSetScr -- a count given sets vScroll. AC is clobbered.
+vSetScr, dac ssX
+    lac vHad
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ssX
+    lac vCnt
+    dac vScroll
+    jmp i ssX
+
+// vScrDn, vScrUp -- screen.ac's scDown and scUp, scrolling. AC and IO are
+// clobbered.
+vScrDn, dac sdnX
+    law 1
+    dac i [scScr:SCR_BANK]
+    jsp i [scDown:SCR_BANK]
+    jmp i sdnX
+vScrUp, dac supX
+    law 1
+    dac i [scScr:SCR_BANK]
+    jsp i [scUp:SCR_BANK]
+    jmp i supX
+
+// vTimesW -- vT times the window's rows. AC is the product; IO is
+// clobbered.
+vTimesW, dac twvX
+    dzm vZp
+    lac vT
+    dac vZn
+twL, lac vZn
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp .+3
+    lac vZp
+    jmp i twvX
+    sub [1]
+    dac vZn
+    lac vZp
+    add i [scW:SCR_BANK]
+    dac vZp
+    jmp twL
+
+nmVisual, ascii "visual"
+vsX, ascii "x"
+vsF, ascii "f"
+vsTag, ascii "tag"
+vsEx, ascii "e #"
+vsEb, ascii "e! #"
+vjN, 0
+
+vT, 0
+vU, 0
+vtP, 0
+vtJ, 0
+vnX, 0
+vnP, 0
+vnN, 0
+cvC, 0
+vlD0, 0
+vkX, 0
+fzX, 0
+fzC, 0
+vxX, 0
+vxP, 0
+vxN, 0
+vrX, 0
+vrA, 0                      // an abbreviated word's start
+vrP, 0
+vrQp, 0
+veX, 0
+vbX, 0
+vpX, 0
+lyvX, 0
+ssX, 0
+sdnX, 0
+supX, 0
+twvX, 0
+vZa, 0
+vZc, 0
+vZp, 0
+vZn, 0
+vgX, 0
+endloc
+
+viOn, 0                     // 1 in visual mode
+viPend, 0                   // 1 when ex's prompt is to start visual mode
+vCtx, 0                     // viEnter's context character, or 0
+vCurs, 0                    // the cursor: its character's index in dot's line
+vPeek, 0                    // a key put back, or -1
+vMoving, 0                  // 3.7's vmoving: up and down keep vMovCol
+vMovCol, 0                  // 3.7's vmovcol: the column to keep
+vScroll, 0                  // 3.7's vSCROLL: ^D's and ^U's lines
+vHad, 0                     // 1 when a count was typed
+vCnt, 0                     // the count, 1 when none
+vC, 0                       // the command's key
+vSvDot, 0                   // dot and the cursor as the command found them
+vSvCur, 0
+vSvChg, 0                   // the buffer's changed count as the command found it
+vSrch, 0                    // 1 while a search runs: an error restores them
+vLen, 0                     // vRead's line's length
+vrC, 0                      // vRead's prompt
+vLastFK, 0                  // the last f, F, t or T, 0 for none
+vLastFC, 0                  //   and its character
+vScan, 0                    // the last search's direction, / or ?
+ncols,                      // the marks' columns, the index and 1; 0 unset
+    table NMARK, 0

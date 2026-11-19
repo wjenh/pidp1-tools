@@ -1,0 +1,1150 @@
+// regex.ac -- ex's regular expressions, as 3.7's ex_re.c: compiling
+// (compile), matching (execute, advance, cclass), the three remembered
+// expressions, and the search of an address (ex_addr.c's / ? and \).
+//
+// A program is 3.7's, a step a word: circfl, nbra, then the steps. The last
+// expression (3.7's re) is at RE_LAST, the last scanning one at RE_SCAN,
+// the last substitute's at RE_SUB, all in bank TERM_BANK's spare; a program
+// whose first step is 0 is none. Matching reads LINEBUF, a character a word
+// ending in a 0 word; loc1 and loc2 (reLoc1, reLoc2) are full addresses in
+// it. A star's backtracking, which 3.7 does by recursion, is a stack of
+// frames in GENBUF, so GENBUF holds nothing across a match. A program that
+// starts with a character has each line's record scanned for it, both
+// halves of a word, before the line is unpacked; a line without it is passed
+// over unopened (not in the control build, -DVICTL_SCAN).
+//
+// Entered by jsp with the extend window open, returning by jmp i; an error
+// is jmp i [exErr:EX_BANK] with its message's full address in AC. In bank
+// RE_BANK. Needs vi.ah, <AIDS/skipmacros.ah>, excmd.ac and exaddr.ac (bank
+// EX_BANK), lines.ac (bank 0), termio.ac's brkChk (bank TERM_BANK).
+
+// 3.7's steps (ex_re.h). A step or STAR is a starred one.
+#define RC_STAR      1
+#define RC_BRA       1
+#define RC_DOT       4
+#define RC_CCL       0d8
+#define RC_NCCL      0d12
+#define RC_DOL       0d16
+#define RC_EOFC      0d17
+#define RC_KET       0d18
+#define RC_CHR       0d20
+#define RC_BRC       0d24
+#define RC_LET       0d25
+#define RC_NOPS      0d26                 // steps 0 to RC_NOPS-1 in raTab
+
+// A class's character taken as itself, 3.7's QUOTE; also a replacement's
+// quoted character (subst.ac).
+#define RE_QUOTE     0200
+#define RE_TRIM      0177
+
+// A star's frame: where its run now ends, where it started, the program
+// after it. GENBUF holds RA_FRAMES of them.
+#define RA_FRAME     3
+#define RA_FRAMES    0d340
+
+local rcX, rcEof, rcC, rcEp, rcLast, rcBrP, rcCnt, rcT, rcLetE, rcNotB, \
+    rcBScan, rcBSub, rcBBad, rcNoScan, rcNoSub, rcEmpty, rcEm2, rcGo, rcUng, \
+    rcLoop, rcLsN, rcLsF, rcLsSet, rcSw, rcMg, rcEnd, rcBsl, rcOpen, \
+    rcClose, rcBrc, rcLet, rcMagic, rcBslC, rcBsl2, rcMDot, rcMTil, rcTL, \
+    rcTC, rcMStar, rcStar, rcMCcl, rcCcl1, rcCclL, rcCclQ, rcCcl2, rcCclE, \
+    rcNl, rcDol, rcDolY, rcDef, rcCplx, rcUnm, rcAwash, rcExtra, rcIll, \
+    rcBadCcl, rcMissB, rcNoNl, rcBadRe, rcCerr, rcNoPrev, rcMissD, rcRhsA, \
+    rcRhsD, rpX, rcPut, rvX, rvS, rvD, rvN, rvGo, rvL, \
+    reX, reN, reP1, reRec, rxC, rxGf, rxGo, rxFast, rxFL, rxFIc, rxFTry, \
+    rxFN, rxHit, rxReg, rxRL, rxNo, \
+    rePre, ppX, ppN, ppP, ppC, ppCh, ppA, ppAh, ppL, ppNo, ppYes, ppAlt, \
+    ppGo, \
+    reAdv, raX, raSp, raOp, raT, raCur, raA, raB, raC, raAf, raL, \
+    rxChr, rxChI, rxChY, rxDot, rxDol, rxEnd, rxCcl, rxNcl, rxCc, rxBra, \
+    rxKet, rxBk, rxDotS, rxDS, rxDSE, rxChrS, rxCS, rxCSN, rxCSI, rxCSE, \
+    rxCclS, rxCSL, rxBrc, rxLet, raStar, raTry, raFail, raPop, raNo, \
+    raDeep, raBad, \
+    reCcl, ccX, ccS, ccN, ccT, ccT2, cc1, ccL, ccR, ccOne, ccSk, ccYes, \
+    ccNo, reCase, rkX, rkNo, reWord, rwX, rwC, rwNo, \
+    rsX, rsC, rsA, rsL, rsBack, rsBot, rsTry, rsHit, rsNoBot, rsNoTop, \
+    rsFail, rsTop
+
+// reInit -- no expression, replacement or tag remembered, no flags of s,
+// no command list running, as a caller finds vi.
+// AC is clobbered, IO preserved.
+reInit, dac rvX
+    dzm i [RE_LAST+2]
+    dzm i [RE_SCAN+2]
+    dzm i [RE_SUB+2]
+    dzm reRhs
+    dzm reOkNl
+    dzm sbGs
+    dzm sbCf
+    dzm rnDepth
+    dzm lastTag
+    jmp i rvX
+
+// reCompile -- 3.7's compile(eof, oknl): the expression after the
+// delimiter in IO compiled as the last expression, RE_LAST; with reOkNl
+// set, a new line ends it as the delimiter would. An empty one is the last
+// expression again; \/ and \? are the last scanning one, \& the last
+// substitute's. A failure partway leaves none (3.7's cerror).
+// AC is the delimiter, or after a \ the character that followed it; IO is
+// clobbered.
+reCompile, dac rcX
+    dio rcEof
+    jsp i [isAlnum:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rcLetE
+    lac [RE_LAST+2]
+    dac rcEp
+    jsp i [getChar:EX_BANK]
+    dac rcC
+    lac rcEof
+    SKIP_NEXT_IF_SAME [CH_BSL]
+    jmp rcNotB
+// \/ \? \&: a remembered expression
+    lac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_SLASH]
+    jmp rcBScan
+    SKIP_NEXT_IF_DIFFERENT [CH_QMARK]
+    jmp rcBScan
+    SKIP_NEXT_IF_DIFFERENT [CH_AMP]
+    jmp rcBSub
+rcBBad, lac [mReBsl:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rcBScan, lac i [RE_SCAN+2]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcNoScan
+    lio [RE_SCAN]
+    jsp reRes
+    lac rcC
+    jmp i rcX
+rcBSub, lac i [RE_SUB+2]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcNoSub
+    lio [RE_SUB]
+    jsp reRes
+    lac rcC
+    jmp i rcX
+rcNoScan, lac [mNoScan:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rcNoSub, lac [mNoSubRe:RE_BANK]
+    jmp i [exErr:EX_BANK]
+// nothing before the delimiter: the last expression
+rcNotB, lac rcC
+    SKIP_NEXT_IF_DIFFERENT rcEof
+    jmp rcEmpty
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp rcEmpty
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp rcEmpty
+    jmp rcGo
+rcEmpty, lac i [RE_LAST+2]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcNoPrev
+    lac rcC
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp rcEm2
+    lac reOkNl
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcMissD
+rcEm2, lac rcC
+    SKIP_NEXT_IF_SAME rcEof
+    jsp i [unGetChar:EX_BANK]
+    lac rcEof
+    jmp i rcX
+// a new expression: ^ first anchors it
+rcGo, dzm rcBrP
+    dzm i [RE_LAST]
+    dzm i [RE_LAST+1]
+    lac rcC
+    SKIP_NEXT_IF_SAME [CH_CARET]
+    jmp rcUng
+    jsp i [getChar:EX_BANK]
+    law 1
+    dac i [RE_LAST]
+rcUng, jsp i [unGetChar:EX_BANK]
+rcLoop, lac rcEp
+    sub [RE_LAST+2+ESIZE-2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rcCplx
+    jsp i [getChar:EX_BANK]
+    dac rcC
+    SKIP_NEXT_IF_DIFFERENT rcEof
+    jmp rcEnd
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp rcEnd
+// lastep: the step a later * applies to
+    lac i [oMagic:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcLsN
+    lac rcC
+    SKIP_NEXT_IF_SAME [CH_STAR]
+    jmp rcLsSet
+    jmp rcLsF
+rcLsN, lac rcC
+    SKIP_NEXT_IF_SAME [CH_BSL]
+    jmp rcLsSet
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_SAME [CH_STAR]
+    jmp rcLsSet
+rcLsF, lac rcEp
+    SKIP_NEXT_IF_DIFFERENT [RE_LAST+2]
+    jmp rcLsSet
+    jmp rcSw
+rcLsSet, lac rcEp
+    dac rcLast
+rcSw, lac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp rcBsl
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp rcNl
+    SKIP_NEXT_IF_DIFFERENT [CH_DOLLAR]
+    jmp rcDol
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp rcMg
+    SKIP_NEXT_IF_DIFFERENT [CH_TILDE]
+    jmp rcMg
+    SKIP_NEXT_IF_DIFFERENT [CH_STAR]
+    jmp rcMg
+    SKIP_NEXT_IF_DIFFERENT [CH_LBRK]
+    jmp rcMg
+    jmp rcDef
+rcMg, lac i [oMagic:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rcMagic
+    jmp rcDef
+// the delimiter: the program's end
+rcEnd, lac rcBrP
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rcUnm
+    lio [RC_EOFC]
+    jsp rcPut
+    lac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jsp i [unGetChar:EX_BANK]
+    lac rcEof
+    jmp i rcX
+// \( \) \< \>, and \ before what nomagic makes magic
+rcBsl, jsp i [getChar:EX_BANK]
+    dac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_LPAR]
+    jmp rcOpen
+    SKIP_NEXT_IF_DIFFERENT [CH_RPAR]
+    jmp rcClose
+    SKIP_NEXT_IF_DIFFERENT [CH_LT]
+    jmp rcBrc
+    SKIP_NEXT_IF_DIFFERENT [CH_GT]
+    jmp rcLet
+    lac i [oMagic:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcMagic
+    jmp rcBslC
+rcOpen, lac i [RE_LAST+1]
+    sub [NBRA]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rcAwash
+    lac rcBrP
+    add [rcBrk:RE_BANK]
+    dac rcT
+    lac i [RE_LAST+1]
+    dac i rcT
+    idx rcBrP
+    lio [RC_BRA]
+    jsp rcPut
+    lio i [RE_LAST+1]
+    jsp rcPut
+    lac i [RE_LAST+1]
+    add [1]
+    dac i [RE_LAST+1]
+    jmp rcLoop
+rcClose, lac rcBrP
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcExtra
+    lio [RC_KET]
+    jsp rcPut
+    lac rcBrP
+    sub [1]
+    dac rcBrP
+    add [rcBrk:RE_BANK]
+    dac rcT
+    lio i rcT
+    jsp rcPut
+    jmp rcLoop
+rcBrc, lio [RC_BRC]
+    jsp rcPut
+    jmp rcLoop
+rcLet, lio [RC_LET]
+    jsp rcPut
+    jmp rcLoop
+// the magic characters, and those after \ when nomagic
+rcMagic, lac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_DOT]
+    jmp rcMDot
+    SKIP_NEXT_IF_DIFFERENT [CH_TILDE]
+    jmp rcMTil
+    SKIP_NEXT_IF_DIFFERENT [CH_STAR]
+    jmp rcMStar
+    SKIP_NEXT_IF_DIFFERENT [CH_LBRK]
+    jmp rcMCcl
+// anything else after \ is itself; a \ at the list's end is a \.
+rcBslC, lac rcC
+    SKIP_NEXT_IF_SAME [CH_EOF]
+    jmp rcBsl2
+    jsp i [unGetChar:EX_BANK]
+    law CH_BSL
+    dac rcC
+    jmp rcDef
+rcBsl2, SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp rcNoNl
+    jmp rcDef
+rcMDot, lio [RC_DOT]
+    jsp rcPut
+    jmp rcLoop
+// ~: the last replacement's text, each character as itself
+rcMTil, lac [reRhs:RE_BANK]
+    dac rcT
+rcTL, lac i rcT
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcLoop
+    and [RE_QUOTE]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcTC
+    lac i rcT
+    and [RE_TRIM]
+    SKIP_NEXT_IF_DIFFERENT [CH_AMP]
+    jmp rcRhsA
+    sub [CH_0+1]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rcTC
+    sub [0d9]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rcTC
+    jmp rcRhsD
+rcTC, lac rcEp
+    sub [RE_LAST+2+ESIZE-2]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rcCplx
+    lio [RC_CHR]
+    jsp rcPut
+    lac i rcT
+    and [RE_TRIM]
+    lia
+    jsp rcPut
+    idx rcT
+    jmp rcTL
+// *: the step before it starred; first, it is itself
+rcMStar, lac rcEp
+    SKIP_NEXT_IF_DIFFERENT [RE_LAST+2]
+    jmp rcBslC
+    lac i rcLast
+    SKIP_NEXT_IF_DIFFERENT [RC_BRA]
+    jmp rcIll
+    SKIP_NEXT_IF_DIFFERENT [RC_KET]
+    jmp rcIll
+rcStar, ior [RC_STAR]
+    dac i rcLast
+    jmp rcLoop
+// [...] and [^...]: the count, then the characters, a \ before ] - ^ \
+// making it itself
+rcMCcl, lio [RC_CCL]
+    jsp rcPut
+    cli
+    jsp rcPut
+    law 1
+    dac rcCnt
+    jsp i [getChar:EX_BANK]
+    dac rcC
+    SKIP_NEXT_IF_SAME [CH_CARET]
+    jmp rcCcl1
+    jsp i [getChar:EX_BANK]
+    dac rcC
+    lac rcEp
+    sub [2]
+    dac rcT
+    law RC_NCCL
+    dac i rcT
+rcCcl1, lac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_RBRK]
+    jmp rcBadCcl
+rcCclL, lac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_RBRK]
+    jmp rcCclE
+    SKIP_NEXT_IF_SAME [CH_BSL]
+    jmp rcCcl2
+    jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT [CH_RBRK]
+    jmp rcCclQ
+    SKIP_NEXT_IF_DIFFERENT [CH_MINUS]
+    jmp rcCclQ
+    SKIP_NEXT_IF_DIFFERENT [CH_CARET]
+    jmp rcCclQ
+    SKIP_NEXT_IF_DIFFERENT [CH_BSL]
+    jmp rcCclQ
+    jmp rcCcl2
+rcCclQ, jsp i [getChar:EX_BANK]
+    ior [RE_QUOTE]
+    dac rcC
+rcCcl2, lac rcC
+    SKIP_NEXT_IF_DIFFERENT [CH_LF]
+    jmp rcMissB
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp rcMissB
+    lio rcC
+    jsp rcPut
+    idx rcCnt
+    lac rcEp
+    sub [RE_LAST+2+ESIZE]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rcCplx
+    jsp i [getChar:EX_BANK]
+    dac rcC
+    jmp rcCclL
+rcCclE, lac rcLast
+    add [1]
+    dac rcT
+    lac rcCnt
+    dac i rcT
+    jmp rcLoop
+// a new line ends the expression where reOkNl allows it
+rcNl, lac reOkNl
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcBadRe
+    jsp i [unGetChar:EX_BANK]
+    lio [RC_EOFC]
+    jsp rcPut
+    lac rcEof
+    jmp i rcX
+// $ at the end is the line's end; elsewhere itself
+rcDol, jsp i [peekChar:EX_BANK]
+    SKIP_NEXT_IF_DIFFERENT rcEof
+    jmp rcDolY
+    SKIP_NEXT_IF_DIFFERENT [CH_EOF]
+    jmp rcDolY
+    SKIP_NEXT_IF_SAME [CH_LF]
+    jmp rcDef
+    lac reOkNl
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rcDef
+rcDolY, lio [RC_DOL]
+    jsp rcPut
+    jmp rcLoop
+rcDef, lio [RC_CHR]
+    jsp rcPut
+    lio rcC
+    jsp rcPut
+    jmp rcLoop
+// the errors that leave no expression, 3.7's cerror
+rcCplx, lac [mReCplx:RE_BANK]
+    jmp rcCerr
+rcUnm, lac [mUnmOpen:RE_BANK]
+    jmp rcCerr
+rcAwash, lac [mAwash:RE_BANK]
+    jmp rcCerr
+rcExtra, lac [mExtraKet:RE_BANK]
+    jmp rcCerr
+rcIll, lac [mIllStar:RE_BANK]
+    jmp rcCerr
+rcBadCcl, lac [mBadCcl:RE_BANK]
+    jmp rcCerr
+rcMissB, lac [mMissBrk:RE_BANK]
+    jmp rcCerr
+rcNoNl, lac [mNoNl:RE_BANK]
+    jmp rcCerr
+rcBadRe, lac [mBadRe:RE_BANK]
+rcCerr, dzm i [RE_LAST+2]
+    jmp i [exErr:EX_BANK]
+// and those that leave it as it was
+rcLetE, lac [mReLetter:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rcNoPrev, lac [mNoPrevRe:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rcMissD, lac [mMissDelim:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rcRhsA, lac [mRhsAmp:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rcRhsD, lac [mRhsDig:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+// rcPut -- the step in IO at rcEp, rcEp past it. AC is clobbered, IO
+// preserved.
+rcPut, dac rpX
+    dio i rcEp
+    idx rcEp
+    jmp i rpX
+
+// reSave, reRes -- 3.7's savere and resre: the last expression copied to
+// the remembered one whose full address is in IO, or that one copied to the
+// last. AC and IO are clobbered.
+reSave, dac rvX
+    dio rvD
+    lac [RE_LAST]
+    dac rvS
+    jmp rvGo
+reRes, dac rvX
+    dio rvS
+    lac [RE_LAST]
+    dac rvD
+rvGo, law RE_W
+    dac rvN
+rvL, lac i rvS
+    dac i rvD
+    idx rvS
+    idx rvD
+    lac rvN
+    sub [1]
+    dac rvN
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rvL
+    jmp i rvX
+
+// reExec -- 3.7's execute(gf, addr), the last expression's program: with
+// reGf 0, line IO read into LINEBUF and searched from its start (line 0
+// never matches); with reGf set, the search goes on from reLoc2 in LINEBUF
+// as it is, unless the expression is anchored. AC is 1 at a match, reLoc1
+// and reLoc2 its ends, else 0; IO is clobbered.
+reExec, dac reX
+    dio reN
+    lac i [oIgnCase:EX_BANK]
+    dac reIc
+    lac reGf
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxGf
+    lac reN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxNo
+    lio reN
+    jsp i [lnPtr:0]
+    dac reRec
+#ifndef VICTL_SCAN
+    jsp rePre
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxNo
+#endif
+    lio reRec
+    jsp i [getLine:0]
+    lac [LINEBUF]
+    dac reP1
+    dzm reLocs
+    jmp rxGo
+rxGf, lac i [RE_LAST]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxNo
+    lac reLoc2
+    dac reP1
+    dac reLocs
+// anchored: one try, at the start
+rxGo, lac i [RE_LAST]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxFast
+    lac reP1
+    dac reLoc1
+    dac reLp
+    lac [RE_LAST+2]
+    dac reEp
+    jsp reAdv
+    jmp i reX
+// a first character: a try only where it is
+rxFast, lac i [RE_LAST+2]
+    SKIP_NEXT_IF_SAME [RC_CHR]
+    jmp rxReg
+    lac i [RE_LAST+3]
+    dac rxC
+rxFL, lac i reP1
+    SKIP_NEXT_IF_SAME rxC
+    jmp rxFIc
+rxFTry, lac reP1
+    dac reLp
+    lac [RE_LAST+2]
+    dac reEp
+    jsp reAdv
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxHit
+rxFN, lac i reP1
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxNo
+    idx reP1
+    jmp rxFL
+rxFIc, dac raA
+    lac reIc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxFN
+    lac rxC
+    dac raB
+    jsp reCase
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxFTry
+    jmp rxFN
+rxHit, lac reP1
+    dac reLoc1
+    law 1
+    jmp i reX
+// otherwise a try at every place
+rxReg, lac reP1
+    dac reLp
+    lac [RE_LAST+2]
+    dac reEp
+    jsp reAdv
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxHit
+    lac i reP1
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxNo
+    idx reP1
+    jmp rxReg
+rxNo, cla
+    jmp i reX
+
+// rePre -- whether the record at reRec can match a program whose first
+// step is a character: the record holds that character, or with ignorecase
+// its other case. AC is 1 or 0; IO is clobbered.
+rePre, dac ppX
+    lac i [RE_LAST+2]
+    SKIP_NEXT_IF_SAME [RC_CHR]
+    jmp ppYes
+    lac reRec
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppNo
+    lac i reRec
+    and [REC_LEN]
+    add [1]
+    rar 1s
+    and [REC_LEN]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppNo
+    cma
+    dac ppN                 // minus the words, for isp
+    lac reRec
+    add [REC_HDR]
+    dac ppP
+    lac i [RE_LAST+3]
+    dac ppC
+    dac ppA
+    ral 9s
+    dac ppCh
+    dac ppAh
+    lac reIc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ppGo
+// ignorecase: a letter's other case too
+    lac ppC
+    ior [040]
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ppGo
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ppGo
+    lac ppC
+    xor [040]
+    dac ppA
+    ral 9s
+    dac ppAh
+    jmp ppAlt
+// a word at a time, both halves
+ppGo, lac i ppP
+    and [PK_LO]
+    SKIP_NEXT_IF_DIFFERENT ppC
+    jmp ppYes
+    lac i ppP
+    and [PK_HI]
+    SKIP_NEXT_IF_DIFFERENT ppCh
+    jmp ppYes
+    idx ppP
+    isp ppN
+    jmp ppGo
+ppNo, cla
+    jmp i ppX
+ppYes, law 1
+    jmp i ppX
+ppAlt, lac i ppP
+    and [PK_LO]
+    SKIP_NEXT_IF_DIFFERENT ppC
+    jmp ppYes
+    SKIP_NEXT_IF_DIFFERENT ppA
+    jmp ppYes
+    lac i ppP
+    and [PK_HI]
+    SKIP_NEXT_IF_DIFFERENT ppCh
+    jmp ppYes
+    SKIP_NEXT_IF_DIFFERENT ppAh
+    jmp ppYes
+    idx ppP
+    isp ppN
+    jmp ppAlt
+    jmp ppNo
+
+// reAdv -- 3.7's advance(lp, ep): whether the program from reEp matches
+// LINEBUF from reLp; at a match reLoc2 is where it ended. Each star pushes a
+// frame and tries its longest run first, then one shorter at each failure
+// after it, never back to reLocs, as 3.7's recursion does. braslist and
+// braelist (reBras, reKets) are set as the steps pass.
+// AC is 1 or 0; IO is clobbered.
+reAdv, dac raX
+    lac [GENBUF]
+    dac raSp
+raL, lac i reEp
+    dac raOp
+    idx reEp
+    lac raOp
+    add [raTab:RE_BANK]
+    dac raT
+    jmp i raT
+raTab, jmp raBad            // 0
+    jmp rxBra               // 1 CBRA
+    jmp raBad
+    jmp raBad
+    jmp rxDot               // 4 CDOT
+    jmp rxDotS              // 5 CDOT|STAR
+    jmp raBad
+    jmp raBad
+    jmp rxCcl               // 8 CCL
+    jmp rxCclS              // 9 CCL|STAR
+    jmp raBad
+    jmp raBad
+    jmp rxNcl               // 12 NCCL
+    jmp rxCclS              // 13 NCCL|STAR
+    jmp raBad
+    jmp raBad
+    jmp rxDol               // 16 CDOL
+    jmp rxEnd               // 17 CEOFC
+    jmp rxKet               // 18 CKET
+    jmp raBad
+    jmp rxChr               // 20 CCHR
+    jmp rxChrS              // 21 CCHR|STAR
+    jmp raBad
+    jmp raBad
+    jmp rxBrc               // 24 CBRC
+    jmp rxLet               // 25 CLET, and CBRC|STAR as 3.7 makes it
+    assert . - raTab == RC_NOPS, "raTab has a jump for each step"
+rxChr, lac i reLp
+    SKIP_NEXT_IF_SAME i reEp
+    jmp rxChI
+rxChY, idx reEp
+    idx reLp
+    jmp raL
+rxChI, dac raA
+    lac reIc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp raFail
+    lac i reEp
+    dac raB
+    jsp reCase
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxChY
+    jmp raFail
+rxDot, lac i reLp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp raFail
+    idx reLp
+    jmp raL
+rxDol, lac i reLp
+    SKIP_NEXT_IF_AC_ZERO
+    jmp raFail
+    jmp raL
+rxEnd, lac reLp
+    dac reLoc2
+    law 1
+    jmp i raX
+rxCcl, law 1
+    jmp rxCc
+rxNcl, cla
+rxCc, dac raAf
+    lac i reLp
+    dac raC
+    idx reLp
+    jsp reCcl
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp raFail
+    lac i reEp
+    add reEp
+    dac reEp
+    jmp raL
+rxBra, lac [reBras:RE_BANK]
+    jmp rxBk
+rxKet, lac [reKets:RE_BANK]
+rxBk, add i reEp
+    dac raT
+    idx reEp
+    lac reLp
+    dac i raT
+    jmp raL
+// .*: to the line's end
+rxDotS, lac reLp
+    dac raCur
+rxDS, lac i reLp
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxDSE
+    idx reLp
+    jmp rxDS
+rxDSE, idx reLp
+    jmp raStar
+// c*: as many as there are
+rxChrS, lac reLp
+    dac raCur
+rxCS, lac i reLp
+    SKIP_NEXT_IF_SAME i reEp
+    jmp rxCSI
+rxCSN, idx reLp
+    jmp rxCS
+rxCSI, dac raA
+    lac reIc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rxCSE
+    lac i reEp
+    dac raB
+    jsp reCase
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxCSN
+rxCSE, idx reLp
+    idx reEp
+    jmp raStar
+// [...]* and [^...]*
+rxCclS, lac reLp
+    dac raCur
+    law 1
+    dac raAf
+    lac raOp
+    SKIP_NEXT_IF_SAME [RC_CCL+RC_STAR]
+    dzm raAf
+rxCSL, lac i reLp
+    dac raC
+    idx reLp
+    jsp reCcl
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rxCSL
+    lac i reEp
+    add reEp
+    dac reEp
+    jmp raStar
+// \< and \>
+rxBrc, lac reLp
+    SKIP_NEXT_IF_DIFFERENT [LINEBUF]
+    jmp raL
+    lio i reLp
+    jsp reWord
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp raFail
+    lac reLp
+    sub [1]
+    dac raT
+    lio i raT
+    jsp reWord
+    SKIP_NEXT_IF_AC_ZERO
+    jmp raFail
+    jmp raL
+rxLet, lio i reLp
+    jsp reWord
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp raL
+    jmp raFail
+// a star's frame: its run's end, its start, the program after it
+raStar, lac raSp
+    sub [GENBUF+RA_FRAME*RA_FRAMES]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp raDeep
+    lac raSp
+    dac raT
+    lac reLp
+    dac i raT
+    idx raT
+    lac raCur
+    dac i raT
+    idx raT
+    lac reEp
+    dac i raT
+    idx raT
+    dac raSp
+// the top frame's run one shorter, and the rest of the program tried there
+raTry, lac raSp
+    sub [RA_FRAME]
+    dac raT
+    lac i raT
+    sub [1]
+    dac i raT
+    SKIP_NEXT_IF_DIFFERENT reLocs
+    jmp raPop
+    dac reLp
+    lac raT
+    add [2]
+    dac raT
+    lac i raT
+    dac reEp
+    jmp raL
+// a failure goes back to the newest star that can give up a character
+raFail, lac raSp
+    SKIP_NEXT_IF_DIFFERENT [GENBUF]
+    jmp raNo
+    sub [RA_FRAME]
+    dac raT
+    lac i raT
+    dac raA
+    idx raT
+    lac raA
+    sub i raT
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp raTry
+raPop, lac raSp
+    sub [RA_FRAME]
+    dac raSp
+    jmp raFail
+raNo, cla
+    jmp i raX
+raDeep, lac [mReCplx:RE_BANK]
+    jmp i [exErr:EX_BANK]
+raBad, lac [mReInt:RE_BANK]
+    jmp i [exErr:EX_BANK]
+    assert RA_FRAME*RA_FRAMES <= LB_SIZE+1, "the stars' frames fit GENBUF"
+
+// reCcl -- 3.7's cclass(set, c, af): with raAf 1 whether character raC is
+// in the class whose count word is at reEp, with raAf 0 whether it is not;
+// never for the line's end. raC is folded with ignorecase.
+// AC is 1 or 0; IO is clobbered.
+reCcl, dac ccX
+    lac raC
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp i ccX
+    lac reIc
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp cc1
+    lac raC
+    sub [CH_A]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp cc1
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp cc1
+    lac raC
+    ior [040]
+    dac raC
+cc1, lac reEp
+    dac ccS
+    lac i ccS
+    dac ccN
+    idx ccS
+ccL, lac ccN
+    sub [1]
+    dac ccN
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp ccNo
+    sub [2]
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp ccR
+ccOne, lac i ccS
+    and [RE_TRIM]
+    dac ccT
+    idx ccS
+    lac ccT
+    SKIP_NEXT_IF_DIFFERENT raC
+    jmp ccYes
+    jmp ccL
+// a-b: a range
+ccR, lac ccS
+    add [1]
+    dac ccT
+    lac i ccT
+    SKIP_NEXT_IF_SAME [CH_MINUS]
+    jmp ccOne
+    lac i ccS
+    and [RE_TRIM]
+    dac ccT2
+    lac raC
+    sub ccT2
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp ccSk
+    lac ccS
+    add [2]
+    dac ccT
+    lac i ccT
+    and [RE_TRIM]
+    sub raC
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp ccYes
+ccSk, lac ccS
+    add [3]
+    dac ccS
+    lac ccN
+    sub [2]
+    dac ccN
+    jmp ccL
+ccYes, lac raAf
+    jmp i ccX
+ccNo, lac raAf
+    xor [1]
+    jmp i ccX
+
+// reCase -- whether raA and raB, which differ, are one letter in its two
+// cases (3.7's same() with ignorecase). AC is 1 or 0; IO is preserved.
+reCase, dac rkX
+    lac raA
+    xor raB
+    SKIP_NEXT_IF_SAME [040]
+    jmp rkNo
+    lac raA
+    ior [040]
+    sub [CH_LA]
+    SKIP_NEXT_IF_AC_NOT_NEGATIVE
+    jmp rkNo
+    sub [0d26]
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rkNo
+    law 1
+    jmp i rkX
+rkNo, cla
+    jmp i rkX
+
+// reWord -- whether the character in IO is a word's: a letter, a digit or
+// _ (3.7's uletter and isdigit). AC is 1 or 0; IO is preserved.
+reWord, dac rwX
+    jsp i [isAlnum:EX_BANK]
+    SKIP_NEXT_IF_AC_ZERO
+    jmp i rwX
+    dio rwC
+    lac rwC
+    SKIP_NEXT_IF_SAME [CH_USCORE]
+    jmp rwNo
+    law 1
+    jmp i rwX
+rwNo, cla
+    jmp i rwX
+
+// reSearch -- 3.7's address() for / ? and \, the character in IO: the
+// expression after it compiled and remembered as the scanning one, then the
+// line that matches it from dot on, forward for /, else backward, round the
+// buffer's end when wrapscan is set.
+// AC is the line's number; IO is clobbered.
+reSearch, dac rsX
+    law 1
+    dac reOkNl
+    jsp reCompile
+    dac rsC
+    jsp i [notEmpty:EX_BANK]
+    lio [RE_SCAN]
+    jsp reSave
+    lac DOT
+    dac rsA
+rsL, lac rsC
+    SKIP_NEXT_IF_SAME [CH_SLASH]
+    jmp rsBack
+    lac rsA
+    add [1]
+    dac rsA
+    sub DOL
+    SKIP_NEXT_IF_AC_ZERO_OR_NEGATIVE
+    jmp rsBot
+    jmp rsTry
+rsBot, lac i [oWrapScan:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rsNoBot
+    dzm rsA
+    jmp rsTry
+rsBack, lac rsA
+    sub [1]
+    dac rsA
+    SKIP_NEXT_IF_AC_NEGATIVE
+    jmp rsTry
+    lac i [oWrapScan:EX_BANK]
+    SKIP_NEXT_IF_AC_NOT_ZERO
+    jmp rsNoTop
+    lac DOL
+    dac rsA
+rsTry, jsp i [brkChk:TERM_BANK]
+    dzm reGf
+    lio rsA
+    jsp reExec
+    SKIP_NEXT_IF_AC_ZERO
+    jmp rsHit
+    lac rsA
+    SKIP_NEXT_IF_SAME DOT
+    jmp rsL
+rsFail, lac [mFail:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rsHit, lac rsA
+    jmp i rsX
+rsNoBot, lac [mNoBot:RE_BANK]
+    jmp i [exErr:EX_BANK]
+rsNoTop, lac [mNoTop:RE_BANK]
+    jmp i [exErr:EX_BANK]
+
+rcX, 0
+rcEof, 0
+rcC, 0
+rcEp, 0
+rcLast, 0
+rcBrP, 0
+rcCnt, 0
+rcT, 0
+rpX, 0
+rvX, 0
+rvS, 0
+rvD, 0
+rvN, 0
+reX, 0
+reN, 0
+reP1, 0
+reRec, 0
+rxC, 0
+ppX, 0
+ppN, 0
+ppP, 0
+ppC, 0
+ppCh, 0
+ppA, 0
+ppAh, 0
+raX, 0
+raSp, 0
+raOp, 0
+raT, 0
+raCur, 0
+raA, 0
+raB, 0
+raC, 0
+raAf, 0
+ccX, 0
+ccS, 0
+ccN, 0
+ccT, 0
+ccT2, 0
+rkX, 0
+rwX, 0
+rwC, 0
+rsX, 0
+rsC, 0
+rsA, 0
+rcBrk,                      // compile's open \( numbers, 3.7's bracket
+    table NBRA, 0
+endloc
+
+// The matcher's state, 3.7's.
+reOkNl, 0                   // compile's oknl: a new line may end it
+reGf, 0                     // execute's gf: go on from reLoc2
+reIc, 0                     // ignorecase, for this match
+reLp, 0                     // advance's lp and ep: full addresses
+reEp, 0
+reLocs, 0                   // a star may not give back to here (3.7's locs)
+reLoc1, 0                   // the match: its first character
+reLoc2, 0                   //   and the one after it
+reBras,                     // where each \( ... \) started and ended
+    table NBRA, 0
+reKets,
+    table NBRA, 0
+reRhs,                      // the last replacement (subst.ac), a
+    table RHS_SIZE+1, 0     //   character a word, RE_QUOTE quoting one
+
+mReLetter, ascii "Regular expressions cannot be delimited by letters or digits"
+mNoScan,   ascii "No previous scan re|No previous scanning regular expression"
+mNoSubRe,  ascii "No previous substitute re|No previous substitute regular expression"
+mReBsl,    ascii "Badly formed re|Regular expression \134 must be followed by / or ?"
+mNoPrevRe, ascii "No previous re|No previous regular expression"
+mMissDelim, ascii "Missing closing delimiter@for regular expression"
+mReCplx,   ascii "Re too complex|Regular expression too complicated"
+mUnmOpen,  ascii "Unmatched \134(|More \134('s than \134)'s in regular expression"
+mAwash,    ascii "Awash in \134('s!|Too many \134('d subexressions in a regular expression"
+mExtraKet, ascii "Extra \134)|More \134)'s than \134('s in regular expression"
+mRhsAmp,   ascii "Replacement pattern contains &@- cannot use in re"
+mRhsDig,   ascii "Replacement pattern contains \134d@- cannot use in re"
+mIllStar,  ascii "Illegal *|Can't * a \134( ... \134) in regular expression"
+mBadCcl,   ascii "Bad character class|Empty character class '[]' or '[^]' cannot match"
+mMissBrk,  ascii "Missing ]"
+mNoNl,     ascii "No newlines in re's|Can't escape newlines into regular expressions"
+mBadRe,    ascii "Badly formed re|Missing closing delimiter for regular expression"
+mNoBot,    ascii "No match to BOTTOM|Address search hit BOTTOM without matching pattern"
+mNoTop,    ascii "No match to TOP|Address search hit TOP without matching pattern"
+mFail,     ascii "Fail|Pattern not found"
+mReInt,    ascii "Re internal error"
