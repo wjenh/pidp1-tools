@@ -1,21 +1,21 @@
 TECO
 // TECO for the PDP-1, Dan Murphy's editor rewritten in am1 with PDP-6 TECO's
 // command set of July 1965.
-// It can be used via telnetport 2030 or on the typewriter while sense switch 6 is on.
+// It can be used via telnet port 2030 or on the typewriter while sense switch 6 is on.
 //
 // It requires the PDP-1D's lai and lia, mul and div (muldiv=on), the BBN clock,
 // the Type 550 Microtape and the Type 23 drum for the E commands, and 16 banks of memory:
 //   bank 0:  the interpreter, startup, the idle loop, the clock code
-//   bank 1:  the console and the command-string reader,the paper tape, the line printer,
-//     the Type 62 unless built with  -DLPT_TYPE64=1, output to Microtape and EI EF EN /W /V (tapeout.ac);
+//   bank 1:  the console and the command-string reader, the paper tape, the line printer,
+//     the Type 62 unless built with -DLPT_TYPE64=1, output to Microtape and EI EF EN /W /V (tapeout.ac);
 //     the Type 340's list builder, and the reader's buffer in its last 512 words
 //   banks 2-7: the text buffer; 8-9 q-register text with the second set's
-//     data in bank 9's top 1,024 wordsx
+//     data in bank 9's top 1,024 words
 //   bank 10: the typing areas, the push-down list, and above it the second set's video terminal
 //   bank 11: the display list
 //   bank 12: the file system library with the Microtape's layer, and the E commands
-//   baml 13: their handles, descriptors and buffers and the display's tables
-//   bank 14: the second command set, PDP-11 TECOs, which sense switch 4
+//   bank 13: their handles, descriptors and buffers and the display's tables
+//   bank 14: the second command set, PDP-11 TECO's, which sense switch 4
 //     on at the greeting selects, its reader, skip, errors and commands
 //   bank 15: the Microtape's messages and EL's type-out, the greeting, the drum's layer of the
 //     library, the PDP-1 additions which are the drum as unit 9, /X, n/X, n/P and the
@@ -37,6 +37,9 @@ TECO
 #include <DCS/dcs2defs.ah>
 #include <CLOCK/clockdefs.ah>
 #include <MICROTAPE/microtape.ah>
+// The drum's volume is always given its tracks (DR_TRK0, teco.ah), and bank 15 has no room for
+// the library's tracks of 0.
+#define DR_FIXEDTRACKS 1
 #include <DRUM/drum.ah>
 #include "teco.ah"
 #if LPT_TYPE64

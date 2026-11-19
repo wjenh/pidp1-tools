@@ -10,12 +10,12 @@ A second command set, PDP-11 TECO, can be chosen, as can the VT100 split screen 
 
 ## 1. What it needs, and starting it
 
-TECO needs a pidp-mods PDP-1  with:
+TECO needs a pidp1-mods PDP-1 with:
 - muldiv and lailia enabled, the default;
 - all 16 banks of memory;
 - the BBN timesharing clock for `/@` and the timing of RUBOUT and the display;
 - DCS2 for the console over telnet, and/or the Soroban typewriter;
-- he paper tape reader and punch, the Type 62 line printer (or
+- the paper tape reader and punch, the Type 62 line printer (or
   the Type 64 if chosen at build time), the Type 340 display, Type 550 Microtape, and the Type 23 drum.
 
 To build it, type `make`.
@@ -30,13 +30,13 @@ Starting there clears everything.
 ```
 telnet <host> 2030
 ```
-If your typing does not echo until RETURN, change your telnet client setting to charactr mode.\
+If your typing does not echo until RETURN, change your telnet client setting to character mode.\
 TECO types a new line and `TECO PDP-1/PDP-6`, then waits for a command string.
 
 **On the Soroban typewriter**, turn sense switch 6 on.
 The telnet port is disabled, and TECO prints the greeting on the Soroban.
 Be sure the Soroban is started before TECO or you won't see the greeting.
-If VT100 split-screen mode is enablsd, the Soroban can't be selected.
+If VT100 split-screen mode is enabled, the Soroban can't be selected.
 
 **Typing a command string**:
 - Every character is echoed.
@@ -65,11 +65,11 @@ A push-down list overflow, a macro that calls itself without end or more than 10
 **Stopping a command.** Ctrl-C typed while a command string runs or when sense switch 3 turned on stops
 it as an error, `?`.
 A Ctrl-C typed after more than 128 characters have been typed ahead is seen
-only when TECO reads it, sense switch 3 always stops immedately.
+only when TECO reads it, sense switch 3 always stops immediately.
 Ctrl-C typed into a string is text.
 
 **Typing ahead** is safe.
-Keys typed while a command runs wait for the next read and nothing pasted over telnet is losts
+Keys typed while a command runs wait for the next read and nothing pasted over telnet is lost
 regardless of how much arrives at once.
 
 **Leaving.** `/G` (Ctrl-G) as a command ends the session.
@@ -236,7 +236,7 @@ with their code in octal below the line.
 
 ## 10. Files on Microtape and the drum
 
-A file has one or two names of up to six characters  separated by a blank.
+A file has one or two names of up to six characters separated by a blank.
 `u` is a drive, 1 to 8, or 9 for the drum.
 An optional unit, written o here, is the last one named.
 
@@ -404,10 +404,10 @@ and two of TECO-11's operating-system calls.
 `:EGDIR dev:$` lists a unit's directory and `:EGDEL file$` deletes a file.
 `EB` keeps the old file as `name.BAK` with the name cut to five characters.
 A file `EW` names that is already there is replaced only when the output is closed, so
-`EK` leaves it unchanges.
+`EK` leaves it unchanged.
 `Y` and `_` are refused with`?YCA` while output is open and the buffer holds text,
 unless `ED&2` is given.
-`EY` and `E_` yank regargless.
+`EY` and `E_` yank regardless.
 `P` writes a FORM after the page only when the page read ended at one, `^E`; `PW` always does.
 One input and one output are open at a time.
 
@@ -430,8 +430,8 @@ the character after the pointer is in reverse video or a reversed space at a lin
 While it is split the 340 is unused, as after `0W`, and it is re-enabled when the split ends.
 However, if disabled via the sense switch, it remains off.
 
-TECO cannot ask the terminal its size, so tell it if you want othen than 80 x 24.
-The screen is 80 x 24 by defult,until `m,1:W` sets the columns, 20 to 132,
+TECO cannot ask the terminal its size, so tell it if you want other than 80 x 24.
+The screen is 80 x 24 by default, until `m,1:W` sets the columns, 20 to 132,
 `m,2:W` sets the rows, 12 to 66 , set them before the split.
 `5,7:W` declares a VT100 if no terminal is declared; `4,0:W` for a VT100 or `8,0:W` for a VT102
 declares one without splitting, and `-1,0:W` reverts it.
@@ -453,7 +453,7 @@ The switch is read only at each greeting, as switch 4 is.
 While it is on, the console is telnet only, the 340 is unused the whole session,
 and switches 4, 5 and 6 are ignored.
 Switch 3 and Ctrl-C still break a running command.
-Full screeen mode can still be exited, `0,7:W`, and the terminal type changed, e.g.`-1,0:W`.
+Full screen mode can still be exited, `0,7:W`, and the terminal type changed, e.g.`-1,0:W`.
 Regardless, the 340 remains unused.
 
 Turned on during a session, switch 2 takes effect at the next session, but switch 6 is
@@ -470,7 +470,7 @@ and `EWPC:name/P` punches the check character after each FORM.
 
 **Left out** are TECO-11's second input and output streams, `EP`, `EA`, video terminals
 other than the VT100 and VT102, `ED&32` and `ET&2`, reverse paging, the log file, and the
-commands of TECO-10 and of particular operating systems except for the two staded above, `EZ`, `EQ).
+commands of TECO-10 and of particular operating systems except for the two stated above, `EZ`, `EQ`).
 Text is 7-bit ASCII, so `nI` and `n^Uq` take n modulo 128.
 
 **Where this TECO and TECO-11 differ**, aside from the 36-bit values, is in `ET`, `EO`, and

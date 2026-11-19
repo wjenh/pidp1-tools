@@ -70,7 +70,7 @@ ends without saving.
 **VT100 mode.** With switch 2 on, every telnet session gets PDP-11 TECO's commands and a split
 screen, the buffer in a window above the last 5 rows, which is the command window.\
 The greeting is `TECO PDP-1/PDP-11 VT100 mode`.\
-The terminal must be a VT100 enulation; xterm, PuTTY, MobaXterm support it, size 80 by 24 unless told
+The terminal must be a VT100 emulation; xterm, PuTTY, MobaXterm support it, size 80 by 24 unless told
 otherwise.
 
 While switch 2 is on, the console is telnet only, the Type 340 is not used, and switches 4, 5 and
